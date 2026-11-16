@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
   canViewPlatformStatus,
   ACTION_FORBIDDEN,
+  EVIDENCE_EXPORT_BLOCKED,
   UNASSIGNED_ACTION_BLOCKED,
   VIEWER_ACTION_BLOCKED,
   canAccessTenant,
@@ -13,6 +14,7 @@ import {
   canManageUsers,
   canManageUsersOf,
   canOperate,
+  evidenceExportBlockedReason,
   hasCustomerScope,
   isCentralAdmin,
   isPlatform,
@@ -189,4 +191,11 @@ test('플랫폼 상태: 중앙 관리 · 조치 권한이 있는 플랫폼 계�
   assert.equal(canViewPlatformStatus(tenant('ADMIN')), false);
   assert.equal(canViewPlatformStatus(tenant('OPERATOR')), false);
   assert.equal(canViewPlatformStatus(null), false);
+});
+
+test('근거 내려받기는 역할이 아니라 EXECUTE_ACTION 권한으로 판정한다 — 권한 없는 OPERATOR도 막는다(#488)', () => {
+  assert.equal(evidenceExportBlockedReason({ permissions: ['VIEW', 'EXECUTE_ACTION'] }), null);
+  assert.equal(evidenceExportBlockedReason({ permissions: ['VIEW'] }), EVIDENCE_EXPORT_BLOCKED);
+  assert.equal(evidenceExportBlockedReason({ permissions: [] }), EVIDENCE_EXPORT_BLOCKED);
+  assert.notEqual(evidenceExportBlockedReason(null), null);
 });

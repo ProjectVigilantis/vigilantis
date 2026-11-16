@@ -160,6 +160,7 @@ test('해제 후보는 서버 예정 시각을 KST 분 단위로 보이고, 지�
             ...detail,
             recommendations: [{ ...detail.recommendations[0], runbook_id: runbookId, expires_at: expiresAt }],
           },
+          audit: { kind: 'ready', items: [], truncated: false },
           assets: [],
         })));
 

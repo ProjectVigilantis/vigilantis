@@ -107,6 +107,17 @@ export function apiBaseUrl(): string {
   return (process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
 }
 
+export type EvidenceExportFormat = 'md' | 'json';
+
+/**
+ * 근거 내보내기 주소(#488 · PR #616). 화면은 `fetch`가 아니라 `<a>` 이동으로 받는다 — 서버가
+ * `Content-Disposition: attachment`로 파일명을 정하므로 CORS `expose_headers`를 넓히지 않아도 된다.
+ * 세션 쿠키(`__Host-vg_session`, SameSite=Lax)는 최상위 GET 이동에 실린다.
+ */
+export function evidenceExportUrl(incidentId: string, format: EvidenceExportFormat): string {
+  return `${apiBaseUrl()}/api/v1/incidents/${encodeURIComponent(incidentId)}/evidence/export?format=${format}`;
+}
+
 /** REST 오류 봉투({"error":{code,message,request_id}})를 담은 typed error. */
 export class ApiError extends Error {
   readonly httpStatus: number;
@@ -287,9 +298,15 @@ export function createReadApi(transport: ApiTransport) {
       return request<AssetCostsResponse>(`/costs/by-asset-type${query}`, undefined, transport);
     },
 
-    /** 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)이 부른다. 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. */
-    getAuditEvents(query: { since?: string; cursor?: string; limit?: number } = {}): Promise<AuditEventsResponse> {
+    /**
+     * 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)과 인시던트 상세(app/incidents/[id], #622)가 부른다.
+     * 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. 범위 밖 `incident_id`는 404가 아니라 빈 목록이다.
+     */
+    getAuditEvents(
+      query: { incident_id?: string; since?: string; cursor?: string; limit?: number } = {},
+    ): Promise<AuditEventsResponse> {
       const params = new URLSearchParams();
+      if (query.incident_id !== undefined) params.set('incident_id', query.incident_id);
       if (query.since !== undefined) params.set('since', query.since);
       if (query.cursor !== undefined) params.set('cursor', query.cursor);
       if (query.limit !== undefined) params.set('limit', String(query.limit));

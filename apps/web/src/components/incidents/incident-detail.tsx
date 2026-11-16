@@ -11,7 +11,10 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
 import { TIP_ANCHOR, TipBox } from '@/components/admin-dashboard/chart-parts';
-import { useOperateBlockedReason } from '@/components/auth/session-provider';
+import {
+  useEvidenceExportBlockedReason,
+  useOperateBlockedReason,
+} from '@/components/auth/session-provider';
 import { CloseIncidentDialog } from '@/components/incidents/close-incident-dialog';
 import { CopyButton } from '@/components/copy-button';
 import { Row } from '@/components/detail-row';
@@ -37,8 +40,18 @@ import {
   preMitigationRecordNote,
 } from '@/lib/auto-isolation-notice';
 import { appendTransition, latchAgentWaitAt } from '@/lib/realtime-events';
-import { newIdempotencyKey } from '@/lib/api/client';
+import { actorLabel } from '@/lib/activity-log';
+import { evidenceExportUrl, newIdempotencyKey } from '@/lib/api/client';
 import { isTerminalStatus } from '@/lib/execution-status';
+import {
+  GUARDRAIL_STEP_LABELS,
+  UNCONFIRMED,
+  executionRows,
+  latestResolution,
+  startedByLabel,
+  type ExecutionRow,
+  type IncidentAudit,
+} from '@/lib/incident-investigation';
 import { closureAction, closureBlockedReason, RESOLUTION_LABELS } from '@/lib/incident-closure';
 import { proposalButtons } from '@/lib/proposal-buttons';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
@@ -91,32 +104,109 @@ const FAILURE_REASON_NOTICES: Partial<Record<AnalysisFailureReason, string>> = {
   SOURCE_ADDRESS_UNSUPPORTED: 'IPv6 출발지는 NACL 차단을 지원하지 않습니다. 확인 뒤 종료 처리로 닫습니다.',
 };
 
-/** 종료 상태로 분석 성공·실패를 추정하지 않는다. 저장된 분석 결과는 종료 후에도 보여 준다. */
+/**
+ * 분석 결과 — 서버가 계산해 저장한 값(`analysis_result`)이다. AI 서술(`summary_lines`)과 구역을 나눈다(#622 해석 5).
+ * 종료 상태로 분석 성공·실패를 추정하지 않는다. 저장된 분석 결과는 종료 후에도 보여 준다. FINOPS는 언제나 null이라 그리지 않는다.
+ */
+function AnalysisArea({ incident }: { incident: IncidentResponse }) {
+  const result = incident.analysis_result;
+  if (result === null) return null;
+  const notice = result.failure_reason !== null ? FAILURE_REASON_NOTICES[result.failure_reason] : undefined;
+  return (
+    <Section title="분석 결과">
+      <p className="text-sm">{ANALYSIS_LABELS[result.status]}</p>
+      {notice !== undefined ? <p className="text-sm">{notice}</p> : null}
+      {result.guardrail_rejections.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {result.guardrail_rejections.map((rejection, i) => (
+            <li key={`${rejection.runbook_id}:${i}`}>
+              <Row label={RUNBOOK_LABELS[rejection.runbook_id]}>
+                {GUARDRAIL_STEP_LABELS[rejection.failed_step]} 거절
+                {rejection.reason_code !== null ? (
+                  <code className="text-muted-foreground ml-2 font-mono text-xs">{rejection.reason_code}</code>
+                ) : null}
+              </Row>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </Section>
+  );
+}
+
+/** AI 요약 3줄. 분석 상태는 위 「분석 결과」가 말하므로 여기서는 서술만 보인다. */
 function SummaryLines({ incident }: { incident: IncidentResponse }) {
   if (incident.summary_lines.length === 0) {
-    const reason = incident.analysis_result?.failure_reason;
-    const notice = reason != null ? FAILURE_REASON_NOTICES[reason] : undefined;
     return (
-      <>
-        <p className="text-muted-foreground text-sm">
-          {incident.analysis_result != null ? ANALYSIS_LABELS[incident.analysis_result.status]
-            : incident.status === 'ANALYZING' ? '분석 중' : '저장된 판단 근거가 없습니다.'}
-        </p>
-        {notice !== undefined ? <p className="text-sm">{notice}</p> : null}
-      </>
+      <p className="text-muted-foreground text-sm">
+        {incident.status === 'ANALYZING' ? '분석 중' : '저장된 판단 근거가 없습니다.'}
+      </p>
+    );
+  }
+  return (
+    <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm">
+      {incident.summary_lines.map((line, i) => (
+        <li key={i}>{line}</li>
+      ))}
+    </ol>
+  );
+}
+
+/**
+ * 위협 맥락 — 저장된 위협 관측 1건에서 온다. null은 문맥 부재이지 위협 없음 판정이 아니라 그때는 행을 두지 않는다.
+ * SSH의 `source_ip`는 관측된 출발지이고, OPEN_IP의 `exposed_cidr`는 보안 그룹이 연 범위라 공격자 IP가 아니다.
+ */
+function ThreatContextRows({ incident }: { incident: IncidentResponse }) {
+  const context = incident.threat_context;
+  if (context === null) return null;
+  if (context.event_type === 'SSH_BRUTE_FORCE') {
+    return (
+      <Row label="관측된 출발지">
+        <code className="font-mono text-xs">{context.source_ip}</code>
+      </Row>
     );
   }
   return (
     <>
-      {incident.analysis_result != null ? (
-        <p className="text-muted-foreground text-sm">{ANALYSIS_LABELS[incident.analysis_result.status]}</p>
-      ) : null}
-      <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm">
-        {incident.summary_lines.map((line, i) => (
-          <li key={i}>{line}</li>
-        ))}
-      </ol>
+      <Row label="허용 범위">
+        <code className="font-mono text-xs">{context.exposed_cidr}</code>
+      </Row>
+      <p className="text-muted-foreground text-xs">보안 그룹이 연 범위이며 공격자 IP가 아닙니다.</p>
     </>
+  );
+}
+
+/**
+ * 근거 내려받기(#488 · PR #616). 서버가 `EXECUTE_ACTION`으로 거르므로 그 권한이 없으면 버튼을 비활성으로 두고
+ * 이유를 적는다 — 숨기면 조회 전용 계정은 근거 파일이 있다는 것 자체를 모른다.
+ *
+ * `fetch` + Blob이 아니라 `<a>` 이동으로 받는다. 서버의 `Content-Disposition: attachment`가 파일명
+ * (`incident-{id}-evidence.{md|json}`)을 정하므로 CORS `expose_headers`를 넓히지 않는다. 다른 출처의 `download`
+ * 속성은 브라우저가 무시하지만 첨부 응답이라 화면은 그대로 남는다. 오류(401 · 403 · 413)는 JSON 본문이라 새 탭에 연다.
+ */
+function EvidenceExport({ incidentId }: { incidentId: string }) {
+  const blocked = useEvidenceExportBlockedReason();
+  const formats = [
+    { format: 'md', label: 'Markdown 내려받기' },
+    { format: 'json', label: 'JSON 내려받기' },
+  ] as const;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {formats.map(({ format, label }) =>
+        blocked === null ? (
+          <Button key={format} asChild variant="outline" size="sm">
+            <a href={evidenceExportUrl(incidentId, format)} download target="_blank" rel="noopener noreferrer">
+              {label}
+            </a>
+          </Button>
+        ) : (
+          <Button key={format} type="button" variant="outline" size="sm" disabled>
+            {label}
+          </Button>
+        ),
+      )}
+      {blocked !== null ? <span className="text-muted-foreground text-xs">{blocked}</span> : null}
+    </div>
   );
 }
 
@@ -396,14 +486,20 @@ function AgentWaitNotice({
  * 복구 버튼은 **항목별 `available_recovery_runbook_ids`로만** 판정한다(§4.5) — 이 목록이 비어 있다고
  * 비가역인 것이 아니라 "백업 기반 롤백이 붙어 있느냐"만 나타낸다. 요청 구성·멱등 키는 ACT-001
  * 모달(§4.6) 소관이라 여기서는 모달을 열기만 한다.
+ *
+ * 요청 주체 · 대상은 감사 목록의 예약 기록(`ACTION_EXECUTION_STARTED`)에서만 온다(#544 C · #622 해석 4). 기록이 없는
+ * 실행이나 감사 목록을 읽지 못한 경우는 "확인 안 됨"이며, 추천의 `target_arn`이나 `subject_arn`으로 채우지 않는다.
+ * 예약 기록은 실행 결과가 아니다 — 결과는 배지(`status`)로만 본다(해석 1). 원복 자식은 원 실행 카드 안에 묶는다.
  */
 function ExecutionsArea({
   incident,
+  audit,
   locked,
   roleBlocked,
   onRecover,
 }: {
   incident: IncidentResponse;
+  audit: IncidentAudit;
   /** `ACTION_IN_PROGRESS`면 같은 Incident의 실행 버튼을 전부 비활성화한다(§4.5). */
   locked: boolean;
   /** 역할이 조치를 막는 이유(조회 전용 · 역할 미확인). null이면 누를 수 있다(#492 PR 2). */
@@ -411,42 +507,99 @@ function ExecutionsArea({
   onRecover: (runbookId: RunbookId, originExecutionId: string) => void;
 }) {
   if (incident.executions.length === 0) return null;
+  const rows = executionRows(incident.executions, audit.kind === 'ready' ? audit.items : []);
 
   return (
     <Section title="수행된 조치">
+      {audit.kind === 'failed' ? (
+        <p className="text-muted-foreground text-xs">감사 기록을 읽지 못해 요청 주체와 대상을 확인하지 못했습니다.</p>
+      ) : audit.truncated ? (
+        <p className="text-muted-foreground text-xs">감사 기록이 많아 최근 {audit.items.length}건만 읽었습니다.</p>
+      ) : null}
       <ul className="flex flex-col gap-2">
-        {incident.executions.map((execution) => (
-          <li key={execution.execution_id}>
+        {rows.map((row) => (
+          <li key={row.execution.execution_id}>
             <Card className="gap-2 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-medium">{RUNBOOK_LABELS[execution.runbook_id]}</span>
-                <ExecutionStatusBadge value={execution.status} />
-              </div>
-              <p className="text-muted-foreground text-xs">
-                갱신 {formatKst(execution.updated_at)}
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                {execution.available_recovery_runbook_ids.map((runbookId) => (
-                  <Button
-                    key={runbookId}
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={locked || roleBlocked !== null}
-                    onClick={() => onRecover(runbookId, execution.execution_id)}
-                  >
-                    {RUNBOOK_LABELS[runbookId]}
-                  </Button>
-                ))}
-                {roleBlocked !== null && execution.available_recovery_runbook_ids.length > 0 ? (
-                  <span className="text-muted-foreground text-xs">{roleBlocked}</span>
-                ) : null}
-              </div>
+              <ExecutionBody row={row} locked={locked} roleBlocked={roleBlocked} onRecover={onRecover} />
+              {row.recoveries.length > 0 ? (
+                <ul className="flex flex-col gap-2 border-l-2 pl-3">
+                  {row.recoveries.map((child) => (
+                    <li key={child.execution.execution_id} className="flex flex-col gap-2">
+                      <span className="text-muted-foreground text-xs">원복</span>
+                      <ExecutionBody row={child} locked={locked} roleBlocked={roleBlocked} onRecover={onRecover} />
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </Card>
           </li>
         ))}
       </ul>
     </Section>
+  );
+}
+
+/** 실행 한 건의 머리 · 기록 · 복구 버튼. 원 실행과 원복 자식이 같은 모양을 쓴다. */
+function ExecutionBody({
+  row,
+  locked,
+  roleBlocked,
+  onRecover,
+}: {
+  row: ExecutionRow;
+  locked: boolean;
+  roleBlocked: string | null;
+  onRecover: (runbookId: RunbookId, originExecutionId: string) => void;
+}) {
+  const { execution, started } = row;
+  const hold = execution.verification_hold ?? null;
+  return (
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-medium">{RUNBOOK_LABELS[execution.runbook_id]}</span>
+        <ExecutionStatusBadge value={execution.status} />
+      </div>
+      <div className="flex flex-col gap-1">
+        <Row label="요청 주체">{started === null ? UNCONFIRMED : startedByLabel(started)}</Row>
+        <Row label="대상">
+          {started === null ? (
+            UNCONFIRMED
+          ) : (
+            <code className="font-mono text-xs break-all">{started.target_arn}</code>
+          )}
+        </Row>
+        {/* 예약 시각은 실행 행이 만들어진 시각이며 AWS 조치가 시작된 시각이 아니다(PR #629). */}
+        <Row label="예약">{formatKst(execution.created_at)}</Row>
+        <Row label="완료">{execution.finished_at === null ? '기록 없음' : formatKst(execution.finished_at)}</Row>
+        {hold !== null ? (
+          // UNVERIFIED는 실패가 아니라 결과 확인 불가다. 사유는 가드레일 ④와 같은 `PRECHECK_*` 표다(#622 해석 2).
+          <Row label="결과 확인 보류">
+            <code className="font-mono text-xs">{hold.reason_code}</code>
+            <span className="text-muted-foreground ml-2 text-xs">
+              조회 실패 {hold.attempts}회 · 마지막 {formatKst(hold.last_failed_at)}
+            </span>
+          </Row>
+        ) : null}
+      </div>
+      <p className="text-muted-foreground text-xs">갱신 {formatKst(execution.updated_at)}</p>
+      {execution.available_recovery_runbook_ids.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {execution.available_recovery_runbook_ids.map((runbookId) => (
+            <Button
+              key={runbookId}
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={locked || roleBlocked !== null}
+              onClick={() => onRecover(runbookId, execution.execution_id)}
+            >
+              {RUNBOOK_LABELS[runbookId]}
+            </Button>
+          ))}
+          {roleBlocked !== null ? <span className="text-muted-foreground text-xs">{roleBlocked}</span> : null}
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -525,10 +678,13 @@ function ProposalActions({
 
 export function IncidentDetail({
   incident,
+  audit,
   assets,
   openExecutionId = null,
 }: {
   incident: IncidentResponse;
+  /** 이 인시던트의 감사 기록(`GET /audit-events?incident_id=`). 읽지 못해도 화면은 뜬다(app/incidents/[id]/page.tsx). */
+  audit: IncidentAudit;
   /**
    * `GET /assets`의 수집 목록. 조회가 실패하면 빈 배열이다 — 인시던트 화면은 그래도 떠야 한다.
    * 두 곳이 조인해 쓴다: `subject_arn`(§4.5 대상 자산 블록)과 각 제안의 `target_arn`
@@ -674,6 +830,7 @@ export function IncidentDetail({
     incident.status === 'ACTION_IN_PROGRESS' ||
     (shownOutcome !== null && !isTerminalStatus(shownOutcome.execution.status));
   const subjectHref = subject ? `/monitoring?asset=${encodeURIComponent(subject.arn)}` : null;
+  const resolvedBy = audit.kind === 'ready' ? latestResolution(audit.items) : null;
 
   function openAction(candidates: ActionCandidate[]) {
     setRequest({
@@ -749,14 +906,18 @@ export function IncidentDetail({
             </code>
             <CopyButton value={incident.subject_arn} label="ARN 복사" />
           </span>
+          <ThreatContextRows incident={incident} />
         </Card>
       </Section>
 
-      <Section title="판단 근거">
+      <AnalysisArea incident={incident} />
+
+      <Section title="판단 근거 (AI 요약)">
         <SummaryLines incident={incident} />
       </Section>
 
       <Section title="근거 데이터">
+        <EvidenceExport incidentId={incident.incident_id} />
         {incident.evidence_ids.length === 0 ? (
           <EmptyState message="표시할 근거 데이터가 없습니다." />
         ) : (
@@ -774,6 +935,7 @@ export function IncidentDetail({
 
       <ExecutionsArea
         incident={incident}
+        audit={audit}
         locked={locked}
         roleBlocked={roleBlocked}
         onRecover={openRecovery}
@@ -843,6 +1005,8 @@ export function IncidentDetail({
               {incident.resolution === null ? '기록 없음' : RESOLUTION_LABELS[incident.resolution]}
             </Row>
             <Row label="종료 시각">{incident.resolved_at === null ? '기록 없음' : formatKst(incident.resolved_at)}</Row>
+            {/* 종료 처리자는 감사 기록(`INCIDENT_RESOLVED`)에만 있다. 감사 기록 도입 전 종료나 읽기 실패는 "확인 안 됨"이다. */}
+            <Row label="종료 처리">{resolvedBy === null ? UNCONFIRMED : actorLabel(resolvedBy.actor)}</Row>
             <Row label="종료 사유"><span className="whitespace-pre-wrap break-words">{incident.resolution_note ?? '기록 없음'}</span></Row>
             <p className="text-muted-foreground text-xs">종료 판단은 위협 해소·차단 해제·최적화 완료를 뜻하지 않습니다.</p>
           </div>

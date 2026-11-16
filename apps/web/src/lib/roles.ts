@@ -167,6 +167,20 @@ export function canViewPlatformStatus(user: AccessSubject | null | undefined): b
   return isCentralAdmin(user) || canOperate(user);
 }
 
+/** 근거 내려받기 비활성 문구. */
+export const EVIDENCE_EXPORT_BLOCKED = '조치 실행 권한이 있는 계정만 근거를 내려받을 수 있습니다.';
+
+/**
+ * 근거 내려받기(#488)를 막는 이유. 서버는 역할이 아니라 기능 권한 `EXECUTE_ACTION`으로 거른다 — 조치 실행 권한을
+ * 받지 못한 OPERATOR도 `canOperate`는 통과하므로 `/me`의 `permissions`를 본다. 내려받을 수 있으면 null.
+ */
+export function evidenceExportBlockedReason(
+  user: Pick<CurrentUserResponse, 'permissions'> | null | undefined,
+): string | null {
+  if (!user) return ROLE_PENDING;
+  return user.permissions.includes('EXECUTE_ACTION') ? null : EVIDENCE_EXPORT_BLOCKED;
+}
+
 /** 조치 버튼을 막는 이유. 누를 수 있으면 null. */
 export function operateBlockedReason(user: AccessSubject | null | undefined): string | null {
   if (canOperate(user)) return null;
