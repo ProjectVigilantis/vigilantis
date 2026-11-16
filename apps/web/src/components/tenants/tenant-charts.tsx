@@ -5,6 +5,8 @@
 // 고객이 수백 곳이어도 높이가 그대로다(분류 줄 수 고정 · 2026-10-29 개편 — 종전 고객마다 한 줄 막대는 고객 수만큼 길어졌다).
 // 어느 고객사인지는 고객사 목록에서 본다(대시보드는 숫자와 그래프만 둔다).
 // 2026-11-03 PM 지시: 정상 · 확인 전 · 오래됨 줄을 빼고 API 이상 호출 줄을 더했다. 미납 점은 주황.
+// 담당 그룹 없음(#572 8번, 11/3 결정): 중앙 관리계정에게만 센다. `group_id`가 null인 고객사이며 그룹에 넣으면 빠진다.
+// GET /tenants?unassigned_only=true와 같은 집합이다. 대시보드는 이미 전체 목록을 받으므로 따로 부르지 않는다.
 
 import { BarRows, type BarRow } from '@/components/admin-dashboard/chart-parts';
 import { connectionPoints, type ConnectionState } from '@/lib/admin-dashboard';
@@ -25,7 +27,13 @@ export interface ApiOverCall {
   /** 기준을 넘은 고객사 이름. 조회에 실패했으면 null. */
   tenants: readonly string[] | null;
   windowHours: number;
-  limit: number | null;
+  /** 과다 호출 기준이 정해진 고객사가 한 곳이라도 있는가. 기준은 고객사마다 다르고 서버가 정한다. */
+  judged: boolean;
+}
+
+/** 담당 그룹이 없는 고객사 수(`group_id` null). */
+export function unassignedTenantCount(tenants: readonly TenantListItem[]): number {
+  return tenants.filter((t) => t.group_id === null).length;
 }
 
 export function needCheckCounts(tenants: readonly TenantListItem[], nowMs: number): Record<CheckState, number> {
@@ -40,11 +48,14 @@ export function NeedCheckRows({
   tenants,
   nowMs,
   apiOverCall,
+  showUnassigned = false,
 }: {
   tenants: readonly TenantListItem[];
   nowMs: number;
   /** 없으면(플랫폼 상태를 받지 않는 계정) API 이상 호출 줄을 그리지 않는다. */
   apiOverCall?: ApiOverCall;
+  /** 담당 그룹 없음 줄을 그린다(중앙 관리계정). 관리자 직원계정은 미배정 고객사를 받지 않으므로 그리지 않는다. */
+  showUnassigned?: boolean;
 }) {
   const counts = needCheckCounts(tenants, nowMs);
   const rows: BarRow[] = CHECK_STATES.map((s) => ({
@@ -54,27 +65,39 @@ export function NeedCheckRows({
     dot: STATE[s].dot,
     title: `${STATE[s].label} ${counts[s]}곳 · ${STATE[s].hint}`,
   }));
-  if (apiOverCall !== undefined && apiOverCall.tenants !== null) {
+  if (showUnassigned) {
+    const n = unassignedTenantCount(tenants);
+    rows.push({
+      key: 'UNASSIGNED',
+      label: '담당 그룹 없음',
+      value: n,
+      dot: 'bg-status-warning',
+      title: `담당 그룹 없음 ${n}곳 · 맡은 관리자 직원계정이 없음, 그룹에 넣으면 빠짐`,
+    });
+  }
+  // 기준이 없으면(미판정) 줄을 그리지 않는다. 0을 그리면 "판정했더니 0곳"으로 읽힌다(PR #644 리뷰).
+  if (apiOverCall !== undefined && apiOverCall.tenants !== null && apiOverCall.judged) {
     const names = apiOverCall.tenants;
     rows.push({
       key: 'API_OVER_CALL',
       label: 'API 이상 호출',
       value: names.length,
       dot: 'bg-status-critical',
-      title:
-        apiOverCall.limit === null
-          ? '과다 호출 기준이 없어 판정하지 않음'
-          : `최근 ${apiOverCall.windowHours}시간 중 시간당 ${apiOverCall.limit.toLocaleString('ko-KR')}건 넘은 고객사 ${names.length}곳${
-              names.length > 0 ? `: ${names.join(', ')}` : ''
-            }`,
+      title: `최근 ${apiOverCall.windowHours}시간 중 고객사별 기준을 넘은 고객사 ${names.length}곳${
+        names.length > 0 ? `: ${names.join(', ')}` : ''
+      }`,
     });
   }
   return (
     <>
       <BarRows rows={rows} labelWidth={112} />
-      {apiOverCall !== undefined && apiOverCall.tenants === null ? (
+      {apiOverCall === undefined ? null : apiOverCall.tenants === null ? (
         <p role="status" className="text-muted-foreground text-xs">
           고객사 API 호출 집계를 불러오지 못해 API 이상 호출은 빠졌습니다.
+        </p>
+      ) : !apiOverCall.judged ? (
+        <p role="status" className="text-muted-foreground text-xs">
+          과다 호출 기준이 없어 API 이상 호출은 판정하지 않았습니다.
         </p>
       ) : null}
     </>

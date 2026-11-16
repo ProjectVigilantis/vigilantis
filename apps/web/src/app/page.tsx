@@ -14,9 +14,8 @@ import { AdminDashboardView } from '@/components/admin-dashboard/admin-dashboard
 import { BusinessUnavailable } from '@/components/business-unavailable';
 import { CustomerDashboardPage } from '@/components/customer-dashboard/customer-dashboard-page';
 import { ErrorState } from '@/components/error-state';
-import { orError, orNull, serverApi } from '@/lib/api/server';
+import { orNull, serverApi } from '@/lib/api/server';
 import { businessOpen } from '@/lib/home-path';
-import { scopeApiUsage } from '@/lib/platform-status';
 import { canManageUsers, canViewPlatformStatus, isCentralAdmin, isPlatform, isUnassignedManager } from '@/lib/roles';
 import { unstable_rethrow } from 'next/navigation';
 
@@ -25,7 +24,7 @@ export default async function DashboardPage() {
   const renderedAt = new Date().toISOString();
   // 세션 쿠키만 실어 부르고, 401이면 로그인으로 redirect한다(lib/api/server.ts).
   const api = await serverApi();
-  const { getMe, getTenants, getUsers, getIncidents, getPlatformStatus } = api;
+  const { getMe, getTenants, getUsers, getIncidents, getPlatformOverview } = api;
   // 담당 고객이 없는 고객 담당자에게는 업무 데이터를 읽지 않고 배정 없음을 알린다(lib/home-path.ts `businessOpen`).
   // 고객사 계정은 고객사 대시보드를 본다(2026-11-03). 받는 데이터의 범위는 서버가 정한다.
   // 확인 실패도 업무 조회로 넘어가지 않는다.
@@ -39,9 +38,9 @@ export default async function DashboardPage() {
   if (!businessOpen(user)) return <BusinessUnavailable unassigned={isUnassignedManager(user)} />;
   if (!isPlatform(user)) return <CustomerDashboardPage api={api} renderedAt={renderedAt} />;
 
-  // 플랫폼 상태는 중앙 관리 권한 또는 조치 권한이 있는 플랫폼 계정이 본다(lib/roles.ts `canViewPlatformStatus`).
-  // 실패(404 = API 없음 포함)해도 대시보드는 뜬다.
-  const platformPromise = canViewPlatformStatus(user) ? orError(getPlatformStatus()) : null;
+  // 플랫폼 상태는 중앙 관리계정만 본다(lib/roles.ts `canViewPlatformStatus`, 서버 require_central_admin). 그 밖은 부르지 않는다 —
+  // 부르면 403이 자동 갱신마다 활동 로그에 쌓인다(#589). 실패해도 대시보드는 뜬다.
+  const platformPromise = canViewPlatformStatus(user) ? orNull(getPlatformOverview()) : undefined;
   // 고객사 직원 목록은 중앙 관리계정만 읽는다(`canManageUsers`). 고객 담당자는 부르지 않는다(undefined = 볼 수 없음) —
   // 부르면 자동 갱신 · 실시간 재조회마다 403이 활동 로그에 쌓인다(#589).
   const usersPromise = canManageUsers(user) ? orNull(getUsers()) : undefined;
@@ -55,12 +54,7 @@ export default async function DashboardPage() {
   }
   const users = await usersPromise;
   const incidents = await incidentsPromise;
-  const platform = platformPromise === null ? undefined : await platformPromise;
-  // 중앙 관리계정이 아니면 고객사 API 호출을 담당 고객사로 좁힌다(다른 고객사 이름 · 건수가 보이지 않게).
-  if (platform?.value && !isCentralAdmin(user)) {
-    const ids = tenants.tenants.map((t) => t.tenant_id);
-    platform.value = { ...platform.value, api_usage: scopeApiUsage(platform.value.api_usage, ids) };
-  }
+  const platform = await platformPromise;
 
   return (
     <AdminDashboardView
@@ -68,7 +62,8 @@ export default async function DashboardPage() {
       users={users == null ? users : users.items}
       incidents={incidents === null ? null : incidents.items}
       renderedAt={renderedAt}
-      platform={platform === undefined ? undefined : { status: platform.value, error: platform.error }}
+      platform={platform}
+      showUnassigned={isCentralAdmin(user)}
     />
   );
 }

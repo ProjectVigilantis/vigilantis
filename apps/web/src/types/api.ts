@@ -416,8 +416,8 @@ export interface ExecutionSummaryItem {
   status: ExecutionStatus;
   /** 관제자 복구 조치 — 롤백 3종만 온다. */
   available_recovery_runbook_ids: RollbackRunbookId[];
-  /** 보류가 없으면 null. UNVERIFIED면 반드시 있고 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다(#249). */
-  verification_hold?: ExecutionVerificationHold | null;
+  /** 키는 항상 오고, 보류가 없으면 null. UNVERIFIED면 반드시 있고 SUCCESS·ROLLBACK_INITIATED에는 오지 않는다(#249). */
+  verification_hold: ExecutionVerificationHold | null;
   /** 실행 행 생성(예약) 시각. AWS 조치의 실제 시작 시각이 아니다. */
   created_at: IsoDateTime;
   /** 기록된 완료 시각. null은 기록 부재이며 결과는 status로 판정한다. */

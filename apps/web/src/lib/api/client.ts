@@ -27,6 +27,7 @@ import type {
   MetricsTimeseriesResponse,
   NotificationsResponse,
   PaginationParams,
+  PlatformOverviewResponse,
   ResolutionJudgement,
   SignupRequestAccepted,
   SignupRequestApproveRequest,
@@ -64,7 +65,6 @@ import type {
 
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
 import { navigateToLogin } from '../auth-redirect.ts';
-import type { PlatformStatusResponse } from '../platform-status.ts';
 import type { ThreatEventsResponse, ThreatRangeDays } from '../threat-events.ts';
 
 /**
@@ -105,6 +105,17 @@ export const DEFAULT_API_BASE_URL = 'http://localhost:8000';
  */
 export function apiBaseUrl(): string {
   return (process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
+}
+
+export type EvidenceExportFormat = 'md' | 'json';
+
+/**
+ * 근거 내보내기 주소(#488 · PR #616). 화면은 `fetch`가 아니라 `<a>` 이동으로 받는다 — 서버가
+ * `Content-Disposition: attachment`로 파일명을 정하므로 CORS `expose_headers`를 넓히지 않아도 된다.
+ * 세션 쿠키(`__Host-vg_session`, SameSite=Lax)는 최상위 GET 이동에 실린다.
+ */
+export function evidenceExportUrl(incidentId: string, format: EvidenceExportFormat): string {
+  return `${apiBaseUrl()}/api/v1/incidents/${encodeURIComponent(incidentId)}/evidence/export?format=${format}`;
 }
 
 /** REST 오류 봉투({"error":{code,message,request_id}})를 담은 typed error. */
@@ -268,9 +279,13 @@ export function createReadApi(transport: ApiTransport) {
       return request<UsersResponse>('/users', undefined, transport);
     },
 
-    /** 플랫폼 상태(중앙 관리계정). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/platform-status.ts). */
-    getPlatformStatus(): Promise<PlatformStatusResponse> {
-      return request<PlatformStatusResponse>('/platform/status', undefined, transport);
+    /**
+     * 플랫폼 상태 · 고객사별 API 호출 통계(중앙 관리계정 전용, 그 밖은 403). `hours`는 호출 통계 조회 기간(시간)이며
+     * 생략하면 쿼리를 붙이지 않아 서버 기본값(`API_USAGE_DEFAULT_WINDOW_HOURS` = 24)을 쓴다.
+     */
+    getPlatformOverview(query: { hours?: number } = {}): Promise<PlatformOverviewResponse> {
+      const suffix = query.hours === undefined ? '' : `?hours=${query.hours}`;
+      return request<PlatformOverviewResponse>(`/platform/overview${suffix}`, undefined, transport);
     },
 
     /** 위협 이벤트 목록(고객사 대시보드 · 로그 화면). 계약은 types/api.ts `ThreatEventsResponse`(#572 10번). */
@@ -287,9 +302,15 @@ export function createReadApi(transport: ApiTransport) {
       return request<AssetCostsResponse>(`/costs/by-asset-type${query}`, undefined, transport);
     },
 
-    /** 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)이 부른다. 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. */
-    getAuditEvents(query: { since?: string; cursor?: string; limit?: number } = {}): Promise<AuditEventsResponse> {
+    /**
+     * 조치 실행 · 종료 판단 감사 기록(#544). 로그 화면(app/logs)과 인시던트 상세(app/incidents/[id], #622)가 부른다.
+     * 최신순이고 `next_cursor`를 그대로 돌려주면 다음 쪽이다. 범위 밖 `incident_id`는 404가 아니라 빈 목록이다.
+     */
+    getAuditEvents(
+      query: { incident_id?: string; since?: string; cursor?: string; limit?: number } = {},
+    ): Promise<AuditEventsResponse> {
       const params = new URLSearchParams();
+      if (query.incident_id !== undefined) params.set('incident_id', query.incident_id);
       if (query.since !== undefined) params.set('since', query.since);
       if (query.cursor !== undefined) params.set('cursor', query.cursor);
       if (query.limit !== undefined) params.set('limit', String(query.limit));

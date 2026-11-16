@@ -159,12 +159,26 @@ export function canOperate(user: AccessSubject | null | undefined): boolean {
 }
 
 /**
- * 플랫폼 상태 · API 이상 호출을 볼 계정(2026-11-03 PM 지시): 중앙 관리 권한 또는 조치 권한이 있는 플랫폼 계정.
- * 고객사 계정은 관리자 대시보드를 열지 않으므로 대상이 아니다. 권한 단계 개편 전의 임시 판정이며, 개편하면 이 함수만 고친다.
+ * 플랫폼 상태 · API 이상 호출을 볼 계정: 중앙 관리계정(PLATFORM · CENTRAL_ADMIN)만.
+ * 서버 `GET /platform/overview`가 require_central_admin이라 관리자 직원계정은 403이다(PR #599). 2026-11-03 초안은
+ * 조치 권한이 있는 관리자 직원계정도 넣었으나, 서버 계약에 맞춰 좁혔다. 고객사 계정은 관리자 대시보드를 열지 않는다.
  */
 export function canViewPlatformStatus(user: AccessSubject | null | undefined): boolean {
-  if (user?.account_type !== 'PLATFORM') return false;
-  return isCentralAdmin(user) || canOperate(user);
+  return user?.account_type === 'PLATFORM' && isCentralAdmin(user);
+}
+
+/** 근거 내려받기 비활성 문구. */
+export const EVIDENCE_EXPORT_BLOCKED = '조치 실행 권한이 있는 계정만 근거를 내려받을 수 있습니다.';
+
+/**
+ * 근거 내려받기(#488)를 막는 이유. 서버는 역할이 아니라 기능 권한 `EXECUTE_ACTION`으로 거른다 — 조치 실행 권한을
+ * 받지 못한 OPERATOR도 `canOperate`는 통과하므로 `/me`의 `permissions`를 본다. 내려받을 수 있으면 null.
+ */
+export function evidenceExportBlockedReason(
+  user: Pick<CurrentUserResponse, 'permissions'> | null | undefined,
+): string | null {
+  if (!user) return ROLE_PENDING;
+  return user.permissions.includes('EXECUTE_ACTION') ? null : EVIDENCE_EXPORT_BLOCKED;
 }
 
 /** 조치 버튼을 막는 이유. 누를 수 있으면 null. */

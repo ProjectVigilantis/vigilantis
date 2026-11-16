@@ -17,6 +17,7 @@ from schemas.api.auth import AccountType, UserRole
 from schemas.api.tenants import TenantStatus
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from tests.platform_event_cleanup import purge_platform_events
 
 T0 = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
 MAX = 28800
@@ -190,6 +191,8 @@ def committed_user(pg_engine):
         user_id = row.user_id
     yield sub, user_id
     with Session(pg_engine) as cleanup:
+        # 로그인 성공은 활동 로그 한 행을 함께 commit 한다(#589 B) — 행위자가 ANONYMOUS 라 사용자를 지워도 남는다
+        purge_platform_events(cleanup, target_ids=[user_id])
         cleanup.execute(
             text("DELETE FROM auth_sessions WHERE user_id = :u"), {"u": user_id}
         )

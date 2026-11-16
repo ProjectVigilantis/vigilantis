@@ -12,7 +12,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 import { createActivityThrottle } from '@/lib/activity-throttle';
 import { getMe, recordActivity } from '@/lib/api/client';
-import { canOperate, operateBlockedReason } from '@/lib/roles';
+import { canOperate, evidenceExportBlockedReason, operateBlockedReason } from '@/lib/roles';
 import { singleFlight } from '@/lib/single-flight';
 import type { CurrentUserResponse } from '@/types/api';
 
@@ -49,6 +49,12 @@ export function useSession(): SessionContextValue {
 export function useOperateBlockedReason(): string | null {
   const { session } = useSession();
   return operateBlockedReason(session.kind === 'user' ? session.user : null);
+}
+
+/** 근거 내려받기를 막는 이유(`EXECUTE_ACTION` 기준, lib/roles.ts). 계정을 아직 모르면 막는다. */
+export function useEvidenceExportBlockedReason(): string | null {
+  const { session } = useSession();
+  return evidenceExportBlockedReason(session.kind === 'user' ? session.user : null);
 }
 
 export function useCanOperate(): boolean {

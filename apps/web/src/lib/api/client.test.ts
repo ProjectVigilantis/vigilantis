@@ -12,6 +12,7 @@ import {
   changeUserStatus,
   confirmPasswordReset,
   createReadApi,
+  evidenceExportUrl,
   getAssets,
   getInquiries,
   getMe,
@@ -132,6 +133,16 @@ test('담당 그룹 없는 고객사 필터는 세션 전달을 유지하고 기
   assert.match(sent[1].url, /\/api\/v1\/tenants\?unassigned_only=true$/);
   assert.match(sent[2].url, /\/api\/v1\/tenants\?unassigned_only=false$/);
   assert.ok(sent.every((request) => request.headers.Cookie === '__Host-vg_session=test-session'));
+});
+
+test('플랫폼 상태는 서버 계약 경로 /platform/overview를 부르고 hours는 줄 때만 붙인다', async (t) => {
+  const sent = stubFetch(t, () => new Response(JSON.stringify({}), { status: 200 }));
+  const api = createReadApi({ headers: { Cookie: '__Host-vg_session=test-session' } });
+  await api.getPlatformOverview();
+  await api.getPlatformOverview({ hours: 48 });
+  assert.match(sent[0].url, /\/api\/v1\/platform\/overview$/);
+  assert.match(sent[1].url, /\/api\/v1\/platform\/overview\?hours=48$/);
+  assert.ok(sent.every((request) => request.method === 'GET' || request.method === undefined));
 });
 
 test('사용자 관리 조치의 경로 · 메서드 · 본문', async (t) => {
@@ -500,4 +511,26 @@ test('원인 코드가 없는 실패(브라우저의 Failed to fetch)는 코드 
   await assert.rejects(getAssets(), {
     message: '요청이 실패했습니다 (네트워크 오류)',
   });
+});
+
+test('인시던트 감사 기록 조회는 incident_id와 커서를 받은 그대로 싣는다(#622)', async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  const urls: URL[] = [];
+  globalThis.fetch = async (url) => {
+    urls.push(new URL(String(url)));
+    return new Response(JSON.stringify({ items: [], next_cursor: null }), { status: 200 });
+  };
+  await createReadApi({ headers: {} }).getAuditEvents({ incident_id: 'inc/1', cursor: 'opaque==', limit: 100 });
+  assert.equal(urls[0].pathname, '/api/v1/audit-events');
+  assert.equal(urls[0].searchParams.get('incident_id'), 'inc/1');
+  assert.equal(urls[0].searchParams.get('cursor'), 'opaque==');
+  assert.equal(urls[0].searchParams.get('limit'), '100');
+});
+
+test('근거 내보내기 주소는 API 출처의 export 경로이고 id를 인코딩한다(#488)', () => {
+  const md = new URL(evidenceExportUrl('inc/1', 'md'));
+  assert.equal(md.pathname, '/api/v1/incidents/inc%2F1/evidence/export');
+  assert.equal(md.searchParams.get('format'), 'md');
+  assert.equal(new URL(evidenceExportUrl('inc-2', 'json')).searchParams.get('format'), 'json');
 });
