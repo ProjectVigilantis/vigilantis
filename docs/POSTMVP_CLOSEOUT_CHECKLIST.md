@@ -7,7 +7,7 @@
 > 이슈의 완료 조건 체크박스, PR 본문, 테스트 실행 결과를 여기에 복제하지 않는다. **어느 칸이 답하는지만 가리킨다.**
 > 빈칸과 「없음」은 **미확인 또는 근거 없음**이다. 채울 때는 결과나 사유를 적는다.
 >
-> **상태 기준**: 2026-11-13(금) 16:30 조회 · `dev` `b54d554`(PR #634 머지). 이슈 완료 조건 수는 본문 체크박스를 센 값(체크/전체)이다. 날짜가 지나면 다시 조회한다(§5 갱신 계획).
+> **상태 기준**: 2026-11-13(금) 16:30 조회 · `dev` `b54d554`(PR #634 머지). 이슈 완료 조건 수는 본문 체크박스를 센 값(체크/전체)이다. 날짜가 지나면 다시 조회한다(§7 갱신 계획).
 
 ---
 
@@ -32,10 +32,10 @@
 
 | T | 단계 | 대상 | 이슈(완료 조건) | 머지 PR | 테스트 | 실측 · 근거 | 빈 곳 | 처분 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| T-1 | ① | 로그인 + 역할 | #492 열림 **4/5** · #490 닫힘 · #515 닫힘 7/7 | #499 #502 #512 #527 #553 #559 | `test_auth_login_flow.py` `test_enrolled_user_completes_and_revokes` · `test_third_totp_failure_ends_flow` / `test_auth_api.py` `test_idle_expiry_and_get_me_never_extends` · `test_logout_revokes_and_is_idempotent` / `test_auth_login_single_session.py` `test_second_login_from_another_browser_supersedes_the_first` / `test_staff_admin_api.py` `test_disable_revokes_sessions_and_management_immediately` | #563 2차(로그인 · 401 · 403) | 실제 Cognito · HTTPS 통합 검증과 OWASP 반영 항목 기록(#492 5번) | 실측 대기 — 11/16(월) 뒤 · 안성일 |
+| T-1 | ① | 로그인 + 역할 | #492 열림 **4/5** · #490 닫힘(계획 안 함으로 닫음 · 0/3 — §4에 넣지 않는다) · #515 닫힘 7/7 | #499 #502 #512 #527 #553 #559 | `test_auth_login_flow.py` `test_enrolled_user_completes_and_revokes` · `test_third_totp_failure_ends_flow` / `test_auth_api.py` `test_idle_expiry_and_get_me_never_extends` · `test_logout_revokes_and_is_idempotent` / `test_auth_login_single_session.py` `test_second_login_from_another_browser_supersedes_the_first` / `test_staff_admin_api.py` `test_disable_revokes_sessions_and_management_immediately` | #563 2차(로그인 · 401 · 403) | 실제 Cognito · HTTPS 통합 검증과 OWASP 반영 항목 기록(#492 5번) | 실측 대기 — 11/16(월) 뒤 · 안성일 |
 | T-2 | ② | 승인자 감사 기록 | #544 열림 **4/5** | #546 #547 #548 · 화면 #578 | `test_audit_events.py`(16) `test_user_approval_records_one_person_event` · `test_rejected_approval_leaves_no_event` · `test_rows_reject_update_and_delete_but_insert_is_allowed` / `test_audit_events_api.py`(13) `test_tenant_viewer_sees_only_its_tenant_and_never_an_operator_email` | #563 2차 8번 행 · 3차(`/logs`) | (C) 인시던트 상세와 감사 목록 화면에서 승인자 · 시각 · 대상(#544 5번) | 11/20(금)까지 · 김승철 · 김세혁 |
 | T-3 | ② | 요청 속도 제한(WAF) | #484 닫힘 **0/6** · #522 열림 **2/4** | #486 #538 #549 | `root/test_provision_platform_aws.py`(132) `test_new_acl_waits_while_the_new_ip_sets_propagate` · `test_login_rate_limit_counts_only_the_login_and_reset_paths_per_ip_without_the_nat_ip` · `test_rate_limit_counts_per_ip_but_never_the_nat_ip` · `test_second_run_changes_nothing` · `test_switching_to_block_is_applied_on_rerun` | 없음 | (B) Count 관측 뒤 Block 전환과 관측 기록 · (C) 로그인 경로 한도 초과 시험 | 실측 대기 — 11/16(월) 뒤 · 김승철. #484는 체크 없음(§4) |
-| T-4 | ① | 고객 계정 연결 · 원격 회수 | #485 닫힘 5/5 · #533 닫힘 10/10 · #535 닫힘 **4/5** · #536 닫힘 5/5 · #495 · #510 · #518 닫힘 | #489 #507 #516 #506 #513 #519 #543 #550 #558 #569 #575 · 화면 #503 #541 | `test_tenants_api.py` `test_create_returns_pending_tenant_with_external_id_and_onboarding_link` / `test_tenant_verification.py` `test_every_step_passes_is_ok_and_runs_in_contract_order` · `test_assume_refusal_is_assume_denied_and_stops_there` / `test_tenant_verification_api.py` `test_resume_ok_activates_and_clears_suspension` / `test_tenant_suspension_gate.py`(18) `test_start_gate_refuses_every_new_execution_but_not_auto_rollback` / `root/test_onboarding_template.py`(16) `test_role_trusts_only_the_platform_principal_with_the_external_id` | #563 3차 4번(학원 계정 연결 확인 · 데모 호스트) | 플랫폼 멤버 계정에서 학원 계정 실연결 · 정지 → 재개 | 실측 대기 — 11/16(월) 뒤 · 안성일. #535 1칸은 T-5 17번이 대신 고정(§4) |
+| T-4 | ① | 고객 계정 연결 · 원격 회수 | #485 닫힘 5/5 · #533 닫힘 10/10 · #535 닫힘 **4/5** · #536 닫힘 5/5 · #495 닫힘 **0/6** · #510 닫힘 **0/6** · #518 닫힘 **0/9** | #489 #507 #516 #506 #513 #519 #543 #550 #558 #569 #575 · 화면 #503 #541 | `test_tenants_api.py` `test_create_returns_pending_tenant_with_external_id_and_onboarding_link` / `test_tenant_verification.py` `test_every_step_passes_is_ok_and_runs_in_contract_order` · `test_assume_refusal_is_assume_denied_and_stops_there` / `test_tenant_verification_api.py` `test_resume_ok_activates_and_clears_suspension` / `test_tenant_suspension_gate.py`(18) `test_start_gate_refuses_every_new_execution_but_not_auto_rollback` / `root/test_onboarding_template.py`(16) `test_role_trusts_only_the_platform_principal_with_the_external_id` | #563 3차 4번(학원 계정 연결 확인 · 데모 호스트) | 플랫폼 멤버 계정에서 학원 계정 실연결 · 정지 → 재개 | 실측 대기 — 11/16(월) 뒤 · 안성일. #535 1칸은 T-5 17번이 대신 고정(§4) |
 | T-5 | ① | 테넌트 격리 회귀 테스트 | #529 닫힘 6/6 | #534 #557 #574 | `test_tenant_isolation.py`(18) `test_list_hides_other_tenants_incidents` · `test_execute_on_other_tenant_is_404_and_writes_nothing` · `test_viewer_on_other_tenant_is_403_not_404` · `test_suspended_tenant_execute_is_409_for_its_operator` · `test_unauthenticated_list_is_401` | PR #574 CI | 없음 | 완료 |
 | T-6 | ② | 고객별 자동 조치 끄기 | #514 닫힘 **0/8** · #521 닫힘 **0/6** · #532 닫힘 5/5 | #520 #524 #540 | `test_tenant_auto_action.py` `test_disabled_tenant_never_reserves_an_automatic_isolation` · `test_human_approval_still_executes_on_a_disabled_tenant` · `test_deadline_that_passed_while_disabled_does_not_fire_after_re_enabling` · `test_preparation_stops_before_any_aws_step_when_disabled` / `test_incident_auto_isolation_block.py` `test_disabled_tenant_shows_the_block_and_the_gate_agrees` | 없음 | 없음 — 근거는 왼쪽 함수 | 체크 없음(§4) |
 | T-7 | ② | 고객 설정 화면(최소판) | #564 닫힘 7/7 | #576 | `test_tenant_settings_api.py`(22) `test_protected_tags_omit_replace_clear_and_null` · `test_customer_operator_and_viewer_are_forbidden_before_validation` / `test_tenant_settings_runtime.py`(20) `test_newly_enabled_channel_works_without_restart` · `test_email_reaches_ready_only_after_recipient_confirmation_and_unsubscribe_is_detected` | 없음 | 없음 | 완료 |
@@ -58,14 +58,14 @@ SSOT §Post-MVP 범위의 2단계와 §확정 결정 로그(10/29 · 11/2 · 11/
 
 | 항목 | 이슈(완료 조건) | 머지 PR | 테스트 | 빈 곳 | 처분 |
 | --- | --- | --- | --- | --- | --- |
-| 도입 신청 · 고객 문의 · 운영자 알림 | #551 닫힘 · #552 열림 **7/8** · #565 열림 **13/14** | #560 #571 #609 | `test_signup_requests_api.py` `test_create_returns_202_and_stores_signup_with_notification` · `test_decision_preserves_actor_email_and_is_private` / `test_inquiries_api.py` `test_tenant_accounts_get_403_on_management_routes_even_for_own_inquiry` / `test_operator_notifications_api.py` `test_reads_are_per_user` | 화면의 실서버 연결(#552) · 목록 페이지 이동과 크기 선택(#565) | 11/16(월) 전 · 김세혁(FE 이슈 하나로 모음) |
+| 도입 신청 · 고객 문의 · 운영자 알림 | #551 닫힘(#552와 중복으로 닫음 · 0/5 — §4에 넣지 않는다) · #552 열림 **7/8** · #565 열림 **13/14** | #560 #571 #609 | `test_signup_requests_api.py` `test_create_returns_202_and_stores_signup_with_notification` · `test_decision_preserves_actor_email_and_is_private` / `test_inquiries_api.py` `test_tenant_accounts_get_403_on_management_routes_even_for_own_inquiry` / `test_operator_notifications_api.py` `test_reads_are_per_user` | 화면의 실서버 연결(#552) · 목록 페이지 이동과 크기 선택(#565) | 11/16(월) 전 · 김세혁(FE 이슈 하나로 모음) |
 | 플랫폼 활동 로그 | #589 열림 **3/7** | #592 #620 #617 #618 #621 #627 #634 · 열림 #630 | `test_platform_events.py`(34) `test_record_writes_one_row_with_the_request_origin` / `test_platform_events_api.py`(14) `test_manager_sees_assigned_tenants_and_only_own_tenantless_rows` / `test_workflow_platform_events.py`(28) `test_a_failed_platform_event_write_leaves_no_approval_behind` / `test_tenant_platform_events.py`(33) · `test_user_staff_platform_events.py`(17) · `test_signup_platform_events.py`(10) · `test_inquiries_platform_events.py`(10) | 로그인 · 세션 · 권한 거절 기록(PR #630 열림) · 멱등 재요청 무중복 · 실제 접속지 주소(11/16(월) 뒤) · 스키마와 FE 타입 맞춤 · 화면 | 서버 11/16(월)까지 · 김승철. 접속지 확인과 화면은 11/20(금) |
 | ISMS 보고서 | #488 열림 **2/3** · #622 열림 **4/5** · #623 열림 **11/12** | #616 #629 #631 | `test_evidence_export.py`(31) `test_unit_secrets_are_masked_in_both_formats` · `test_other_tenant_operator_gets_404_not_403` / `test_report_draft.py`(18) `test_download_has_three_sections_provenance_and_blank_human_fields` · `test_default_client_is_unavailable_but_missing_target_still_404` | 근거 조회 · 내보내기 화면(#488) · 작성 모델 선정과 실제 제공자 호출(#623) | 모델 연결과 화면은 11/20(금) · 안성일 · 김세혁 |
 | 위협 종류 · ISMS 작성 시나리오 | #613 열림 **2/6** | #614 | 없음(문서) | 2판(분류표 전 항목 시나리오) · 안성일 확인 · 못 채우는 칸 넘기기 · 문서 지도 등재 요청 | 2판 11/18(수) · 박지현 |
 | FE에서 나온 서버 기능 11건 | #572 열림 11/11 | #609 #586 외(항목별 PR은 #572 본문) | `test_tenant_groups_api.py`(16) `test_central_builds_a_group_scope_end_to_end` | 전부 체크됐으나 이슈가 열려 있다 — 닫을지는 담당 판단 | 근거 있음 |
 | ADR-0005 1차 개정 구현 | #583 열림 **14/15** | #596 #612 #632 | `ai/tests/test_finops_stage3_evaluation.py`(10) `test_no_proposal_comparison_requires_same_inputs_and_flags_pairing` · `ai/tests/test_secops_graph.py` · `ai/tests/test_secops_evaluation.py` | 대비책 그래프와 전환 스위치 제거(#583 15번) | 11/20(금) · 안성일 |
 | 보호 태그 자산의 자동 격리 예외 | #598 열림 **1/5** | 없음 | 없음 | 구현 전부 | 착수 시점 미정(§3) |
-| 플랫폼 이중화 | 이슈 없음 — ADR-0010 5차 개정 | 서울 #607 · 도쿄 없음 | `root/test_provision_platform_aws.py` `test_new_db_is_multi_az` · `test_existing_single_az_db_is_switched_to_multi_az` | 도쿄 DB 복제본 · 이미지와 비밀 복제 · 전환 절차 · 전환 확인 둘(로그인 · 진행 중 실행) | 11/20(금) 판정 안 · 김세혁 · 안성일 |
+| 플랫폼 이중화 | 이슈 없음 — ADR-0010 5차 개정 | 서울 #607 · 도쿄 없음 | `root/test_provision_platform_aws.py` `test_new_db_is_multi_az` · `test_existing_single_az_db_is_switched_to_multi_az` | 도쿄 DB 복제본 · 이미지와 비밀 복제 · 전환 절차 · 전환 확인 둘(로그인 · 진행 중 실행) | 11/20(금) 판정 안 · 김세혁(SSOT §확정 결정 로그 2026-11-06 행) · 전환 확인 둘은 안성일(`#회의` 11/16(월) 업무 배정표 「플랫폼 이중화」 행 — SSOT에는 없다) |
 | AWS Marketplace 실연동 구조 | 이슈 없음 | #610 | `test_marketplace.py`(15) `test_real_entitlement_projects_before_mock_and_ends_in_suspension` · `test_operator_patch_cannot_overwrite_marketplace_projection` | 실제 상품 등록 뒤의 확인은 범위 밖 | 근거 있음(구조) |
 | 유휴 자산 알림 기간 하루로 | #625 열림 **0/5** | #626 | `services/tests/test_rule_engine.py` `test_one_day_of_hourly_datapoints_is_judged` · `test_min_datapoints_boundary_is_exclusive_below` · `test_default_window_yields_enough_datapoints_for_the_threshold` | 없음 — PR은 머지됐고 체크 표시만 남았다 | 체크 없음(§4) |
 | 약관 자산 확장 조항 | #636 열림 **0/5** | 없음 | 없음(약관 문구) | 결정 요청 3건의 답 · 조항 PR | 11/13(금) 회의 배정 · 박지현 |
@@ -89,7 +89,7 @@ SSOT §Post-MVP 범위의 2단계와 §확정 결정 로그(10/29 · 11/2 · 11/
 
 ## 4. 닫혔지만 완료 조건이 체크되지 않은 이슈
 
-#479 완료 조건 ①은 「T-n 완료 기준 전부 체크」다. 아래 이슈는 PR이 머지되고 닫혔지만 본문 체크박스가 비어 있다. **이 문서는 체크를 대신하지 않는다** — 체크는 각 이슈 담당의 몫이고, 판정 때 이 칸을 체크박스로 셀지 §1의 테스트 함수로 볼지는 PM이 정한다.
+#479 완료 조건 ①은 「T-n 완료 기준 전부 체크」다. 아래 이슈는 PR이 머지되고 닫혔지만 본문 체크박스가 비어 있다. **이 문서는 체크를 대신하지 않는다** — 체크는 각 이슈 담당의 몫이고, **판정은 체크박스로 센다**(PM 결정 · PR #637 리뷰 2026-11-16). 담당 문의에 11/19(목) 회의까지 답이 없으면 PM이 §1의 테스트 함수를 근거로 판정 기록에 사유를 적고 충족으로 센다 — 「담당 답」 칸이 그 기록의 자리다. 완료가 아닌 사유로 닫힌 이슈(#490 계획 안 함 · #551 중복)는 이 표에 넣지 않는다.
 
 | 이슈 | T | 체크 | 담당 | 근거(§1 행) | 담당 답 |
 | --- | --- | --- | --- | --- | --- |
@@ -98,6 +98,9 @@ SSOT §Post-MVP 범위의 2단계와 §확정 결정 로그(10/29 · 11/2 · 11/
 | #514 | T-6 | 0/8 | 김승철 | T-6 행 `test_tenant_auto_action.py` | 미문의 |
 | #521 | T-6 | 0/6 | 김승철 | T-6 행 `test_incident_auto_isolation_block.py` | 미문의 |
 | #595 | T-10 | 0/6 | 김세혁 | T-10 행 `test_execution_revalidation.py` | 미문의 |
+| #495 | T-4 | 0/6 | 김승철 | T-4 행 함수 · 닫는 코멘트에 수용 기준 6개 근거표가 있다 | 미문의 |
+| #510 | T-4 | 0/6 | 김승철 | T-4 행 함수 | 미문의 |
+| #518 | T-4 | 0/9 | 김승철 | T-4 행 `test_tenants_api.py` | 미문의 |
 | #535 | T-4 | 4/5 | 안성일 | 남은 1칸은 `test_tenant_isolation.py` 17번이 기대값으로 쓴다 | 미문의 |
 | #563 | — | 4/5 | 박지현 | 남은 1칸(「다음에 또 나올 것」을 대조표로 넘김)은 이 문서 §3 「빈 곳」 칸이 받는다 | 이 문서 머지 뒤 체크 |
 | #625(열림) | — | 0/5 | 김승철 | §2 유휴 자산 행 함수 3개 | 미문의 |
@@ -132,6 +135,8 @@ SSOT §Post-MVP 범위의 2단계와 §확정 결정 로그(10/29 · 11/2 · 11/
 | 화면이 남음 | T-2 | 1 |
 | 미착수 | 없음 | 0 |
 
+T-4는 「실 계정 확인이 남음」에 셌다. 닫힌 하위 이슈 셋(#495 · #510 · #518)의 체크가 비어 있는 것은 §4에 따로 있다.
+
 추가 기능 11행 가운데 이슈 완료 조건이 전부 체크된 것은 #572 하나다. 나머지의 남은 칸은 §2 「빈 곳」에 있다.
 
 ---
@@ -140,7 +145,7 @@ SSOT §Post-MVP 범위의 2단계와 §확정 결정 로그(10/29 · 11/2 · 11/
 
 | 판 | 언제 | 무엇을 |
 | --- | --- | --- |
-| 1판(이 문서) | 11/17(월)까지 | 표 전체 · 11/13(금) 구현 마감 기준 |
+| 1판(이 문서) | 11/16(월)까지 | 표 전체 · 11/13(금) 구현 마감 기준 |
 | 갱신 | 11/19(목) 회의 전 | 11/13(금) 뒤 머지분 · 11/16-11/18 실측 코멘트 번호 · 15주차 판정 기준과의 대응 · §4 담당 답 |
 | 처분 반영 | 11/20(금) 판정 뒤 | 판정 결과 · §5 처분 코멘트 번호 |
 
@@ -149,3 +154,4 @@ SSOT §Post-MVP 범위의 2단계와 §확정 결정 로그(10/29 · 11/2 · 11/
 | 날짜 | 내용 |
 | --- | --- |
 | 2026-11-13 | 1판 초안 — `dev` `b54d554` 기준. 이슈 45개 · PR 80건의 상태와 테스트 함수명을 조회해 채웠다 |
+| 2026-11-16 | PR #637 리뷰(김세혁) 반영 — §4에 #495 · #510 · #518 추가(T-4 · 김승철 · 체크 0) · T-4 행에 체크 수 · #490 · #551에 닫힌 사유 · §4 머리말에 PM 결정(체크박스로 센다 · 11/19(목)까지 답 없으면 테스트 함수 근거) · 머리말 `§5` → `§7` · 1판 기한 `11/17(월)` → `11/16(월)`(11/17은 화요일) · 플랫폼 이중화 담당의 출처. 스냅숏 뒤 바뀐 체크 수(#608 · #544 · #565 · #488 · #625)는 11/19(목) 갱신 몫이라 고치지 않았다 |
