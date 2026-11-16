@@ -176,7 +176,9 @@ def create_app() -> FastAPI:
         request.state.request_id = request_id
         token = request_id_var.set(request_id)
         # 플랫폼 활동 로그(#589)가 행마다 싣는 요청 식별자 · 접속지 · 브라우저 정보
-        origin_token = request_origin_var.set(origin_from_request(request, request_id))
+        origin_token = request_origin_var.set(
+            origin_from_request(request, request_id, address_source=settings.CLIENT_ADDRESS_SOURCE)
+        )
         started = time.perf_counter()
         status_code = 500
         try:
