@@ -40,7 +40,7 @@ from auth.access import require_user, tenant_scope_ids
 from auth.service import CurrentUser
 from db.repositories import tenants as tenants_repo
 from db.session import get_db
-from exceptions import ApiError
+from exceptions import ApiError, OutOfScopeError
 from services.aws.client import TenantAccess
 from services.costs import CostUnavailable, fetch_costs
 
@@ -101,8 +101,13 @@ def get_asset_costs(
     user: CurrentUser = Depends(require_user),
 ) -> AssetCostsResponse:
     target = _target_tenant(user, tenant_id)
-    row = tenants_repo.get_tenant(db, target, scope_ids=tenant_scope_ids(user))
+    scope_ids = tenant_scope_ids(user)
+    row = tenants_repo.get_tenant(db, target, scope_ids=scope_ids)
     if row is None:
+        # 범위를 건 조회가 못 찾았다 — 404 로 가는 길에서만 그 고객사가 있는지 본다. 있으면 활동 로그에 남는
+        # 범위 밖 404 다(#589 B). 전체 범위(중앙 관리자)의 None 은 없는 것이라 더 보지 않는다
+        if scope_ids is not None and tenants_repo.tenant_exists(db, target):
+            raise OutOfScopeError(ErrorCode.TENANT_NOT_FOUND)
         raise ApiError(ErrorCode.TENANT_NOT_FOUND)
     tenant = row.tenant
     status = tenant.status

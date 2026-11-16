@@ -42,7 +42,8 @@ from uuid import UUID
 from db import models
 from db.repositories import auth as auth_repo
 from db.repositories import platform_events as platform_events_repo
-from exceptions import ApiError
+from db.repositories import tenants as tenants_repo
+from exceptions import ApiError, OutOfScopeError
 from schemas.api.auth import AccountType, FeaturePermission, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.tenants import TenantStatus
@@ -141,19 +142,25 @@ def _target(db: Session, user_id: str, admin: service.CurrentUser) -> models.App
     except ValueError:  # PG UUID 컬럼에 넣으면 DataError(500) — 없는 대상과 같다
         raise ApiError(ErrorCode.USER_NOT_FOUND) from None
     user = auth_repo.get_user(db, canonical)
+    if user is None:
+        raise ApiError(ErrorCode.USER_NOT_FOUND)
     if (
-        user is None
-        or user.account_type is not AccountType.TENANT
+        user.account_type is not AccountType.TENANT
         or user.tenant_id is None
         or not access.can_access_tenant(admin, user.tenant_id)
     ):
-        raise ApiError(ErrorCode.USER_NOT_FOUND)
+        # 있는데 관리할 수 없는 대상(다른 고객사 · 플랫폼 계정 · 미지정 계정) — 응답은 같은 404 이고 활동 로그에만
+        # 남는다(#589 B · ACCESS_OUT_OF_SCOPE). 어느 경우인지는 싣지 않는다
+        raise OutOfScopeError(ErrorCode.USER_NOT_FOUND)
     return user
 
 
-def _invite_tenant(admin: service.CurrentUser, requested: UUID | None) -> str:
+def _invite_tenant(db: Session, admin: service.CurrentUser, requested: UUID | None) -> str:
     """초대 대상 테넌트. 중앙 관리계정은 명시 필수(없으면 422)이고 접근 가능한 테넌트여야 한다(없는 테넌트는 404).
-    TENANT ADMIN 은 생략하면 자기 테넌트, 다르면 404."""
+    TENANT ADMIN 은 생략하면 자기 테넌트, 다르면 404.
+
+    범위 밖이면 그 테넌트가 있는지 한 번 더 본다(404 로 가는 길에서만) — 있으면 활동 로그에 남는 범위 밖 404 다
+    (#589 B). 응답은 어느 쪽이든 같다."""
     if access.is_tenant_manager(admin):
         if requested is None:
             raise ApiError(ErrorCode.REQUEST_VALIDATION_FAILED)
@@ -163,6 +170,8 @@ def _invite_tenant(admin: service.CurrentUser, requested: UUID | None) -> str:
     else:
         raise ApiError(ErrorCode.AUTH_FORBIDDEN)
     if not access.can_access_tenant(admin, tenant):
+        if tenants_repo.tenant_exists(db, tenant):
+            raise OutOfScopeError(ErrorCode.TENANT_NOT_FOUND)
         raise ApiError(ErrorCode.TENANT_NOT_FOUND)
     return tenant
 
@@ -479,7 +488,7 @@ def invite_user(
         admin = _authorize_write(db, actor)
         if recover_existing and not access.is_tenant_manager(admin):
             raise ApiError(ErrorCode.AUTH_FORBIDDEN)  # 기존 계정 연결은 중앙 관리계정만 — SDK 전에 거절
-        target_tenant = _invite_tenant(admin, tenant_id)
+        target_tenant = _invite_tenant(db, admin, tenant_id)
         _require_active_tenant(db, target_tenant)
     finally:
         db.rollback()  # 읽기 트랜잭션을 SDK 호출 전에 끝낸다
@@ -495,7 +504,7 @@ def invite_user(
         # 실패하면 DB 는 쓰지 않는다(제공자 부작용은 이미 있었을 수 있다)
         if recover_existing and not access.is_tenant_manager(admin):
             raise ApiError(ErrorCode.AUTH_FORBIDDEN)
-        if _invite_tenant(admin, tenant_id) != target_tenant:
+        if _invite_tenant(db, admin, tenant_id) != target_tenant:
             raise ApiError(ErrorCode.TENANT_NOT_FOUND)
         _require_active_tenant(db, target_tenant, hold=True)
         _require_new_identity(db, adapter, provider_user)

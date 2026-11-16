@@ -21,7 +21,7 @@ from uuid import UUID
 
 from db import models
 from db.repositories import platform_events as platform_events_repo
-from exceptions import ApiError
+from exceptions import ApiError, OutOfScopeError
 from fastapi import Depends
 from schemas.api.auth import AccountType, UserRole
 from schemas.api.errors import ErrorCode
@@ -78,7 +78,9 @@ def make_authorize(actor: admin_service.Actor) -> Authorize:
                 target.account_type is not AccountType.TENANT
                 or (_is_tenant_admin(admin) and target.tenant_id != admin.tenant_id)
             ):
-                raise ApiError(ErrorCode.USER_NOT_FOUND)
+                # 있는데 복구할 수 없는 대상 — 응답은 같은 404 이고 활동 로그에만 남는다(#589 B ·
+                # ACCESS_OUT_OF_SCOPE). 읽기 단계와 잠금 안에서 두 번 불려도 요청당 한 번만 올라간다
+                raise OutOfScopeError(ErrorCode.USER_NOT_FOUND)
         except BaseException:
             db.rollback()
             raise

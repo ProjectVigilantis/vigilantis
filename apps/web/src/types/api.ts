@@ -1457,7 +1457,8 @@ export interface AuditEventsResponse {
    질의(모두 선택): since · until(occurred_at ∈ [since, until), 시간대 필수) · category · action · outcome ·
    actor_kind · actor_user_id · tenant_id · target_type · target_id(target_type 과 함께만) · cursor ·
    limit(기본 50 · 1–100). 최신순이고 next_cursor 가 null 이면 마지막 쪽이다. 범위 밖 · 형식이 어긋난 ID 는 빈 목록이다.
-   범위: 중앙 관리자는 전부, 담당자는 담당 고객사의 행 + 고객사 없는 본인 행(자기가 한 행 · 자기 계정의 로그인 시도 등). */
+   범위: 중앙 관리자는 전부, 담당자는 담당 고객사의 행 + 고객사 없는 본인 행(자기가 한 행 · 자기 계정의 로그인 시도 등).
+   범위 밖 404(ACCESS_OUT_OF_SCOPE) 행은 중앙 관리자만 읽는다 — 담당자는 action 으로 골라도 빈 목록이다. */
 
 export const PLATFORM_EVENTS_DEFAULT_LIMIT = 50;
 export const PLATFORM_EVENTS_MAX_LIMIT = 100;
