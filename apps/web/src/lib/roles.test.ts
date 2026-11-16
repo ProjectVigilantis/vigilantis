@@ -182,9 +182,10 @@ test('서버 403 문구는 역할과 담당 범위를 함께 말한다 — 조�
   assert.match(ACTION_FORBIDDEN, /담당 고객/);
 });
 
-test('플랫폼 상태: 중앙 관리 · 조치 권한이 있는 플랫폼 계정만 본다', () => {
+test('플랫폼 상태: 중앙 관리계정만 본다(서버 require_central_admin과 같다)', () => {
   assert.equal(canViewPlatformStatus(central), true);
-  assert.equal(canViewPlatformStatus(manager(TENANT_A)), true);
+  // 담당 고객사가 있는 관리자 직원계정도 서버가 403을 주므로 부르지 않는다
+  assert.equal(canViewPlatformStatus(manager(TENANT_A)), false);
   assert.equal(canViewPlatformStatus(unassigned), false);
   assert.equal(canViewPlatformStatus(tenant('ADMIN')), false);
   assert.equal(canViewPlatformStatus(tenant('OPERATOR')), false);

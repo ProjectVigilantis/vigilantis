@@ -1,83 +1,53 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import {
-  failureRate,
-  orderedComponents,
-  overCallTenants,
-  overallState,
-  scanSummary,
-  scopeApiUsage,
-  usageLevel,
-  type PlatformComponent,
-} from './platform-status.ts';
+import type { ApiUsageSummary, TenantApiUsage } from '../types/api.ts';
+import { exceedsThreshold, hasOverCallThreshold, overCallTenants, usageLevel } from './platform-status.ts';
 
-const comp = (key: PlatformComponent['key'], state: PlatformComponent['state']): PlatformComponent => ({
-  key,
-  state,
-  last_success_at: null,
-  detail: null,
+const hours = ['2026-11-03T00:00:00Z', '2026-11-03T01:00:00Z', '2026-11-03T02:00:00Z'];
+
+const item = (tenant_id: string, hourly: number[], threshold_per_hour: number | null): TenantApiUsage => ({
+  tenant_id,
+  tenant_name: tenant_id.toUpperCase(),
+  tenant_status: 'ACTIVE',
+  asset_count: 0,
+  staff_count: 0,
+  threshold_per_hour,
+  total_calls: hourly.reduce((s, n) => s + n, 0),
+  hourly,
 });
 
-test('전체 상태는 가장 나쁜 구성 요소를 따르고 꺼 둔 것은 세지 않는다', () => {
-  assert.equal(overallState([comp('API', 'OK'), comp('NOTIFIER', 'DEGRADED')]), 'DEGRADED');
-  assert.equal(overallState([comp('API', 'OK'), comp('OPENAI', 'DOWN'), comp('NOTIFIER', 'DEGRADED')]), 'DOWN');
-  assert.equal(overallState([comp('SCAN_SCHEDULER', 'DISABLED')]), 'OK');
-  assert.equal(overallState([]), 'OK');
-});
+const summary = (items: TenantApiUsage[]): ApiUsageSummary => ({ window_hours: 3, hours, retention_days: 30, items });
 
-test('구성 요소는 정해진 순서로 편다', () => {
-  const ordered = orderedComponents([comp('OPENAI', 'OK'), comp('API', 'OK'), comp('DATABASE', 'OK')]);
-  assert.deepEqual(ordered.map((c) => c.key), ['API', 'DATABASE', 'OPENAI']);
-});
-
-test('수집 주기 요약: 주기 두 번 넘게 새 수집이 없으면 늦음', () => {
-  const now = Date.parse('2026-11-02T10:00:00Z');
-  const cycle = (minAgo: number, failed = 0) => ({
-    started_at: new Date(now - minAgo * 60_000).toISOString(),
-    duration_seconds: 60,
-    tenants_total: 10,
-    tenants_failed: failed,
-  });
-  const fresh = scanSummary({ interval_seconds: 300, cycles: [cycle(10, 2), cycle(5, 1)] }, now);
-  assert.equal(fresh.lastAgeMinutes, 5);
-  assert.equal(fresh.late, false);
-  assert.equal(fresh.lastFailed, 1);
-  assert.equal(fresh.cyclesWithFailure, 2);
-  assert.equal(fresh.avgDurationSeconds, 60);
-
-  assert.equal(scanSummary({ interval_seconds: 300, cycles: [cycle(11)] }, now).late, true);
-  assert.equal(scanSummary({ interval_seconds: 300, cycles: [] }, now).late, true);
-});
-
-test('실패율은 요청이 없으면 null', () => {
-  assert.equal(failureRate(0, 0), null);
-  assert.equal(failureRate(400, 6), 1.5);
-});
-
-test('과다 호출: 기준을 넘은 고객사만, 최고 건수 큰 순, 최고 · 마지막 초과 시각을 함께 준다', () => {
-  const hours = ['2026-11-03T00:00:00Z', '2026-11-03T01:00:00Z', '2026-11-03T02:00:00Z'];
-  const usage = {
-    window_hours: 3,
-    hours,
-    threshold_per_hour: 100,
-    other_tenants: 0,
-    tenants: [
-      { tenant_id: 'a', tenant_name: 'A', hourly: [50, 60, 70] },
-      { tenant_id: 'b', tenant_name: 'B', hourly: [150, 20, 120] },
-      { tenant_id: 'c', tenant_name: 'C', hourly: [10, 400, 30] },
-    ],
-  };
+test('과다 호출: 고객사마다 자기 기준으로 판정하고, 최고 건수 큰 순으로 최고 · 마지막 초과 시각을 준다', () => {
+  const usage = summary([
+    item('a', [50, 60, 70], 100),
+    item('b', [150, 20, 120], 100),
+    item('c', [10, 400, 30], 300),
+    // 건수는 가장 크지만 기준이 높아 넘지 않았다
+    item('d', [500, 500, 500], 1000),
+  ]);
   const over = overCallTenants(usage);
   assert.deepEqual(over.map((t) => t.tenant_id), ['c', 'b']);
   assert.equal(over[0].peakAt, hours[1]);
   assert.equal(over[0].peakRequests, 400);
+  assert.equal(over[0].limit, 300);
   assert.equal(over[1].hoursOver, 2);
   assert.equal(over[1].lastOverAt, hours[2]);
-  // 기준과 같은 건수는 넘은 것이 아니다
-  assert.equal(overCallTenants({ ...usage, tenants: [{ tenant_id: 'd', tenant_name: 'D', hourly: [100] }] }).length, 0);
-  // 기준이 없으면 판정하지 않는다
-  assert.equal(overCallTenants({ ...usage, threshold_per_hour: null }).length, 0);
+});
+
+test('과다 호출: 기준과 같은 건수는 넘은 것이 아니고, 기준이 없는 고객사는 판정하지 않는다', () => {
+  assert.equal(overCallTenants(summary([item('a', [100, 0, 0], 100)])).length, 0);
+  assert.equal(overCallTenants(summary([item('a', [9999, 0, 0], null)])).length, 0);
+  assert.equal(exceedsThreshold(item('a', [], 100), 101), true);
+  assert.equal(exceedsThreshold(item('a', [], 100), 100), false);
+  assert.equal(exceedsThreshold(item('a', [], null), 9999), false);
+});
+
+test('기준이 정해진 고객사가 하나도 없으면 판정 자체가 없다', () => {
+  assert.equal(hasOverCallThreshold([item('a', [1], null), item('b', [2], null)]), false);
+  assert.equal(hasOverCallThreshold([item('a', [1], null), item('b', [2], 10)]), true);
+  assert.equal(hasOverCallThreshold([]), false);
 });
 
 test('히트맵 단계: 0은 호출 없음, 가장 큰 값은 4', () => {
@@ -86,21 +56,4 @@ test('히트맵 단계: 0은 호출 없음, 가장 큰 값은 4', () => {
   assert.equal(usageLevel(51, 100), 3);
   assert.equal(usageLevel(100, 100), 4);
   assert.equal(usageLevel(5, 0), 0);
-});
-
-test('담당 범위로 좁히면 다른 고객사 줄이 빠지고 나머지 수는 담당 고객사 기준이다', () => {
-  const usage = {
-    window_hours: 1,
-    hours: ['2026-11-03T00:00:00Z'],
-    threshold_per_hour: 100,
-    other_tenants: 50,
-    tenants: [
-      { tenant_id: 'A', tenant_name: 'A', hourly: [500] },
-      { tenant_id: 'b', tenant_name: 'B', hourly: [10] },
-    ],
-  };
-  const scoped = scopeApiUsage(usage, ['a', 'c', 'd']);
-  assert.deepEqual(scoped.tenants.map((t) => t.tenant_id), ['A']);
-  assert.equal(scoped.other_tenants, 2);
-  assert.deepEqual(overCallTenants(scoped).map((t) => t.tenant_id), ['A']);
 });

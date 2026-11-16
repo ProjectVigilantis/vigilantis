@@ -27,6 +27,7 @@ import type {
   MetricsTimeseriesResponse,
   NotificationsResponse,
   PaginationParams,
+  PlatformOverviewResponse,
   ResolutionJudgement,
   SignupRequestAccepted,
   SignupRequestApproveRequest,
@@ -64,7 +65,6 @@ import type {
 
 // `node --test`가 별칭을 못 풀어 상대 경로를 쓴다(realtime-events와 같은 이유).
 import { navigateToLogin } from '../auth-redirect.ts';
-import type { PlatformStatusResponse } from '../platform-status.ts';
 import type { ThreatEventsResponse, ThreatRangeDays } from '../threat-events.ts';
 
 /**
@@ -268,9 +268,13 @@ export function createReadApi(transport: ApiTransport) {
       return request<UsersResponse>('/users', undefined, transport);
     },
 
-    /** 플랫폼 상태(중앙 관리계정). FE 제안 계약이라 서버에 아직 없다 — 실서버는 404다(lib/platform-status.ts). */
-    getPlatformStatus(): Promise<PlatformStatusResponse> {
-      return request<PlatformStatusResponse>('/platform/status', undefined, transport);
+    /**
+     * 플랫폼 상태 · 고객사별 API 호출 통계(중앙 관리계정 전용, 그 밖은 403). `hours`는 호출 통계 조회 기간(시간)이며
+     * 생략하면 쿼리를 붙이지 않아 서버 기본값(`API_USAGE_DEFAULT_WINDOW_HOURS` = 24)을 쓴다.
+     */
+    getPlatformOverview(query: { hours?: number } = {}): Promise<PlatformOverviewResponse> {
+      const suffix = query.hours === undefined ? '' : `?hours=${query.hours}`;
+      return request<PlatformOverviewResponse>(`/platform/overview${suffix}`, undefined, transport);
     },
 
     /** 위협 이벤트 목록(고객사 대시보드 · 로그 화면). 계약은 types/api.ts `ThreatEventsResponse`(#572 10번). */

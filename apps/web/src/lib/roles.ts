@@ -159,12 +159,12 @@ export function canOperate(user: AccessSubject | null | undefined): boolean {
 }
 
 /**
- * 플랫폼 상태 · API 이상 호출을 볼 계정(2026-11-03 PM 지시): 중앙 관리 권한 또는 조치 권한이 있는 플랫폼 계정.
- * 고객사 계정은 관리자 대시보드를 열지 않으므로 대상이 아니다. 권한 단계 개편 전의 임시 판정이며, 개편하면 이 함수만 고친다.
+ * 플랫폼 상태 · API 이상 호출을 볼 계정: 중앙 관리계정(PLATFORM · CENTRAL_ADMIN)만.
+ * 서버 `GET /platform/overview`가 require_central_admin이라 관리자 직원계정은 403이다(PR #599). 2026-11-03 초안은
+ * 조치 권한이 있는 관리자 직원계정도 넣었으나, 서버 계약에 맞춰 좁혔다. 고객사 계정은 관리자 대시보드를 열지 않는다.
  */
 export function canViewPlatformStatus(user: AccessSubject | null | undefined): boolean {
-  if (user?.account_type !== 'PLATFORM') return false;
-  return isCentralAdmin(user) || canOperate(user);
+  return user?.account_type === 'PLATFORM' && isCentralAdmin(user);
 }
 
 /** 조치 버튼을 막는 이유. 누를 수 있으면 null. */
