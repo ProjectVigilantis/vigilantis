@@ -106,7 +106,7 @@ def test_finops_shows_null_even_for_a_disabled_tenant(db, client_pg, make_incide
     ("medium", TIMEOUT, False),
     ("high", PRE, True),
 ])
-def test_protected_notice_tracks_the_gate_and_persisted_timeout_escalation(
+def test_protected_notice_tracks_the_gate_and_persisted_escalation(
     db, client_pg, make_incident, make_candidate, kind, trigger, assigned,
 ):
     tenant = _tenant(db) if assigned else None
@@ -122,11 +122,10 @@ def test_protected_notice_tracks_the_gate_and_persisted_timeout_escalation(
     assert _block(client_pg, seeded.incident_id) == "PROTECTED_TAG"
     assert _attempt(db, seeded, trigger).skipped_reason is SKIP.PROTECTED_TAG
 
-    # Medium은 이미 관제자에게 넘겨 감시에서 빠졌다. High 재시도는 현재 태그를 다시 본다.
+    # 이미 관제자에게 넘긴 건은 태그가 보호를 풀어도 High · Medium 모두 자동 격리를 예고하지 않는다.
     asset.spec = {"tags": {"Environment": "dev"}}
     db.commit()
-    expected = "PROTECTED_TAG" if trigger is TIMEOUT else None
-    assert _block(client_pg, seeded.incident_id) == expected
+    assert _block(client_pg, seeded.incident_id) == "PROTECTED_TAG"
     if tenant is not None:
         _toggle(db, tenant, False)
         db.commit()

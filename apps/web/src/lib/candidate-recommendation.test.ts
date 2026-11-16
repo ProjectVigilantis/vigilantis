@@ -101,17 +101,40 @@ test('stored candidate judgement presentation', async (t) => {
       assert.match(html, /가드레일 통과는 제안을 허용하는 조건일 뿐/);
       assert.match(html, /SERVER_RULE/);
       assert.match(html, /PROTECTED_EC2_ISOLATION · v1/);
-      assert.match(html, /2026-11-13T01:02:03.123456Z/);
       assert.match(html, /href="#candidate-evidence-RUNBOOK_EC2_ISOLATE-candidate-evidence"/);
       assert.match(html, /id="candidate-evidence-RUNBOOK_EC2_ISOLATE-candidate-evidence"/);
       for (const fact of ['stored-finding', 'UnauthorizedAccess:EC2/SSHBruteForce', 'Instance',
-        'i-candidate', '2026-11-12T01:00:00Z', '2026-11-12T02:00:00Z',
-        'ACTOR', 'NETWORK_CONNECTION', 'OUTBOUND', '203.0.113.42']) {
+        'i-candidate', 'ACTOR', 'NETWORK_CONNECTION', 'OUTBOUND', '203.0.113.42']) {
         assert.ok(html.includes(fact), `stored fact visible: ${fact}`);
       }
       assert.match(html, /기록된 대상 주소/);
       assert.match(html, /차단 기록 \(Blocked\)[\s\S]*false · 기록됨/);
       assert.match(html, /false이며 성공·안전을 뜻하지 않습니다/);
+    });
+
+    await t.test('candidate timestamps display KST while preserving source instants', () => {
+      const times = [...render().matchAll(
+        /<dt[^>]*>([^<]+)<\/dt><dd[^>]*><time datetime="([^"]+)">([^<]+)<\/time><\/dd>/gi,
+      )].map(([, label, dateTime, text]) => ({ label, dateTime, text }));
+      assert.deepEqual(times.map(({ label, dateTime }) => ({ label, dateTime })), [
+        {
+          label: '판단 시각', dateTime: '2026-11-13T01:02:03.123456Z',
+        },
+        {
+          label: '최초 관측', dateTime: '2026-11-12T01:00:00Z',
+        },
+        {
+          label: '최근 관측', dateTime: '2026-11-12T02:00:00Z',
+        },
+      ]);
+      const expectedText = [
+        /^2026\. 11\. 13\. (?:오전|AM) 10:02:03 KST$/,
+        /^2026\. 11\. 12\. (?:오전|AM) 10:00:00 KST$/,
+        /^2026\. 11\. 12\. (?:오전|AM) 11:00:00 KST$/,
+      ];
+      for (const [index, { text }] of times.entries()) {
+        assert.match(text, expectedText[index]);
+      }
     });
 
     await t.test('manual rows show their stored reason even when snapshot facts look positive', () => {

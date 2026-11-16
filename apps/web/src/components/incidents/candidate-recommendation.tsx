@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 
+import { formatKst } from '@/lib/utils';
 import type {
   GuardDutyActivity,
   GuardDutyFact,
@@ -89,8 +90,8 @@ export function CandidateRecommendation({ recommendation }: { recommendation: Re
             <SnapshotRow label="판단 출처">{basis.origin}</SnapshotRow>
             <SnapshotRow label="저장된 규칙">{basis.rule_id} · v{basis.rule_version}</SnapshotRow>
             <SnapshotRow label="사유 코드">{basis.reason_code}</SnapshotRow>
-            <SnapshotRow label="판단 시각 (UTC)">
-              <time dateTime={basis.evaluated_at}>{basis.evaluated_at}</time>
+            <SnapshotRow label="판단 시각">
+              <time dateTime={basis.evaluated_at}>{formatKst(basis.evaluated_at)}</time>
             </SnapshotRow>
           </dl>
         </>
@@ -123,11 +124,11 @@ export function CandidateRecommendation({ recommendation }: { recommendation: Re
             <SnapshotRow label="탐지 유형">{evidence.finding_type}</SnapshotRow>
             <SnapshotRow label="자원 유형">{evidence.resource_type}</SnapshotRow>
             <SnapshotRow label="증거 대상 ARN">{evidence.target_arn}</SnapshotRow>
-            <SnapshotRow label="최초 관측 (UTC)">
-              <time dateTime={evidence.first_seen_at}>{evidence.first_seen_at}</time>
+            <SnapshotRow label="최초 관측">
+              <time dateTime={evidence.first_seen_at}>{formatKst(evidence.first_seen_at)}</time>
             </SnapshotRow>
-            <SnapshotRow label="최근 관측 (UTC)">
-              <time dateTime={evidence.last_seen_at}>{evidence.last_seen_at}</time>
+            <SnapshotRow label="최근 관측">
+              <time dateTime={evidence.last_seen_at}>{formatKst(evidence.last_seen_at)}</time>
             </SnapshotRow>
             {evidence.activity == null ? <SnapshotRow label="활동 사실">미수집</SnapshotRow> : (
               <>

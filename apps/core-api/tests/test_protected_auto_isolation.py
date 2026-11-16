@@ -370,17 +370,8 @@ def _assert_protected_facts(db, incident_id):
     ]
 
 
-@pytest.mark.parametrize("kind, trigger", [("high", PRE), ("medium", TIMEOUT)])
-@pytest.mark.parametrize("policy,tags,protected", [
-    (None, {"Environment": " production "}, True),
-    (None, {"Environment": "production-copy"}, False),
-    ([], {"Environment": "production"}, False),
-    ([{"key": "Critical", "values": [" ERP "]}], {"CRITICAL": "erp"}, True),
-    ([{"key": "Critical", "values": ["ERP"]}], {"Environment": "production"}, False),
-])
-def test_protected_policy_blocks_both_gates_without_consuming_approval(
-    db, make_incident, make_candidate, monkeypatch, kind, trigger, policy, tags, protected,
-):
+def _seed_isolatable(db, make_incident, make_candidate, kind, *, policy, tags):
+    """격리 파라미터가 풀리는 테넌트 자산 — 보호로 보지 않으면 사전 판정이 가드레일(④ AWS)까지 간다."""
     tenant = _tenant(db)
     seeded = _seed(db, make_incident, make_candidate, kind)
     _attach(db, seeded, tenant)
@@ -405,6 +396,21 @@ def test_protected_policy_blocks_both_gates_without_consuming_approval(
         spec={"vpc_id": "vpc-0123456789abcdef0", "tags": {"vigilantis:role": "isolation"}},
     ))
     db.commit()
+    return seeded, asset
+
+
+@pytest.mark.parametrize("kind, trigger", [("high", PRE), ("medium", TIMEOUT)])
+@pytest.mark.parametrize("policy,tags,protected", [
+    (None, {"Environment": " production "}, True),
+    (None, {"Environment": "production-copy"}, False),
+    ([], {"Environment": "production"}, False),
+    ([{"key": "Critical", "values": [" ERP "]}], {"CRITICAL": "erp"}, True),
+    ([{"key": "Critical", "values": ["ERP"]}], {"Environment": "production"}, False),
+])
+def test_protected_policy_blocks_both_gates_without_consuming_approval(
+    db, make_incident, make_candidate, monkeypatch, kind, trigger, policy, tags, protected,
+):
+    seeded, _ = _seed_isolatable(db, make_incident, make_candidate, kind, policy=policy, tags=tags)
     before = _candidate_statuses(db, seeded.incident_id)
     incident = db.get(models.Incident, seeded.incident_id)
     state_before = (incident.status, incident.response_mode, incident.response_deadline_at)
@@ -439,6 +445,42 @@ def test_protected_policy_blocks_both_gates_without_consuming_approval(
     assert seeded.incident_id not in incidents_repo.list_expired_agent_waits(
         db, now=datetime.now(UTC), exclude_notification_kind="PROTECTED_TARGET_ESCALATION",
     )
+
+
+@pytest.mark.parametrize("kind, trigger", [("high", PRE), ("medium", TIMEOUT)])
+def test_recorded_escalation_keeps_automatic_gates_closed_after_tags_lose_protection(
+    db, make_incident, make_candidate, monkeypatch, kind, trigger,
+):
+    # 관제자에게 넘긴 뒤 수집이 태그 변경을 반영해도 그 건을 사람 승인 없이 격리하지 않는다. High 는 분석 선점이
+    # 선차단을 다시 부르고(agent_dispatcher._dispatch_one), Medium 은 감시 목록 제외와 별개로 관문이 직접 막는다
+    seeded, asset = _seed_isolatable(
+        db, make_incident, make_candidate, kind, policy=None, tags={"Environment": "production"},
+    )
+    before = _candidate_statuses(db, seeded.incident_id)
+    incident = db.get(models.Incident, seeded.incident_id)
+    state_before = (incident.status, incident.response_mode, incident.response_deadline_at)
+    db.rollback()
+
+    def guardrails_spy(*args, **kwargs):
+        pytest.fail("관제자에게 넘긴 건이 가드레일(④ AWS 사전 검사)에 도달했습니다")
+
+    monkeypatch.setattr(soar.guardrails, "run_guardrail_validation", guardrails_spy)
+    assert soar.prepare_isolation(db, seeded.incident_id, trigger) is None
+    _assert_protected_facts(db, seeded.incident_id)
+
+    asset.spec = {**asset.spec, "tags": {"Environment": "dev"}}
+    db.commit()
+    assert soar.prepare_isolation(db, seeded.incident_id, trigger) is None
+    result = _attempt(db, seeded, trigger)
+
+    assert result.execution_id is None
+    assert result.skipped_reason.value == "PROTECTED_TAG"
+    assert _executions(db, seeded.incident_id) == []
+    assert _auto_evaluations(db, seeded.incident_id) == []
+    assert _candidate_statuses(db, seeded.incident_id) == before
+    incident = db.get(models.Incident, seeded.incident_id)
+    assert (incident.status, incident.response_mode, incident.response_deadline_at) == state_before
+    _assert_protected_facts(db, seeded.incident_id)
 
 
 @pytest.mark.parametrize("changed", ["tags", "policy"])

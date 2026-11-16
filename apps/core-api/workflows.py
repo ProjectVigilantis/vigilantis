@@ -1051,7 +1051,7 @@ def pending_automatic_block(
     「지금 걸릴 발동」은 접수 관문이
     잠근 뒤 보는 발동 조건(_AUTO_ISOLATION_ELIGIBILITY · 위험도 · 대응 경로 · 상태)으로 고른다 —
     그 밖의 건(Low · 분석 뒤 High · 이미 발동한 건 · FINOPS)은 None 이다. 잠그지 않는다.
-    이미 에스컬레이션한 Medium은 보호 태그가 사라져도 감시에서 빠져 있으므로 실행을 예고하지 않는다.
+    이미 에스컬레이션한 건(High · Medium)은 보호 태그가 사라져도 관문이 보호로 보므로 실행을 예고하지 않는다.
     서버 후보만 있어 자동 응답 기한을 시작하지 않은 건도 실행을 예고하지 않는다.
     """
     trigger_source = next(
@@ -1078,11 +1078,6 @@ def pending_automatic_block(
         return AutoIsolationSkipReason.THREAT_TYPE_NOT_ELIGIBLE
     if reason is not None:
         return reason
-    if (
-        trigger_source is TriggerSource.TIMEOUT_ISOLATION_1M
-        and _protected_isolation_recorded(db, incident.incident_id)
-    ):
-        return AutoIsolationSkipReason.PROTECTED_TAG
     reason = protected_auto_isolation_reason(db, incident)
     if reason is not None:
         return reason
@@ -1097,7 +1092,15 @@ def pending_automatic_block(
 def protected_auto_isolation_reason(
     db: Session, incident: models.Incident,
 ) -> AutoIsolationSkipReason | None:
-    """수집된 태그·테넌트 정책을 FinOps와 같은 규칙으로 판단한다. 쓰기·AWS 호출은 없다."""
+    """보호 자산의 자동 격리 생략 사유. 쓰기·AWS 호출은 없다.
+
+    보호로 생략해 관제자에게 넘긴 건(PROTECTED_TARGET_ESCALATION 기록)은 그 뒤 태그·정책이 보호를 풀어도
+    보호로 본다 — 「자동 격리를 생략하고 승인을 기다린다」고 알린 건을 사람 없이 격리하지 않는다. 격리는
+    승인 후보(_protected_isolation_offer)로만 남는다. 기록이 없으면 수집된 태그·테넌트 정책을 FinOps와 같은
+    규칙으로 판단한다. 기록은 Incident 잠금 안에서만 쓰이므로 잠근 뒤 다시 보는 관문은 앞선 기록을 놓치지 않는다.
+    """
+    if _protected_isolation_recorded(db, incident.incident_id):
+        return AutoIsolationSkipReason.PROTECTED_TAG
     asset = assets_repo.get_asset_by_arn(db, incident.subject_arn)
     if asset is None:
         return None
@@ -1197,10 +1200,7 @@ def _protected_isolation_offer(
         for row in executions_repo.list_by_incident(db, incident.incident_id)
     ):
         return None
-    if (
-        not _protected_isolation_recorded(db, incident.incident_id)
-        and protected_auto_isolation_reason(db, incident) is None
-    ):
+    if protected_auto_isolation_reason(db, incident) is None:
         return None
     threats = [
         row for row in incidents_repo.list_evidence(db, incident.incident_id)
