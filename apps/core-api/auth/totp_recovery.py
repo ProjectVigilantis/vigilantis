@@ -39,6 +39,16 @@ reset_totp 순서:
     새 초기화이지만 풀리지 않은 울타리가 있으면 시작하지 않는다. 자동 재삭제 · Cognito 롤백이 없다.
   - 복구는 계정 상태 · 종류 · 역할 · 비밀번호를 바꾸지 않는다. 사람의 신원 확인은 행위자의 외부 절차이며
     이 모듈은 그 진술을 기록할 뿐 증명하지 않는다. 제공자 신원 결합은 (issuer, sub) 로 따로 한다.
+
+활동 로그(#589 B · AUTH_TOTP_RECOVERY — 무엇을 어느 결과로 남기는지는 auth.event_log):
+  - 완료(COMPLETED)는 5 의 결과 기록 commit 에 함께 남긴다. 기록을 못 쓰면 결과도 확정되지 않는다
+    (PROVIDER_PENDING · 울타리 그대로). 차단은 3 에서 이미 commit 됐으므로 되살아나는 세션이 없다.
+  - 대상이 정해진 뒤의 거절(TARGET_INELIGIBLE · OPERATION_CONFLICT · BUSY)은 거절, 제공자 신원 불일치와
+    완료되지 못한 결과(등록 없음 · 제공자 거절 · 결과 불명 · 결과 대기)는 실패로 따로 남긴다. 트랜잭션을 끝낸 뒤에
+    쓰므로 users 잠금을 쥔 채 기록을 쓰지 않는다.
+  - 남기지 않는 것: 진술 없음 · 없는 대상 · 본인 대상 · authorize 의 거절(권한 · 범위 — 호출부의 일이다) ·
+    같은 operation_id 의 재요청(새로 일어난 일이 없다) · 운영자 울타리 정리.
+  - 행위자(event_actor)는 호출부가 넘긴다 — API 는 요청한 관리자, 운영자 CLI 는 SYSTEM 이다.
 """
 
 from __future__ import annotations
@@ -49,6 +59,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
+from functools import partial
 from uuid import UUID
 
 from db import models
@@ -60,12 +71,14 @@ from db.models import (
 )
 from db.repositories import auth as auth_repo
 from db.repositories import totp_recovery as recovery_repo
+from db.repositories.platform_events import EventActor
 from schemas.api.auth import AccountType
+from schemas.platform_events import PlatformEventOutcome
 from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import sessions
+from . import event_log, sessions
 from .cognito import (
     AuthError,
     AuthFailedError,
@@ -115,6 +128,16 @@ class RecoveryRejection(str, Enum):
     EXTERNAL_STATE_NOT_CONFIRMED = "EXTERNAL_STATE_NOT_CONFIRMED"
     #: reconcile_provider_mutation — 대상 신원에 그 mutation_id 의 풀리지 않은 울타리가 없다(이미 풀렸거나 다른 울타리)
     MUTATION_NOT_FOUND = "MUTATION_NOT_FOUND"
+
+
+#: 활동 로그에 남기는 거절(#589 B) — 대상이 범위 안으로 정해진 뒤의 일만이다. 여기 없는 사유는 남기지 않는다:
+#: 진술 없음 · 없는 대상은 누구의 계정에도 일이 일어나지 않았고, 본인 대상은 호출부가 권한 거절로 남긴다.
+_EVENT_OUTCOMES = {
+    RecoveryRejection.TARGET_INELIGIBLE: PlatformEventOutcome.DENIED,
+    RecoveryRejection.OPERATION_CONFLICT: PlatformEventOutcome.DENIED,
+    RecoveryRejection.BUSY: PlatformEventOutcome.DENIED,
+    RecoveryRejection.PROVIDER_IDENTITY_MISMATCH: PlatformEventOutcome.FAILED,
+}
 
 
 class TotpRecoveryRejected(Exception):
@@ -495,9 +518,14 @@ def _finalize(
     mutation_id: str,
     outcome: SoftwareTokenDeletion,
     clock: Callable[[], datetime],
+    *,
+    event_actor: EventActor,
+    tenant_id: str | None,
 ) -> TotpResetResult:
     """제공자 결과를 새 트랜잭션에서 확정한다 — 울타리가 아직 이 작업의 것일 때만. 확정 응답이면 같은 commit 에
-    울타리를 풀고, 결과 불명이면 남긴다. 기록하지 못하면 PROVIDER_PENDING 결과다(예외로 바꾸지 않는다)."""
+    울타리를 풀고, 결과 불명이면 남긴다. 기록하지 못하면 PROVIDER_PENDING 결과다(예외로 바꾸지 않는다).
+
+    완료(COMPLETED)면 활동 로그 한 행을 같은 commit 에 남긴다 — 그 행을 못 쓰면 결과도 확정되지 않는다."""
     status = _STATUS_BY_OUTCOME[outcome]
     try:
         with Session(engine) as db:
@@ -523,10 +551,16 @@ def _finalize(
                 )
             )
             if recorded:
+                if status is TotpRecoveryStatus.COMPLETED:
+                    event_log.totp_recovery_completed(
+                        db, event_actor, target_user_id=pending.target_user_id, tenant_id=tenant_id
+                    )
                 db.commit()
             else:
                 db.rollback()
-    except SQLAlchemyError as exc:
+    # ValueError 는 활동 로그의 계약 위반이다 — reset_totp 가 차단 전에 미리 보므로 여기까지 오지 않아야 하지만,
+    # 차단 commit 뒤에는 예외 대신 결과를 돌려준다는 약속을 지킨다
+    except (SQLAlchemyError, ValueError) as exc:
         logger.error(
             "totp reset finalization failed operation=%s outcome=%s error_type=%s",
             pending.operation_id,
@@ -561,13 +595,59 @@ def reset_totp(
     authorize: Authorize,
     get_adapter: Callable[[], CognitoAdapter],
     clock: Callable[[], datetime],
+    event_actor: EventActor,
 ) -> TotpResetResult:
     """대상의 TOTP 를 복구한다(모듈 설명의 순서). 판정은 결과의 completed(= COMPLETED 기록)로 한다.
 
     예외: TotpRecoveryRejected — 제공자 호출 · 앱 상태 변경 없음(BUSY 는 풀리지 않은 울타리 —
     get_unresolved_provider_mutation 으로 확인한다). authorize 의 예외 · get_adapter 의 예외 · 차단 commit 전의
     DB 오류도 그대로 전파되며 상태를 바꾸지 않았다. 차단 commit 뒤로는 예외 대신 결과를 돌려준다.
+
+    event_actor 는 활동 로그의 행위자다(모듈 설명 「활동 로그」). 계약에 맞지 않으면 차단 전에 ValueError 다.
     """
+    sessions_ = partial(Session, engine)  # 따로 남기는 기록이 쓸 자기 연결
+    try:
+        result = _reset(
+            engine,
+            operation_id=operation_id,
+            target_user_id=target_user_id,
+            identity_verified=identity_verified,
+            authorize=authorize,
+            get_adapter=get_adapter,
+            clock=clock,
+            event_actor=event_actor,
+        )
+    except TotpRecoveryRejected as exc:
+        # 여기까지 온 거절은 자기 트랜잭션을 이미 되돌렸다 — users 잠금을 쥔 채 기록을 쓰지 않는다
+        outcome = _EVENT_OUTCOMES.get(exc.reason)
+        target_id = _canonical_user_id(target_user_id)
+        if outcome is not None and target_id is not None:
+            event_log.totp_recovery_not_completed(
+                sessions_, event_actor, outcome, exc.reason.value, target_user_id=target_id
+            )
+        raise
+    if not result.replayed and not result.completed:
+        event_log.totp_recovery_not_completed(
+            sessions_,
+            event_actor,
+            PlatformEventOutcome.FAILED,
+            result.operation.status.value,
+            target_user_id=result.operation.target_user_id,
+        )
+    return result
+
+
+def _reset(
+    engine: Engine,
+    *,
+    operation_id: UUID,
+    target_user_id: str,
+    identity_verified: bool,
+    authorize: Authorize,
+    get_adapter: Callable[[], CognitoAdapter],
+    clock: Callable[[], datetime],
+    event_actor: EventActor,
+) -> TotpResetResult:
     if identity_verified is not True:
         raise TotpRecoveryRejected(RecoveryRejection.IDENTITY_NOT_CONFIRMED)
     op_id = str(UUID(str(operation_id)))
@@ -576,8 +656,11 @@ def reset_totp(
         stored = recovery_repo.get_operation(db, op_id)
         replayed = None if stored is None else _replay(stored, target.user_id)
         target_id, identity = target.user_id, (target.issuer, target.cognito_sub)
+        tenant_id = target.tenant_id
     if replayed is not None:
         return replayed
+    # 완료 행은 결과 확정과 같은 트랜잭션이다 — 계약에 맞지 않는 행위자면 아무것도 바꾸기 전에 멈춘다
+    event_log.check_totp_recovery_actor(event_actor, target_user_id=target_id, tenant_id=tenant_id)
     adapter = get_adapter()  # 판정을 모두 통과한 뒤에만 Cognito 클라이언트를 조립한다
     if adapter.issuer != identity[0]:
         raise TotpRecoveryRejected(RecoveryRejection.PROVIDER_IDENTITY_MISMATCH)
@@ -587,7 +670,9 @@ def reset_totp(
         return fenced
     pending, mutation_id = fenced
     outcome = _delete(adapter, identity[1], op_id)  # 트랜잭션 · DB 연결 없이
-    return _finalize(engine, pending, mutation_id, outcome, clock)
+    return _finalize(
+        engine, pending, mutation_id, outcome, clock, event_actor=event_actor, tenant_id=tenant_id
+    )
 
 
 def reconcile_provider_mutation(

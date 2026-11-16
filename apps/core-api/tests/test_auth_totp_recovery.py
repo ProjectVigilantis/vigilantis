@@ -41,11 +41,13 @@ from db.models import TotpProviderMutationKind as K
 from db.models import TotpProviderMutationResolution as Res
 from db.models import TotpRecoveryStatus as R
 from db.repositories import auth as auth_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import totp_recovery as recovery_repo
 from schemas.api.auth import AccountType, LoginStep, UserRole
 from sqlalchemy import create_engine, delete, or_, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from tests.platform_event_cleanup import purge_platform_events
 
 REGION = "ap-northeast-2"
 POOL = "ap-northeast-2_Recovery"
@@ -267,6 +269,10 @@ def world(pg_engine, seed_tenant):
     yield w
     worker.dispose()
     with Session(pg_engine) as s:
+        # 복구가 남긴 활동 로그(#589 B) — 대상 · 소속으로 이어진 행까지 지워야 다음 테스트로 새지 않는다
+        purge_platform_events(
+            s, actor_user_ids=w.user_ids, target_ids=w.user_ids, tenant_ids=[tenant_id]
+        )
         s.execute(delete(models.TotpProviderMutation).where(models.TotpProviderMutation.issuer == ISSUER))
         op = models.TotpRecoveryOperation
         s.execute(delete(op).where(or_(op.target_user_id.in_(w.user_ids), op.actor_user_id.in_(w.user_ids))))
@@ -296,6 +302,8 @@ def reset(world, adapter, op=None, **overrides):
         "authorize": allow(world.admin),
         "get_adapter": lambda: adapter,
         "clock": lambda: T1,
+        # 활동 로그의 행위자(#589 B) — 이 파일은 복구의 상태 · 순서를 본다. 기록은 test_totp_recovery_platform_events 가 본다
+        "event_actor": platform_events_repo.SYSTEM,
     }
     params.update(overrides)
     return totp_recovery.reset_totp(world.engine, **params)

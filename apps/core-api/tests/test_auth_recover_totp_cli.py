@@ -13,9 +13,11 @@ from auth.cognito import CognitoAdapter
 from botocore.exceptions import ClientError, ReadTimeoutError
 from db import models
 from db.repositories import auth as auth_repo
+from db.repositories import platform_events as platform_events_repo
 from schemas.api.auth import AccountType, PlatformRole, UserRole
 from sqlalchemy import delete, or_, select, text
 from sqlalchemy.orm import Session
+from tests.platform_event_cleanup import purge_platform_events
 
 REGION = "ap-northeast-2"
 POOL = "ap-northeast-2_CliRecovery"
@@ -131,6 +133,8 @@ def env(pg_engine, seed_tenant):
     e = Env(engine=pg_engine, tenant_id=tenant_id)
     yield e
     with Session(pg_engine) as s:
+        # 복구가 남긴 활동 로그(#589 B) — 행위자는 SYSTEM 이라 대상 · 소속으로 지운다
+        purge_platform_events(s, target_ids=e.user_ids, tenant_ids=[tenant_id])
         op = models.TotpRecoveryOperation
         mut = models.TotpProviderMutation
         s.execute(
@@ -548,6 +552,7 @@ def _fenced_tenant(env, role):
         authorize=lambda db, user: None,
         get_adapter=env.get_adapter,
         clock=lambda: NOW,
+        event_actor=platform_events_repo.SYSTEM,
     )
     assert result.operation.status is models.TotpRecoveryStatus.PROVIDER_UNKNOWN
     env.fake.hook = None

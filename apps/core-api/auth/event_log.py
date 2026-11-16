@@ -19,6 +19,13 @@
 #   - 남기지 않는 것: 입력 형식 문제(AUTH_PASSWORD_POLICY) · 단계가 어긋난 요청(AUTH_STEP_CONFLICT) · 대상 계정을
 #     모르는 만료(AUTH_FLOW_EXPIRED — 진행 쿠키 없이 온 요청). 누구의 계정에도 시도가 일어나지 않았다.
 #   - 대상 계정이 고객사(TENANT) 계정이면 그 고객사를 소속(tenant_id)으로 싣는다 — 담당자의 조회 범위에 들어간다.
+#   - **TOTP 분실 복구(AUTH_TOTP_RECOVERY)** 는 auth.totp_recovery.reset_totp 가 부른다. 행위자는 복구를 실행한 사람
+#     (API 의 관리자)이거나 SYSTEM(운영자 CLI — 앱 계정이 없다)이고 대상은 복구되는 계정이다.
+#       · 완료(COMPLETED)는 결과 확정과 **같은 트랜잭션**에 남긴다. 기록을 못 쓰면 결과도 확정되지 않아 작업이 결과
+#         대기(PROVIDER_PENDING)로 남는다 — 세션 폐기와 세대 올림은 제공자 호출 전 차단 commit 에서 이미 끝나
+#         있어 되살아나는 것이 없다(로그아웃 · 재설정과 결론이 다른 까닭이다).
+#       · 거절 · 완료되지 못한 결과는 따로 남긴다. 대상이 범위 안으로 정해진 뒤의 일만 남긴다 — 권한 없음 · 범위 밖 ·
+#         없는 대상 · 진술 없음은 여기서 남기지 않는다(403 · 범위 밖 404 는 ACCESS_* 한 행이 맡는다).
 # ==============================================================================
 
 from __future__ import annotations
@@ -117,8 +124,10 @@ def _record_after_commit(
     *,
     tenant_id: Optional[str],
     target_id: Optional[str] = None,
+    outcome: PlatformEventOutcome = PlatformEventOutcome.SUCCEEDED,
+    reason_code: Optional[str] = None,
 ) -> None:
-    """이미 commit 된 일의 성공 행을 따로 남긴다. 어떤 실패도 올리지 않는다 — 끝난 일의 응답을 바꾸지 않는다.
+    """이미 끝난 일의 행을 따로 남긴다. 어떤 실패도 올리지 않는다 — 끝난 일의 응답을 바꾸지 않는다.
 
     DB 쓰기 실패는 record_detached 가 앱 로그로 돌린다. 계약 위반(ValueError)은 거기서 올라오므로 여기서 받는다."""
     try:
@@ -126,9 +135,10 @@ def _record_after_commit(
             session_factory,
             action,
             actor,
-            outcome=PlatformEventOutcome.SUCCEEDED,
+            outcome=outcome,
             tenant_id=tenant_id,
             target_id=target_id,
+            details=None if reason_code is None else {"reason_code": reason_code},
         )
     except ValueError:
         logger.error("auth_event_not_recorded: outside the event contract action=%s", action.value)
@@ -186,4 +196,69 @@ def logged_out(session_factory: Callable[[], Session], who: LoggedOut) -> None:
     """세션 폐기가 commit 된 **뒤에** 로그아웃을 따로 남긴다. 쓰기가 실패해도 예외를 올리지 않는다(머리말)."""
     _record_after_commit(
         session_factory, PlatformEventAction.AUTH_LOGOUT, who.actor, tenant_id=who.tenant_id
+    )
+
+
+# --- TOTP 분실 복구 -------------------------------------------------------------------
+
+
+def check_totp_recovery_actor(
+    actor: platform_events_repo.EventActor, *, target_user_id: str, tenant_id: Optional[str]
+) -> None:
+    """완료 행이 기록 계약에 맞는지 미리 본다. 맞지 않으면 ValueError — 복구가 아무것도 바꾸기 전에 멈춘다.
+
+    완료 행은 결과 확정과 같은 트랜잭션이라, 계약에 걸리면 제공자의 TOTP 등록은 지워졌는데 작업은 결과 대기로
+    남는다. 그 자리까지 가서 알게 되지 않도록 차단 commit 전에 같은 값으로 한 번 만들어 본다(쓰지 않는다)."""
+    platform_events_repo.build_platform_event(
+        action=PlatformEventAction.AUTH_TOTP_RECOVERY,
+        actor=actor,
+        tenant_id=tenant_id,
+        target_id=target_user_id,
+    )
+
+
+def totp_recovery_completed(
+    db: Session,
+    actor: platform_events_repo.EventActor,
+    *,
+    target_user_id: str,
+    tenant_id: Optional[str],
+) -> None:
+    """복구 완료(COMPLETED)를 결과 확정과 같은 트랜잭션에 남긴다. commit 은 호출부가 한다."""
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.AUTH_TOTP_RECOVERY,
+        actor,
+        tenant_id=tenant_id,
+        target_id=target_user_id,
+    )
+
+
+def totp_recovery_not_completed(
+    session_factory: Callable[[], Session],
+    actor: platform_events_repo.EventActor,
+    outcome: PlatformEventOutcome,
+    reason_code: str,
+    *,
+    target_user_id: str,
+) -> None:
+    """거절됐거나 완료되지 못한 복구 한 건을 따로 남긴다. 호출부는 자기 트랜잭션을 끝낸 뒤 부른다.
+
+    소속은 대상 계정에서 읽는다. 조회나 쓰기가 실패해도 예외를 올리지 않는다 — 이미 정해진 응답을 바꾸지 않는다."""
+    tenant_id = None
+    try:
+        with session_factory() as db:
+            user = auth_repo.get_user(db, target_user_id)
+            tenant_id = None if user is None else user.tenant_id
+            db.rollback()  # 읽기 트랜잭션을 닫고 쓴다
+    except SQLAlchemyError as exc:
+        logger.error("auth_event_target_lookup_failed error_type=%s", type(exc).__name__)
+    _record_after_commit(
+        session_factory,
+        PlatformEventAction.AUTH_TOTP_RECOVERY,
+        actor,
+        tenant_id=tenant_id,
+        target_id=target_user_id,
+        outcome=outcome,
+        reason_code=reason_code,
     )

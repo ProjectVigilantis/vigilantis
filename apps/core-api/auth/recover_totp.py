@@ -55,6 +55,7 @@ from config import get_auth_settings
 from db import models
 from db.models import TotpRecoveryStatus as Status
 from db.repositories import auth as auth_repo
+from db.repositories import platform_events as platform_events_repo
 from schemas.api.auth import AccountType, UserRole
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -378,6 +379,8 @@ def run(
             authorize=authorize,
             get_adapter=get_adapter,
             clock=now,
+            # 운영자 CLI 에는 행위자 앱 계정이 없다 — 활동 로그의 행위자는 SYSTEM 이다(#589 B)
+            event_actor=platform_events_repo.SYSTEM,
         )
     except PolicyDenied as exc:
         say(f"거절(정책): {exc} 변경 없음.")
