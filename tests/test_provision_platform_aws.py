@@ -301,7 +301,7 @@ def test_down_removes_only_alias_records_that_point_at_this_distribution():
 
 
 # ④ ---------------------------------------------------------------------------
-RULE_NAMES = ["rate-login-per-ip", "rate-per-ip", "allow-listed-ips"]
+RULE_NAMES = ["rate-login-per-ip", "rate-signup-per-ip", "rate-per-ip", "allow-listed-ips"]
 
 
 def _rules():
@@ -317,10 +317,10 @@ def test_waf_allows_only_the_ip_set():
 # ⑦ 속도 제한 (#484) ------------------------------------------------------------
 def test_rate_limits_are_evaluated_before_the_allow_rule():
     # 허용이 먼저 맞으면 WAF가 거기서 끝낸다 — 속도 규칙은 우선순위가 더 앞이어야 평가된다.
-    # 로그인 규칙이 맨 앞 — Block 이 되면 더 낮은 한도가 먼저 끊는다(#522 Q5)
+    # 경로 규칙 둘이 전 경로 규칙보다 앞 — Block 이 되면 더 낮은 한도가 먼저 끊는다(#522 Q5 · D)
     rules = platform.waf_rules("arn:ipset", "arn:nat")
     assert [rule["Name"] for rule in rules] == RULE_NAMES
-    assert [rule["Priority"] for rule in rules] == [0, 1, 2]
+    assert [rule["Priority"] for rule in rules] == [0, 1, 2, 3]
 
 
 def test_rate_limit_counts_per_ip_but_never_the_nat_ip():
@@ -386,6 +386,82 @@ def test_login_rate_limit_skips_the_signed_in_session_calls(path):
 def test_login_rate_limit_starts_in_count_mode():
     # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#522 C · B 와 같은 방식)
     assert _rules()["rate-login-per-ip"]["Action"] == {"Count": {}}
+
+
+# 공개 신청 접수 한도 (#522 D) ----------------------------------------------------
+def _signup_matches(method: bytes, path: bytes) -> bool:
+    """신청 규칙의 경로 · 메서드 조건(둘 다 EXACTLY, 경로만 URL 디코딩)을 그대로 흉내 낸다."""
+    rule = _rules()["rate-signup-per-ip"]
+    by_path, by_method, _ = rule["Statement"]["RateBasedStatement"]["ScopeDownStatement"]["AndStatement"]["Statements"]
+    def hit(statement, value):
+        match = statement["ByteMatchStatement"]
+        assert match["PositionalConstraint"] == "EXACTLY"
+        decode = {"Priority": 0, "Type": "URL_DECODE"} in match["TextTransformations"]
+        return (unquote_to_bytes(value) if decode else value) == match["SearchString"]
+    return hit(by_path, path) and hit(by_method, method)
+
+
+def test_signup_rate_limit_counts_only_the_public_post_per_ip_without_the_nat_ip():
+    rule = _rules()["rate-signup-per-ip"]
+    stmt = rule["Statement"]["RateBasedStatement"]
+    assert (stmt["AggregateKeyType"], stmt["Limit"], stmt["EvaluationWindowSec"]) == (
+        "IP", platform.SIGNUP_RATE_LIMIT_PER_WINDOW, platform.RATE_WINDOW_SECONDS)
+    # 사람이 하루 몇 건 보내는 경로 — 로그인보다 낮게 잡는다. WAF 가 받는 하한은 10 이다
+    assert 10 <= platform.SIGNUP_RATE_LIMIT_PER_WINDOW < platform.LOGIN_RATE_LIMIT_PER_WINDOW
+    assert stmt["ScopeDownStatement"] == {"AndStatement": {"Statements": [
+        {"ByteMatchStatement": {
+            # get_web_acl 이 bytes 로 돌려준다 — str 이면 두 번째 실행부터 매번 「다름」이 된다
+            "SearchString": b"/api/v1/signup-requests",
+            "FieldToMatch": {"UriPath": {}},
+            # 앱은 %인코딩을 풀어 라우팅한다 — 풀지 않고 맞추면 /api/v1/signup-request%73 가 비켜 간다
+            "TextTransformations": [{"Priority": 0, "Type": "URL_DECODE"}],
+            # 접두가 아니라 완전 일치 — 같은 접두 아래는 중앙 관리자의 관리 라우트다
+            "PositionalConstraint": "EXACTLY",
+        }},
+        {"ByteMatchStatement": {
+            "SearchString": b"POST",
+            "FieldToMatch": {"Method": {}},
+            "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+            "PositionalConstraint": "EXACTLY",
+        }},
+        {"NotStatement": {"Statement": {"IPSetReferenceStatement": {"ARN": "arn:nat"}}}},
+    ]}}
+    assert rule["VisibilityConfig"]["MetricName"] == f"{platform.PREFIX}-rate-signup"
+
+
+@pytest.mark.parametrize("path", [b"/api/v1/signup-requests", b"/api/v1/signup-request%73", b"/api/v1/%73ignup-requests"])
+def test_signup_rate_limit_counts_the_public_submission(path):
+    assert _signup_matches(b"POST", path)
+
+
+@pytest.mark.parametrize(("method", "path"), [
+    (b"GET", b"/api/v1/signup-requests"),                                 # 중앙 관리자의 목록
+    (b"PUT", b"/api/v1/signup-requests/7f1c/status"),                     # 상태 변경
+    (b"POST", b"/api/v1/signup-requests/7f1c/approve"),                   # 승인
+    (b"POST", b"/api/v1/signup-requests/"),                               # 앱이 접수하지 않는다(아래 테스트)
+    (b"POST", b"/api/v1/inquiries"), (b"POST", b"/api/v1/auth/login"),
+])
+def test_signup_rate_limit_skips_the_admin_routes_and_other_paths(method, path):
+    # 섞이면 관측 지표로 접수 시도와 운영자의 일을 가를 수 없다
+    assert not _signup_matches(method, path)
+
+
+def test_signup_rate_limit_points_at_the_route_the_app_actually_serves():
+    # 경로를 옮기거나 메서드를 바꾸면 WAF 규칙이 아무것도 세지 않게 된다 — 조용히 어긋나지 않게 묶는다
+    from routers.signup_requests import router  # noqa: PLC0415 — core-api 는 conftest 가 경로에 올린다
+
+    public = [route for route in router.routes if route.name == "create_signup_request"]
+    assert [(route.path, route.methods) for route in public] == [
+        (platform.SIGNUP_PATH.decode(), {platform.SIGNUP_METHOD.decode()})]
+    # 완전 일치로 충분한 근거 — 같은 메서드로 접수에 닿는 다른 경로가 없다(끝 슬래시는 라우트가 아니다)
+    same_method = [route.path for route in router.routes if platform.SIGNUP_METHOD.decode() in route.methods]
+    assert [path for path in same_method if _signup_matches(platform.SIGNUP_METHOD, path.encode())] == [
+        platform.SIGNUP_PATH.decode()]
+
+
+def test_signup_rate_limit_starts_in_count_mode():
+    # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#522 D · B 와 같은 방식)
+    assert _rules()["rate-signup-per-ip"]["Action"] == {"Count": {}}
 
 
 def test_rate_limit_starts_in_count_mode():
@@ -497,10 +573,24 @@ def test_existing_acl_without_the_login_rule_gets_it_in_front():
                   acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2]))
+    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2, 3]))
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == []
+
+
+def test_existing_acl_without_the_signup_rule_gets_it_before_the_generic_limit():
+    # 지금 배포된 플랫폼의 모양 — 로그인(0) · 전 경로(1) · 허용(2)인 웹 ACL(#522 C 적용 뒤)
+    old = [rule for rule in platform.waf_rules(f"arn:{platform.WAF_IPSET}", f"arn:{platform.WAF_NAT_IPSET}")
+           if rule["Name"] != "rate-signup-per-ip"]
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: NATS},
+                  acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == ["update_web_acl"]
+    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2, 3]))
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == []  # 다시 돌리면 변경 0
 
 
 def test_second_run_changes_nothing():
@@ -520,7 +610,20 @@ def test_switching_to_block_is_applied_on_rerun(monkeypatch):
     assert waf.calls == ["update_web_acl"]
     actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
     assert actions["rate-per-ip"] == {"Block": {}}
-    assert actions["rate-login-per-ip"] == {"Count": {}}  # 두 규칙의 전환은 따로다
+    assert actions["rate-login-per-ip"] == {"Count": {}}  # 규칙마다 전환은 따로다
+    assert actions["rate-signup-per-ip"] == {"Count": {}}
+
+
+def test_switching_only_the_signup_rule_to_block_is_applied_on_rerun(monkeypatch):
+    waf = FakeWaf()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    monkeypatch.setattr(platform, "SIGNUP_RATE_ACTION", "Block")
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == ["update_web_acl"]
+    actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
+    assert actions["rate-signup-per-ip"] == {"Block": {}}
+    assert (actions["rate-login-per-ip"], actions["rate-per-ip"]) == ({"Count": {}}, {"Count": {}})
 
 
 def test_down_removes_the_acl_then_both_ip_sets():

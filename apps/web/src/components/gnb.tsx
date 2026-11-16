@@ -91,11 +91,10 @@ export function ShellHeader() {
   return (
     <header className="dark bg-shell text-foreground flex h-16 shrink-0 items-center gap-3 border-b px-4 sm:gap-6">
       {/* 고객 계정은 기존 역할별 진입점으로 간다. 플랫폼 대시보드 링크는 유지한다. */}
-      <Link href={account !== null && !open ? homePathFor(account) : '/'} className="flex shrink-0 items-center gap-2.5">
-        <span className="bg-primary flex size-7 items-center justify-center rounded-md">
-          <Shield aria-hidden className="size-4 text-white" />
-        </span>
-        <span className="text-base font-bold tracking-tight">Vigilantis</span>
+      <Link href={account !== null && !open ? homePathFor(account) : '/'} className="ml-2 flex shrink-0 items-center gap-2.5">
+        {/* 방패는 바탕 블록 없이 글자와 같은 흰색으로 둔다(2026-11-16 PM 결정). */}
+        <Shield aria-hidden className="size-5.5 text-white" />
+        <span className="text-lg font-bold tracking-tight">Vigilantis</span>
       </Link>
 
       {/* 서버 칩은 이 화면과 서버의 실시간 연결이다(connection-indicator.tsx). 끊겼을 때 [재연결] 버튼(§4.8 4)이 여기 있다.
@@ -118,8 +117,10 @@ export function ShellHeader() {
 }
 
 const NAV_ITEM =
-  'flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 text-[13px] font-bold whitespace-nowrap transition-colors focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none';
-const NAV_IDLE = 'text-white/78 hover:bg-white/8 hover:text-white';
+  'flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 whitespace-nowrap transition-colors focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none';
+const NAV_IDLE = 'text-[13px] font-medium text-white/70 hover:bg-white/8 hover:text-white';
+// 선택된 메뉴는 칠하지 않고 글자만 키우고 굵게 한다(DESIGN.md `nav-item-active`, 2026-11-16).
+const NAV_ACTIVE = 'text-sm font-extrabold text-white';
 
 /**
  * 넓은 화면에서는 왼쪽 세로 메뉴, 좁은 화면(< md)에서는 상단바 아래 가로 줄이다.
@@ -146,7 +147,7 @@ export function ShellNav() {
               key={href}
               href={href}
               aria-current={active ? 'page' : undefined}
-              className={cn(NAV_ITEM, active ? 'bg-primary text-white' : NAV_IDLE)}
+              className={cn(NAV_ITEM, active ? NAV_ACTIVE : NAV_IDLE)}
             >
               <Icon aria-hidden className="size-4.5" />
               {label}

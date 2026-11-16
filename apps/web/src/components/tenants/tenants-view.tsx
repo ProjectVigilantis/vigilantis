@@ -12,11 +12,13 @@ import { useSession } from '@/components/auth/session-provider';
 import { EmptyState } from '@/components/empty-state';
 import { SubscriptionCell } from '@/components/subscriptions/subscription-facts';
 import { CreateTenantDialog } from '@/components/tenants/create-tenant-dialog';
+import { OutOfScopeTenants } from '@/components/tenants/out-of-scope-tenants';
 import { TenantStatusBadge, VerificationSummary } from '@/components/tenants/tenant-badges';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { INPUT_CLASS } from '@/components/form-classes';
 import { canCreateTenant, isCentralAdmin, isUnassignedManager } from '@/lib/roles';
+import { TENANT_SEARCH_MAX } from '@/lib/tenant-groups';
 import { matchesTenantQuery, summarizeTenants, TENANT_STATUS_LABELS } from '@/lib/tenants';
 import { cn } from '@/lib/utils';
 import type { TenantListItem, TenantStatus } from '@/types/api';
@@ -55,26 +57,52 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
           {me?.platform_role === 'TENANT_MANAGER' ? <p className="text-muted-foreground text-sm">담당 고객사만 표시합니다.</p> : null}
         </div>
         {canCreate ? (
-          <Button type="button" className="h-10 px-4" onClick={() => setCreating(true)}>
-            <Plus aria-hidden />
-            고객사 추가
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {/* 그룹 만들기 · 고객사 배정은 중앙 관리계정만 한다(#572 2번). 고객사 추가와 같은 판정이다. */}
+            <Button asChild variant="outline" className="h-10 px-4">
+              <Link href="/tenants/groups">고객사 그룹</Link>
+            </Button>
+            <Button type="button" className="h-10 px-4" onClick={() => setCreating(true)}>
+              <Plus aria-hidden />
+              고객사 추가
+            </Button>
+          </div>
         ) : null}
       </div>
 
       {tenants.length === 0 ? (
-        unassigned ? (
-          <EmptyState
-            message="담당 고객사가 배정되지 않았습니다."
-            description="배정 전에는 고객사 정보 · 조치 · 고객사 계정 관리를 이용할 수 없습니다. 중앙 관리계정에서 담당 고객사를 배정받아야 합니다."
-          />
-        ) : canCreate ? (
-          <EmptyState
-            message="등록된 고객사가 없습니다."
-          />
-        ) : (
-          <EmptyState message="표시할 고객사가 없습니다." />
-        )
+        <>
+          {unassigned ? (
+            <EmptyState
+              message="담당 고객사가 배정되지 않았습니다."
+              description="배정 전에는 고객사 정보 · 조치 · 고객사 계정 관리를 이용할 수 없습니다. 중앙 관리계정에서 담당 고객사를 배정받아야 합니다."
+            />
+          ) : canCreate ? (
+            <EmptyState
+              message="등록된 고객사가 없습니다."
+            />
+          ) : (
+            <EmptyState message="표시할 고객사가 없습니다." />
+          )}
+          {/* 담당 고객사가 0곳이어도 서버는 이름 검색을 허용한다(#572 7번). 목록 표가 없으니 검색 칸만 따로 둔다. */}
+          {me?.platform_role === 'TENANT_MANAGER' ? (
+            <section className="bg-card ring-foreground/10 overflow-hidden rounded-xl ring-1">
+              <div className="flex flex-wrap items-center gap-3 px-6 py-4">
+                <h2 className="text-base font-bold">담당 밖 고객사 검색</h2>
+                <input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  aria-label="담당 밖 고객사 검색"
+                  maxLength={TENANT_SEARCH_MAX}
+                  placeholder="고객사 이름 검색"
+                  className={cn(INPUT_CLASS, 'h-8 w-64')}
+                />
+              </div>
+              <OutOfScopeTenants query={query} showEmpty />
+            </section>
+          ) : null}
+        </>
       ) : (
         <>
           <section className="bg-card ring-foreground/10 overflow-hidden rounded-xl ring-1">
@@ -86,6 +114,7 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   aria-label="고객사 검색"
+                  maxLength={TENANT_SEARCH_MAX}
                   placeholder="이름 · 고객사 ID · AWS 계정 검색"
                   className={cn(INPUT_CLASS, 'h-8 w-64')}
                 />
@@ -167,6 +196,8 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                 </TableBody>
               </Table>
             </div>
+            {/* 담당 밖 고객사는 관리자 직원계정에게만 있다. 중앙 관리계정의 목록은 이미 전체라 서버 검색을 부르지 않는다. */}
+            {me?.platform_role === 'TENANT_MANAGER' ? <OutOfScopeTenants query={query} /> : null}
           </section>
         </>
       )}

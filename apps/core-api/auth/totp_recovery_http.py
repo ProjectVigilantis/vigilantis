@@ -10,6 +10,8 @@
 #   - make_authorize 의 콜백은 코어가 읽기 단계와 users 잠금 안에서 두 번 부른다. 행위자 세션을 매번 다시 판정하고
 #     (admin_service._authorize_write: 정지 테넌트 409), 범위 밖 · PLATFORM · UNASSIGNED 대상은 없는 대상과 같은 404 다.
 #   - 204 는 COMPLETED 기록뿐이다. 그 밖의 결과(제공자 거절 · 미확인 · 등록 없음 · 기록 실패)는 503 이다.
+#   - 활동 로그(#589 B)의 행위자는 요청한 관리자다(requester). 복구 본체가 완료 · 거절 · 실패를 남기고
+#     (auth.totp_recovery 「활동 로그」), 이 어댑터가 내는 403 · 404 는 본체의 기록 대상이 아니다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ from collections.abc import Callable
 from uuid import UUID
 
 from db import models
-from exceptions import ApiError
+from db.repositories import platform_events as platform_events_repo
+from exceptions import ApiError, OutOfScopeError
 from fastapi import Depends
 from schemas.api.auth import AccountType, UserRole
 from schemas.api.errors import ErrorCode
@@ -75,7 +78,9 @@ def make_authorize(actor: admin_service.Actor) -> Authorize:
                 target.account_type is not AccountType.TENANT
                 or (_is_tenant_admin(admin) and target.tenant_id != admin.tenant_id)
             ):
-                raise ApiError(ErrorCode.USER_NOT_FOUND)
+                # 있는데 복구할 수 없는 대상 — 응답은 같은 404 이고 활동 로그에만 남는다(#589 B ·
+                # ACCESS_OUT_OF_SCOPE). 읽기 단계와 잠금 안에서 두 번 불려도 요청당 한 번만 올라간다
+                raise OutOfScopeError(ErrorCode.USER_NOT_FOUND)
         except BaseException:
             db.rollback()
             raise
@@ -92,8 +97,12 @@ def recover_totp(
     user_id: str,
     operation_id: UUID,
     identity_verified: bool,
+    requester: service.CurrentUser,
 ) -> None:
-    """복구가 COMPLETED 로 기록됐을 때만 반환한다. 그 밖은 ApiError."""
+    """복구가 COMPLETED 로 기록됐을 때만 반환한다. 그 밖은 ApiError.
+
+    requester 는 관문(require_recovery_actor)을 통과한 요청자다 — 활동 로그의 행위자로만 쓴다. 권한은 지금처럼
+    actor 의 토큰으로 매번 다시 판정한다(make_authorize)."""
     try:
         result = reset_totp(
             engine,
@@ -103,6 +112,7 @@ def recover_totp(
             authorize=make_authorize(actor),
             get_adapter=get_adapter,
             clock=actor.clock,
+            event_actor=platform_events_repo.person(requester),
         )
     except TotpRecoveryRejected as exc:
         raise ApiError(_REJECTION_CODES[exc.reason]) from None

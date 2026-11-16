@@ -41,13 +41,12 @@ export function StatusChip({
 }) {
   const view = TONE[tone];
   return (
-    <span
-      className="bg-muted/50 flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 whitespace-nowrap"
-      title={title}
-    >
+    // 바탕 칠 없이 점 · 글자만 둔다(2026-11-16 PM 결정, DESIGN.md `live-indicator`).
+    <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={title}>
       <span aria-hidden className={cn('size-1.5 rounded-full', view.dot, pulse && 'animate-pulse')} />
-      <span className="text-muted-foreground text-[11px]">{label}</span>
-      <span className={cn('text-xs font-medium', view.value)}>{value}</span>
+      {/* 속성과 값은 같은 크기 · 같은 줄 높이로 둔다. 크기가 다르면 가운데 정렬에서 글자 바닥선이 어긋난다. */}
+      <span className="text-muted-foreground text-xs leading-4">{label}</span>
+      <span className={cn('text-xs leading-4 font-medium', view.value)}>{value}</span>
       {children}
     </span>
   );

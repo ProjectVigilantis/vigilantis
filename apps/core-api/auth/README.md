@@ -17,7 +17,7 @@ Cognito Admin 인증 API로 로그인을 진행하고, **이번 로그인에서 
 | `service.py` | 트랜잭션 소유자. 로그인 완료(사용자 조회 · 세션 발급), 현재 사용자, 활동, 로그아웃. (PR 3) 로그인 완료를 `app_users` 잠금으로 직렬화하고 그 사용자의 이전 세션을 전부 회수. (#492) `CurrentUser`에 `account_type` · `tenant_id`와 내부 전용 `tenant_status`. UNASSIGNED는 로그인 완료 403 · 세션 판정 401. `CurrentUser.platform_role`과 `assigned_tenant_ids`(TENANT_MANAGER의 담당 고객사, 정규 UUID 튜플) — 판정마다 DB의 현재 값을 읽는다(`/me`에도 싣는다). (#572 2번) `assigned_tenant_ids`는 담당 그룹에 든 고객사이고, 내부 전용 `assigned_group_ids`(담당 그룹)가 더해졌다 — TENANT_MANAGER는 세션 판정마다 그룹 배정과 고객사의 그룹을 새로 읽는다. `/me`에는 `assigned_group_ids`를 싣지 않는다. (#515) 로그인 완료가 잠금 안에서 포착한 인증 세대 · 복구 차단 상태를 대조 |
 | `password_policy.py` | (PR 3) 새 비밀번호 정책 순수 함수 `check_password` — 최초 비밀번호 변경 · 재설정 확정 공용 |
 | `password_reset.py` | (PR 3) 비밀번호 재설정 요청 · 확정, 확정 성공 뒤 앱 세션 회수 |
-| `event_log.py` | (#589 B) 로그인 · 세션의 플랫폼 활동 로그 — 어떤 일을 어느 행동 · 결과로 남기는지 한곳에 둔다. 로그인 성공은 세션 발급과 같은 트랜잭션에, 그 밖(로그아웃 · 재설정의 성공, 거절 · 실패)은 따로 남긴다(§활동 로그) |
+| `event_log.py` | (#589 B) 로그인 · 세션의 플랫폼 활동 로그 — 어떤 일을 어느 행동 · 결과로 남기는지 한곳에 둔다. 로그인 성공과 TOTP 분실 복구의 완료는 그 쓰기와 같은 트랜잭션에, 그 밖(로그아웃 · 재설정의 성공, 거절 · 실패)은 따로 남긴다(§활동 로그) |
 | `admin_service.py` | (PR 3) ADMIN 사용자 관리 트랜잭션 소유자 — 초대 · 재발송 · 역할 · 상태 · 세션 회수 · 이력 조회. 잠금 · 행위자 재판정 · 마지막 활성 ADMIN 보호. (#492) 행위자의 고객 범위(`auth.access.tenant_scope_ids`)에 따른 관리 범위, 초대 대상 테넌트 결정 · ACTIVE 확인, 정지 테넌트 행위자의 쓰기 거절, 테넌트별 마지막 활성 ADMIN, 기존 계정 연결(`recover_existing`)의 중앙 관리계정 한정. 행위자 권한은 HTTP 의존성과 같은 판정(`auth.permissions.require_user_management` · `auth.access.require_central_admin`)으로 가르고, 직원 관리와 이력 응답(`events_response`) · 잠금 트랜잭션을 공유한다. (#572 5번) OPERATOR 기능별 권한 교체(`change_permissions`), 초대 시 권한 부여, 역할 변경 시 권한 정리 |
 | `permissions.py` | (#572 5 · 9번) 기능별 권한 판정 — `effective_permissions`(`/me`와 관문이 같은 값) · `require_permission(기능)`(조치 실행 · 인시던트 종료 라우트 의존성) · `check_permission`(Workflow · 문의 접수의 잠금 안 재판정). 계정 관리 관문 `require_user_management` · `is_user_manager`(`/api/v1/users` 라우터 의존성 — TENANT ADMIN · CENTRAL_ADMIN만) |
 | `staff_service.py` | (#492) 직원 관리 트랜잭션 소유자 — 목록 · 등급 · 상태 · (#572 2번) 담당 그룹 배정(`get_groups` · `replace_groups`) · 이력. 모든 쓰기는 `admin_service._transaction(central=True)` 안이다(중앙 관리계정만 — #572 4번). 대상은 PLATFORM만, 자기 변경 금지(잠금 안 행위자 재판정과 함께 ACTIVE 중앙 관리계정을 한 명 이상 남긴다), 비활성화의 세션 회수, 등급 변경 때 담당 그룹 비움(`GROUP_ASSIGNMENTS_CHANGED` 함께). (#572 1번) 직원 이메일 초대 · 재발송 — Cognito 호출은 트랜잭션 밖, 만드는 계정은 담당 그룹 없는 `TENANT_MANAGER`(§직원 관리) |
@@ -287,7 +287,7 @@ TENANT 계정의 고객용 업무 화면은 아직 열리지 않았다(T-4 · T-
 | 항목 | 내용 | 근거 |
 | --- | --- | --- |
 | 공개 접수 | `POST /api/v1/signup-requests`만 세션 없이 받는다. 이 경로에는 Origin 검사(`AUTH_ALLOWED_ORIGINS`), UUIDv4 `Idempotency-Key` 헤더 필수, 본문 크기 제한만 건다. 본문 크기는 JSON 파싱 전에 실제로 받은 바이트로 제한하고(초과 413), 한도는 기존 신청 양식의 칸 제한(이름 100 · 이메일 254 · 메모 1000자)에서 정했다. 같은 Key로 다시 보내면 같은 신청 ID로 202, 같은 Key에 다른 본문이면 409다. Key와 신청의 연결은 신청과 함께 보관하며 별도 만료 시간(TTL)을 두지 않는다 | [#552 구현 계약] |
-| 공개 접수의 한계 | 봇 방어나 이메일 소유 확인이 아니다. 요청 빈도 제한(WAF 임계값)은 정하지 않았고, 이 변경은 네트워크상 공개 허용 · 배포를 포함하지 않는다. 운영 환경의 개인정보 보존 기간과 빈도 제한 정책은 공개 출시 전에 정할 조건이다 | [#552 구현 계약] |
+| 공개 접수의 한계 | 봇 방어나 이메일 소유 확인이 아니다. 앱에는 요청 빈도 제한이 없다. 플랫폼 배포 스크립트의 WAF 규칙에는 접수 경로(`POST`, 경로 완전 일치)의 IP당 한도가 잠정값 · Count(세기만 하고 막지 않는다)로 들어 있고, 값과 Block 전환은 관측 뒤에 정한다(#522 D · `scripts/provision_platform_aws.py`의 `SIGNUP_RATE_LIMIT_PER_WINDOW`). 이 변경은 네트워크상 공개 허용 · 배포를 포함하지 않는다. 운영 환경의 개인정보 보존 기간과 빈도 제한 정책은 공개 출시 전에 정할 조건이다 | [#552 구현 계약] |
 | 도입 신청 관리 | 목록 · 상태 변경은 CENTRAL_ADMIN만 한다(`require_central_admin`). TENANT_MANAGER와 TENANT 계정은 403 `AUTH_FORBIDDEN`이다 | [#552 구현 계약] |
 | 최종 결정 기록(#565) | 상태 변경이 `APPROVED` · `REJECTED`이면 같은 트랜잭션에서 `signup_request_decisions`에 결정 한 건을 남긴다 — 결정자 `actor_user_id`, 결정 당시 그 계정의 이메일 `actor_email`, `decided_at`(신청의 새 `updated_at`과 같은 시각), `outcome`, `rejected_reason`. 결정자는 `support_access.write_transaction`이 `app_users` 잠금 안에서 다시 판정해 넘긴 `CurrentUser`이고, 상태 변경과 결정 기록은 함께 commit되거나 함께 되돌려진다. 신청당 한 건이다(`request_id` 기본 키). 결정된 신청은 더 전이하지 않으며(409 `SIGNUP_REQUEST_STATE_CONFLICT`), `IN_REVIEW` 전이는 결정 기록을 남기지 않는다. 일반 UPDATE · DELETE는 트리거가 거절한다(DB 소유자 권한의 우회까지 막지는 않는다) | [#565 구현 계약] |
 | 결정자 이메일 | `actor_email`은 결정 시점에 앱 계정(`app_users`)에 있던 이메일을 복사해 둔 값이다. 응답할 때 현재 계정과 조인하지 않으므로 그 뒤 계정 이메일이 바뀌어도 그대로다. Cognito가 그 시점에 확인한 이메일이라는 뜻은 아니다 | [#565 구현 계약] |
@@ -477,21 +477,56 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 | TOTP 등록 준비 · 등록 확인 · 코드 제출의 거절 | `AUTH_MFA` | 거절 · 실패 | `routers/auth.py` — 따로 |
 | 로그아웃 | `AUTH_LOGOUT` | 성공 | `service.logout` — 세션 폐기를 commit 한 뒤 따로. 실제로 폐기했을 때만 |
 | 비밀번호 재설정 확정 | `AUTH_PASSWORD_RESET` | 성공 · 거절 · 실패 | `password_reset.confirm_reset` — 모두 따로. 성공은 세션 회수를 commit 한 뒤에 쓴다 |
+| TOTP 분실 복구 | `AUTH_TOTP_RECOVERY` | 성공 · 거절 · 실패 | `totp_recovery.reset_totp` — 완료는 결과 확정과 같은 트랜잭션, 거절 · 실패는 따로(아래 §TOTP 분실 복구의 기록) |
 
-- **행위자**: 로그인 · MFA · 재설정 시도는 로그인 전이라 `ANONYMOUS`이고, 시도한 계정은 대상(`target`)이다. 로그아웃만 그 세션의 사용자가 행위자다.
+- **행위자**: 로그인 · MFA · 재설정 시도는 로그인 전이라 `ANONYMOUS`이고, 시도한 계정은 대상(`target`)이다. 로그아웃은 그 세션의 사용자가, TOTP 분실 복구는 복구를 실행한 관리자(운영자 CLI는 `SYSTEM`)가 행위자다.
 - **대상 계정은 안정 신원 `(issuer, sub)`로만 잇는다.** 비밀번호 단계를 지난 흐름은 `LoginFlow.subject(token)`(읽기 전용 — 흐름을 꺼내지 않는다)으로, 재설정은 `AdminGetUser`가 돌려준 `sub`로 찾는다. 이메일로 앱 계정을 고르지 않으므로 **비밀번호 단계의 실패(틀린 비밀번호 · 없는 계정)는 대상 없이 남는다.**
 - **싣지 않는 것**: 입력한 이메일 · 비밀번호 · 코드 · 토큰. 남는 것은 사유 코드(`AUTH_*` · `ACCOUNT_*`)와 요청 문맥(접속지 · 브라우저 정보 · 요청 식별자)이다.
 - **접속지(`source_ip`)를 읽는 곳은 설정 하나가 정한다**(`CLIENT_ADDRESS_SOURCE` · `request_origin.py` · #589 D). 기본 `socket`은 소켓의 상대 주소이고, 배포가 켜는 `cloudfront-viewer-address`는 CloudFront가 오리진 요청에 싣는 `CloudFront-Viewer-Address`(「주소:포트」)의 주소**만** 읽는다. `X-Forwarded-For`는 읽지 않는다. 헤더가 없거나 둘 이상이거나 읽히지 않으면 접속지는 비고, 소켓(ALB) 주소로 물러서지 않는다. 이 값을 믿는 근거는 앱 밖에 있다 — ALB가 CloudFront를 거친 요청만 받는다(`scripts/provision_platform_aws.py`).
   - 화면의 서버 렌더링이 대신 부른 조회(`apps/web/src/lib/api/server.ts`)는 웹 서버가 CloudFront로 다시 들어오므로, 그 요청에서 남는 거절 행(403 · 범위 밖 404)의 접속지는 **플랫폼의 나가는 주소**다. 브라우저가 직접 부르는 요청(로그인 · 상태 변경)은 실제 접속지다.
   - 전환 전에 남은 행의 접속지는 프록시가 본 주소 그대로다(이 테이블은 고쳐 쓰지 않는다).
-- **남기지 않는 것**: 중간 단계의 성공, 정책에 어긋난 새 비밀번호(`AUTH_PASSWORD_POLICY`), 어긋난 단계(`AUTH_STEP_CONFLICT`), 대상 계정을 모르는 만료(`AUTH_FLOW_EXPIRED`), 재설정 요청(메일 발송 — 존재를 구분하지 않는다), TOTP 분실 복구(복구 작업 기록 `totp_recovery_operations`에만 있다).
+- **남기지 않는 것**: 중간 단계의 성공, 정책에 어긋난 새 비밀번호(`AUTH_PASSWORD_POLICY`), 어긋난 단계(`AUTH_STEP_CONFLICT`), 대상 계정을 모르는 만료(`AUTH_FLOW_EXPIRED`), 재설정 요청(메일 발송 — 존재를 구분하지 않는다).
 - **결과**: `AUTH_PROVIDER_UNAVAILABLE` · `AUTH_EMAIL_DELIVERY_FAILED` · `INTERNAL_ERROR`는 실패(`FAILED`), 그 밖의 거절은 `DENIED`다.
-- **같은 트랜잭션은 로그인 성공뿐이다**: 성공 행을 쓰지 못하면 세션 발급도 되돌아간다 — 세션이 생기지 않으므로 안전한 쪽으로 실패한다.
+- **같은 트랜잭션은 로그인 성공과 TOTP 분실 복구의 완료다**: 로그인 성공 행을 쓰지 못하면 세션 발급도 되돌아간다 — 세션이 생기지 않으므로 안전한 쪽으로 실패한다. 복구 완료는 아래 §TOTP 분실 복구의 기록에 적는다.
 - **로그아웃 · 비밀번호 재설정은 폐기 · 회수를 먼저 commit 하고 기록을 따로 남긴다**(2026-11-13 결정). 기록 한 행을 쓰지 못해 로그아웃한 세션이 살아 있거나, 비밀번호가 바뀐 뒤 이전 세션 회수가 되돌려지는 쪽이 기록이 막으려는 위험보다 크다. 기록을 쓰지 못하면 응답은 그대로 204이고 그 한 행이 빠진다 — 빠진 사실은 앱 로그(`platform_event_write_failed`)에만 남는다.
 - **잠금 순서**: 기록 INSERT는 행위자 · 대상 사용자를 FK로 참조해 `app_users`의 `ROW SHARE`가 필요하고, 로그인 완료 · 재설정은 `app_users`를 `EXCLUSIVE`로 잠근 채 그 사용자의 세션 행을 폐기한다. 세션 행 잠금을 쥔 채 기록을 쓰면 둘이 서로를 기다려 교착한다. 로그아웃은 폐기를 commit 한 뒤에 쓰므로 기록을 쓸 때 쥔 잠금이 없다. 로그인 완료는 `app_users` 잠금을 먼저 잡고 시작하므로 같은 트랜잭션에 써도 순서가 어긋나지 않는다.
 - 따로 남기기가 실패하면(DB 오류) 앱 로그에만 남고 원래의 응답이 그대로 나간다.
 
 권한 거절(403 `AUTH_FORBIDDEN`)은 이 모듈이 아니라 공통 오류 처리기가 `ACCESS_FORBIDDEN`으로 남긴다(`apps/core-api/access_denial_log.py`).
+
+범위 밖 404도 같은 처리기가 `ACCESS_OUT_OF_SCOPE`로 남긴다. 다만 404는 「없다」와 「범위 밖」이 같은 코드라, 범위를 판정한 자리가 `exceptions.OutOfScopeError`로 표시한 것만 남는다 — 없는 ID · 형식이 어긋난 ID는 남지 않는다. 이 모듈의 표시 자리는 셋이다.
+
+| 자리 | 응답 | 표시하는 경우 |
+| --- | --- | --- |
+| `admin_service._target`(사용자 관리 대상) | `USER_NOT_FOUND` | 대상 행은 있는데 다른 고객사 · 플랫폼 계정 · 미지정 계정이다. 어느 경우인지는 싣지 않는다 |
+| `admin_service._invite_tenant`(초대 대상 고객사) | `TENANT_NOT_FOUND` | 범위 밖이고, 404로 가는 길에서 한 번 더 본 존재 확인(`tenants_repo.tenant_exists`)이 「있다」다 |
+| `totp_recovery_http.make_authorize`(TOTP 분실 복구 대상) | `USER_NOT_FOUND` | 대상 행은 있는데 고객사 계정이 아니거나 다른 고객사 계정이다 |
+
+- 나가는 응답은 표시가 있든 없든 같은 404다. 행은 처리기가 응답 전에 만들고 **쓰기는 응답을 보낸 뒤**에 한다 — 응답 전에 쓰면 「범위 밖」일 때만 응답이 늦어져 그 ID가 있다는 것이 드러난다.
+- 이 행은 **중앙 관리자만 읽는다**(`GET /api/v1/platform-events`). 행이 「있는데 범위 밖」일 때만 생기므로, 낸 사람이나 그 고객사의 담당자가 읽으면 그 ID가 있다는 답이 된다.
+- 싣는 것은 메서드 · 경로 · 사유 코드(나간 응답 코드) · 요청자의 고객사다. 초대의 대상 고객사는 본문에 있어 행에 남지 않는다.
+
+### TOTP 분실 복구의 기록
+
+복구 본체(`totp_recovery.reset_totp`)가 남긴다. API와 운영자 CLI가 같은 본체를 부르므로 두 진입점의 기록이 같고, 다른 것은 행위자뿐이다(API는 요청한 관리자와 그 세션, CLI는 `SYSTEM`). 대상은 복구되는 계정이고 소속은 그 계정의 고객사다(플랫폼 계정이면 없다).
+
+| 일 | API 응답 | 남는 행 | 사유 코드 |
+| --- | --- | --- | --- |
+| 완료(`COMPLETED`) | 204 | 성공 — 결과 확정과 같은 트랜잭션 | 없음 |
+| 대상 부적격 · 다른 대상의 `operation_id` · 풀리지 않은 울타리 | 409 `USER_STATE_CONFLICT` | 거절 — 따로 | `TARGET_INELIGIBLE` · `OPERATION_CONFLICT` · `BUSY` |
+| 제공자 신원 불일치 | 503 | 실패 — 따로 | `PROVIDER_IDENTITY_MISMATCH` |
+| 완료되지 못한 결과 | 503 | 실패 — 따로 | 작업 상태 그대로: `PROVIDER_NOT_FOUND` · `PROVIDER_REJECTED` · `PROVIDER_UNKNOWN` · `PROVIDER_PENDING` |
+| 권한 없음 · 본인 대상 | 403 | 이 행동으로는 없음 — `ACCESS_FORBIDDEN` 한 행 | |
+| 범위 밖 · 고객사 계정이 아닌 대상 | 404 | 이 행동으로는 없음(`ACCESS_OUT_OF_SCOPE` 한 행 · 위 범위 밖 404 · 중앙 관리자만 읽는다) | |
+| 없는 대상 | 404 | 없음 | |
+| 진술 없음 · 정지된 고객사의 행위자 | 422 · 409 `TENANT_SUSPENDED` | 없음 | |
+| 같은 `operation_id` 재요청 | 앞과 같은 응답 | 없음 — 새로 일어난 일이 없다 | |
+
+- **사유 코드는 응답의 오류 코드가 아니라 복구 본체의 사유다.** 409 셋이 응답에서는 `USER_STATE_CONFLICT` 하나로 접히고 CLI에는 오류 코드가 없어서, 조사에 쓸 수 있게 본체의 거절 사유(`RecoveryRejection`)와 작업 상태(`TotpRecoveryStatus`)를 그대로 싣는다.
+- **대상이 범위 안으로 정해진 뒤의 일만 남긴다.** 범위 밖 거절을 이 행동으로도 남기면 그 행이 대상 계정의 고객사 소속이 되어, 범위 밖 시도를 그 고객사의 담당자가 읽게 된다. 범위 밖은 `ACCESS_OUT_OF_SCOPE` 한 행이 맡는다(`make_authorize`가 `OutOfScopeError`로 표시한다).
+- **완료 행을 쓰지 못하면 결과도 확정되지 않는다.** 작업은 결과 대기(`PROVIDER_PENDING`)로, 울타리는 걸린 채로 남고 응답은 503이다(운영자 정리가 필요하다 — §운영자 울타리 정리). 대상의 세션 폐기와 세대 올림은 제공자 호출 전 차단 commit에서 이미 끝나 있어 되살아나는 것이 없다. 로그아웃 · 재설정과 결론이 다른 까닭이다: 그 둘은 기록 실패가 폐기까지 되돌린다.
+- **계약에 맞지 않는 행위자는 차단 전에 멈춘다.** 완료 행을 같은 값으로 미리 만들어 보고(`event_log.check_totp_recovery_actor`), 맞지 않으면 아무것도 바꾸지 않은 채 오류로 끝난다.
+- **운영자 울타리 정리(`reconcile_provider_mutation`)는 남기지 않는다.** 작업 행과 울타리 행에만 남는다.
 
 ## TOTP 분실 복구 (#515)
 
@@ -503,7 +538,7 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 | 제공자 신원 결합 | 신원 확인과 별개로 대상의 `(issuer, cognito_sub)`로 한다. 대상 issuer가 설정된 User Pool과 다르면 아무것도 바꾸지 않고 거절한다. `AdminDeleteSoftwareToken`의 `Username`에는 대상의 `sub`를 보낸다 | [판단] |
 | 성공 | 작업 상태 `COMPLETED`가 DB에 기록된 경우 하나다. 제공자 응답만으로 완료를 말하지 않는다 — 결과 기록이 실패하면 제공자가 삭제했어도 성공이 아니다 | [판단] |
 | 호출 횟수 | SDK 재시도가 없는 복구 전용 클라이언트(`provider.build_recovery_adapter`, `total_max_attempts=1`)로 한 번만 부른다. 로그인 흐름의 TOTP 등록 변경도 같은 설정이다(§로그인 쪽 효과). 재시도하면 마지막 응답이 앞선 시도의 적용 여부를 가리기 때문이다. 앱은 삭제를 자동으로 다시 보내거나 Cognito를 되돌리지 않는다 | [판단] |
-| 기록 | 작업은 `totp_recovery_operations`에 남고 사용자 관리 이력(`user_admin_events`)에는 남지 않는다 | [판단] |
+| 기록 | 작업은 `totp_recovery_operations`에 남고 사용자 관리 이력(`user_admin_events`)에는 남지 않는다. 플랫폼 활동 로그(`platform_events`)에는 `AUTH_TOTP_RECOVERY`로 남는다(#589 B — §활동 로그의 TOTP 분실 복구의 기록) | [판단] |
 
 ### 행위자와 대상
 
