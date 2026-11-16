@@ -7,8 +7,15 @@
 #     고르지 않는다**(app_users.email 은 표시용이고 유일하지 않다). 그래서 비밀번호 단계의 실패는 대상 없이 남는다.
 #   - 입력한 이메일 · 비밀번호 · 코드 · 토큰은 어디에도 싣지 않는다(#589 Q5). 남는 것은 사유 코드와 요청 문맥
 #     (접속지 · 브라우저 정보 · 요청 식별자 — 기록 함수가 채운다)이다.
-#   - 실패 · 거절은 요청 트랜잭션과 따로 남긴다(platform_event_log.record_detached). 성공(세션 발급 · 로그아웃 ·
-#     재설정 뒤 세션 회수)은 그 쓰기와 같은 트랜잭션에 남긴다 — auth.service · auth.password_reset 이 직접 부른다.
+#   - 실패 · 거절은 요청 트랜잭션과 따로 남긴다(platform_event_log.record_detached).
+#   - 성공 가운데 **세션 발급(로그인)만** 그 쓰기와 같은 트랜잭션에 남긴다 — 기록을 못 쓰면 세션이 생기지 않을 뿐이라
+#     안전한 쪽으로 실패한다.
+#   - **로그아웃 · 비밀번호 재설정은 예외다(2026-11-13 PM 결정 · PR 리뷰).** 세션 폐기 · 회수를 먼저 commit 하고 기록은
+#     그 뒤에 따로 남긴다. 기록 한 행을 못 써서 로그아웃한 세션이 살아 있거나, 비밀번호가 바뀐 뒤 이전 세션 회수가
+#     되돌려지는 쪽이 기록이 막으려는 위험보다 크다 — 기록에 실패하면 그 한 행이 빠지는 것을 감수한다.
+#     잠금 순서도 이 때문에 풀린다: 기록 INSERT 는 행위자 · 대상 사용자를 FK 로 참조해 app_users 의 ROW SHARE 가
+#     필요한데, 로그인 완료 · 재설정은 app_users 를 EXCLUSIVE 로 잠근 채 같은 세션 행을 폐기한다. 세션 행 잠금을
+#     쥔 채 기록을 쓰면 서로를 기다려 교착한다 — 폐기를 먼저 commit 하면 기록을 쓸 때 쥔 잠금이 없다.
 #   - 남기지 않는 것: 입력 형식 문제(AUTH_PASSWORD_POLICY) · 단계가 어긋난 요청(AUTH_STEP_CONFLICT) · 대상 계정을
 #     모르는 만료(AUTH_FLOW_EXPIRED — 진행 쿠키 없이 온 요청). 누구의 계정에도 시도가 일어나지 않았다.
 #   - 대상 계정이 고객사(TENANT) 계정이면 그 고객사를 소속(tenant_id)으로 싣는다 — 담당자의 조회 범위에 들어간다.
@@ -18,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Optional
 
 import platform_event_log
@@ -102,22 +110,58 @@ def login_succeeded(db: Session, user: models.AppUser, *, session_id: str) -> No
     )
 
 
-def password_reset_succeeded(db: Session, user: Optional[models.AppUser]) -> None:
-    """비밀번호가 바뀐 뒤의 세션 회수와 같은 트랜잭션에 남긴다. 앱 계정이 없는 신원이면 대상 없이 남는다."""
-    platform_events_repo.record_platform_event(
-        db,
+def _record_after_commit(
+    session_factory: Callable[[], Session],
+    action: PlatformEventAction,
+    actor: platform_events_repo.EventActor,
+    *,
+    tenant_id: Optional[str],
+    target_id: Optional[str] = None,
+) -> None:
+    """이미 commit 된 일의 성공 행을 따로 남긴다. 어떤 실패도 올리지 않는다 — 끝난 일의 응답을 바꾸지 않는다.
+
+    DB 쓰기 실패는 record_detached 가 앱 로그로 돌린다. 계약 위반(ValueError)은 거기서 올라오므로 여기서 받는다."""
+    try:
+        platform_event_log.record_detached(
+            session_factory,
+            action,
+            actor,
+            outcome=PlatformEventOutcome.SUCCEEDED,
+            tenant_id=tenant_id,
+            target_id=target_id,
+        )
+    except ValueError:
+        logger.error("auth_event_not_recorded: outside the event contract action=%s", action.value)
+
+
+def password_reset_succeeded(
+    session_factory: Callable[[], Session], *, user_id: Optional[str], tenant_id: Optional[str]
+) -> None:
+    """비밀번호가 바뀌고 세션 회수가 commit 된 **뒤에** 따로 남긴다. 앱 계정이 없는 신원이면 대상 없이 남는다.
+
+    쓰기가 실패해도 예외를 올리지 않는다 — 재설정은 이미 끝났고, 빠지는 것은 이 한 행뿐이다(머리말)."""
+    _record_after_commit(
+        session_factory,
         PlatformEventAction.AUTH_PASSWORD_RESET,
         platform_events_repo.ANONYMOUS,
-        tenant_id=None if user is None else user.tenant_id,
-        target_id=None if user is None else user.user_id,
+        tenant_id=tenant_id,
+        target_id=user_id,
     )
 
 
-def logged_out(db: Session, session: models.AuthSession) -> None:
-    """세션 폐기와 같은 트랜잭션에 로그아웃을 남긴다. 행위자는 그 세션의 사용자다.
+@dataclass(frozen=True)
+class LoggedOut:
+    """폐기한 세션의 주인 — 폐기를 commit 한 뒤 기록에 쓸 값만 미리 읽어 둔다."""
+
+    actor: platform_events_repo.EventActor
+    tenant_id: Optional[str]
+
+
+def logout_actor(db: Session, session: models.AuthSession) -> Optional[LoggedOut]:
+    """로그아웃 기록의 행위자(그 세션의 사용자). 폐기와 같은 트랜잭션에서 **읽기만** 한다 — 쓰지 않는다.
 
     기록 계약이 받는 사람은 PLATFORM(등급 있음) · TENANT 뿐이다. 그 밖(소속이 풀린 계정 · 등급 없는 플랫폼 계정)의
-    남은 세션은 폐기만 하고 앱 로그에 남긴다 — 기록 때문에 로그아웃이 실패하면 안 된다."""
+    남은 세션은 폐기만 하고 앱 로그에 남긴다(None) — 기록 때문에 로그아웃이 실패하면 안 된다."""
     user = auth_repo.get_user(db, session.user_id)
     recordable = user is not None and (
         user.account_type is AccountType.TENANT
@@ -125,11 +169,9 @@ def logged_out(db: Session, session: models.AuthSession) -> None:
     )
     if not recordable:
         logger.warning("auth_logout_not_recorded: account outside the event contract")
-        return
-    platform_events_repo.record_platform_event(
-        db,
-        PlatformEventAction.AUTH_LOGOUT,
-        platform_events_repo.EventActor(
+        return None
+    return LoggedOut(
+        actor=platform_events_repo.EventActor(
             PlatformActorKind.USER,
             user_id=user.user_id,
             account_type=user.account_type,
@@ -137,4 +179,11 @@ def logged_out(db: Session, session: models.AuthSession) -> None:
             session_id=session.session_id,
         ),
         tenant_id=user.tenant_id,
+    )
+
+
+def logged_out(session_factory: Callable[[], Session], who: LoggedOut) -> None:
+    """세션 폐기가 commit 된 **뒤에** 로그아웃을 따로 남긴다. 쓰기가 실패해도 예외를 올리지 않는다(머리말)."""
+    _record_after_commit(
+        session_factory, PlatformEventAction.AUTH_LOGOUT, who.actor, tenant_id=who.tenant_id
     )

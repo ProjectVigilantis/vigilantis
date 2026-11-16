@@ -5,8 +5,9 @@
   (성공 뒤에만) 짧은 트랜잭션에서 사용자 행을 다시 찾아 세션 회수. SDK 호출 중에는 DB 트랜잭션이 없다.
 - 비밀번호는 바뀌었는데 회수가 실패하면 500 이다(204 가 아니다). 이 구간에 이전 세션이 남을 수 있음은 승인된 한계다.
 - 로그에는 예외 종류만 남긴다 — 이메일 · 코드 · 비밀번호 · SQL 은 싣지 않는다.
-- 활동 로그(#589 B)는 확정만 남긴다(AUTH_PASSWORD_RESET). 성공은 세션 회수와 같은 트랜잭션에, 거절 · 실패는
-  따로 남긴다. 대상 계정은 AdminGetUser 가 돌려준 sub 로만 잇는다 — 조회 전에 끝난 실패는 대상이 없다.
+- 활동 로그(#589 B)는 확정만 남긴다(AUTH_PASSWORD_RESET). 성공 · 거절 · 실패 모두 따로 남긴다 — 성공은 세션 회수를
+  먼저 commit 한 뒤에 쓴다(2026-11-13 PM 결정 · auth.event_log 머리말). 기록을 못 써도 회수는 유지되고 204 다.
+  대상 계정은 AdminGetUser 가 돌려준 sub 로만 잇는다 — 조회 전에 끝난 실패는 대상이 없다.
   요청(메일 발송)은 존재를 구분하지 않아 남기지 않는다. 정책에 어긋난 새 비밀번호(422)도 남기지 않는다.
 """
 
@@ -51,7 +52,7 @@ def confirm_reset(
     now: datetime,
     session_factory: Callable[[], Session],
 ) -> None:
-    """session_factory 는 거절 · 실패를 요청 트랜잭션 밖에 남길 때만 쓴다(#589 B)."""
+    """session_factory 는 활동 로그를 요청 트랜잭션 밖에 남길 때만 쓴다(#589 B) — 거절 · 실패와, 회수 commit 뒤의 성공."""
     if not check_password(new_password):
         raise AuthPasswordPolicyError()
     subject: event_log.Subject | None = None  # AdminGetUser 가 돌려준 신원 — 그 뒤의 실패만 대상이 있다
@@ -73,6 +74,8 @@ def confirm_reset(
         try:
             auth_repo.lock_users_table(db)
             row = auth_repo.get_user_by_identity(db, issuer=adapter.issuer, cognito_sub=user.sub)
+            # 기록에 쓸 값은 commit 전에 읽어 둔다 — 앱 계정이 없는 신원이면 대상 없이 남는다
+            target_user_id, target_tenant_id = (None, None) if row is None else (row.user_id, row.tenant_id)
             if row is not None:
                 sessions.revoke_user_sessions(
                     db,
@@ -80,9 +83,7 @@ def confirm_reset(
                     now=now,
                     reason=models.AuthSessionRevokeReason.PASSWORD_RESET,
                 )
-            # 성공은 세션 회수와 같은 트랜잭션이다 — 기록을 못 쓰면 아래 except 가 500 으로 끝낸다
-            event_log.password_reset_succeeded(db, row)
-            db.commit()
+            db.commit()  # 회수를 먼저 확정한다 — 성공 기록은 아래에서 따로 남긴다
         except Exception as exc:  # noqa: BLE001
             db.rollback()
             raise _internal_error("session revoke failed after change", exc) from None
@@ -92,3 +93,7 @@ def confirm_reset(
             session_factory, PlatformEventAction.AUTH_PASSWORD_RESET, exc.code, subject=subject
         )
         raise
+    # 비밀번호가 바뀌고 회수가 commit 된 뒤다. 기록을 못 써도 재설정은 끝난 일이라 204 로 나간다
+    event_log.password_reset_succeeded(
+        session_factory, user_id=target_user_id, tenant_id=target_tenant_id
+    )

@@ -246,3 +246,33 @@ def test_a_403_without_an_identity_is_not_recorded_and_opens_no_session():
         app=SimpleNamespace(dependency_overrides={db_session.get_session_factory: lambda: no_session}),
     )
     assert access_denial_log.record_forbidden(request) is None
+
+
+def test_a_403_of_an_account_outside_the_contract_is_not_recorded_and_stays_a_403():
+    """기록 계약이 받지 않는 계정(UNASSIGNED)의 403 — 공통 오류 처리기 안에서 예외를 올리면 403 이 500 으로 바뀐다."""
+    import uuid
+    from types import SimpleNamespace
+
+    import access_denial_log
+    import db.session as db_session
+    from schemas.api.auth import AccountType
+
+    def no_session():
+        raise AssertionError("계약 위반은 세션을 열기 전에 걸린다")
+
+    request = SimpleNamespace(
+        method="GET",
+        url=SimpleNamespace(path="/api/v1/tenants"),
+        scope={},
+        state=SimpleNamespace(
+            current_user=SimpleNamespace(
+                user_id=str(uuid.uuid4()),
+                account_type=AccountType.UNASSIGNED,
+                platform_role=None,
+                session_id=None,
+                tenant_id=None,
+            )
+        ),
+        app=SimpleNamespace(dependency_overrides={db_session.get_session_factory: lambda: no_session}),
+    )
+    assert access_denial_log.record_forbidden(request) is None

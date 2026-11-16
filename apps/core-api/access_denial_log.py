@@ -59,11 +59,16 @@ def record_forbidden(request: Request) -> None:
         _logger.warning("access_denial_not_recorded: no recordable path")
         return
     factory = request.app.dependency_overrides.get(get_session_factory, get_session_factory)()
-    platform_event_log.record_detached(
-        factory,
-        PlatformEventAction.ACCESS_FORBIDDEN,
-        platform_events_repo.person(user),
-        outcome=PlatformEventOutcome.DENIED,
-        tenant_id=user.tenant_id,
-        details=details,
-    )
+    try:
+        platform_event_log.record_detached(
+            factory,
+            PlatformEventAction.ACCESS_FORBIDDEN,
+            platform_events_repo.person(user),
+            outcome=PlatformEventOutcome.DENIED,
+            tenant_id=user.tenant_id,
+            details=details,
+        )
+    except ValueError:
+        # 기록 계약 밖의 계정(계정 종류가 늘었는데 계약이 따라오지 않은 경우 등). 공통 오류 처리기 안이라 올리면
+        # 403 이 500 으로 바뀐다 — 거절은 그대로 내보내고 앱 로그에 남긴다(PR 리뷰)
+        _logger.error("access_denial_not_recorded: actor outside the event contract")

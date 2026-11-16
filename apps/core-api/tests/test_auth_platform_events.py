@@ -6,17 +6,24 @@
   - 실패 · 거절된 시도는 따로 남는다. TOTP 코드 단계는 AUTH_MFA, 그 밖의 단계와 세션 발급의 거절은 AUTH_LOGIN.
     대상은 흐름이 포착한 안정 신원으로만 잇는다 — 비밀번호 단계의 실패는 대상이 없다.
   - 입력 형식 문제 · 어긋난 단계 · 대상 모르는 만료는 남기지 않는다.
-  - 로그아웃은 실제로 폐기했을 때만 AUTH_LOGOUT 한 행이다(행위자 = 그 세션의 사용자).
-  - 비밀번호 재설정은 확정만 남긴다 — 성공은 세션 회수와 같은 트랜잭션, 거절 · 실패는 따로.
+  - 로그아웃은 실제로 폐기했을 때만 AUTH_LOGOUT 한 행이다(행위자 = 그 세션의 사용자). 폐기를 먼저 commit 하고
+    기록은 따로 남긴다 — 기록을 못 써도 세션은 폐기된 채고, 세션 행 잠금을 쥔 채 기록을 쓰지 않아 app_users 를
+    잠그는 쪽(로그인 완료 · 비밀번호 재설정)과 교착하지 않는다.
+  - 비밀번호 재설정은 확정만 남긴다 — 성공 · 거절 · 실패 모두 따로. 성공은 세션 회수를 commit 한 뒤에 쓰고,
+    기록을 못 써도 회수는 유지된다(204).
   - 행에는 이메일 · 비밀번호 · 코드 · 토큰이 없다.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
+from datetime import UTC, datetime
 
 import pytest
-from auth import cognito, event_log, login_flow, service
+from auth import cognito, login_flow, service
+from auth import sessions as auth_sessions
 from auth.http import SESSION_COOKIE, get_clock, get_login_flow
 from config import get_auth_settings
 from db import models
@@ -388,14 +395,49 @@ def test_logout_without_a_live_session_records_nothing(http, db, user, cookie):
     assert _events(db) == []
 
 
-def test_logout_keeps_the_session_when_the_event_cannot_be_written(http, db, flow, user, monkeypatch):
+def _detached_writes_unavailable(http) -> None:
+    """따로 남기는 기록이 쓸 세션을 얻지 못하게 한다 — 요청 자신의 트랜잭션은 건드리지 않는다."""
+    import db.session as db_session
+
+    def unavailable():
+        raise RuntimeError("detached session unavailable")
+
+    http.app.dependency_overrides[db_session.get_session_factory] = lambda: unavailable
+
+
+def test_logout_revokes_the_session_even_when_the_event_cannot_be_written(http, db, flow, user, monkeypatch):
+    # 기록 한 행을 못 써서 로그아웃한 세션이 살아 있으면 안 된다(2026-11-13 결정) — 폐기는 이미 commit 됐다.
+    # 어느 길로 쓰든 실패하게 둔다: 요청 트랜잭션 안의 쓰기도, 따로 남기는 쓰기도
     token = _login(http, flow)
     _failing_after_write(monkeypatch, A.AUTH_LOGOUT)
+    _detached_writes_unavailable(http)
     headers = {"Cookie": f"{SESSION_COOKIE}={token}", "Origin": ORIGIN}
-    assert http.post("/api/v1/auth/logout", headers=headers).status_code == 500
+    assert http.post("/api/v1/auth/logout", headers=headers).status_code == 204
     db.expire_all()
-    assert db.scalars(select(models.AuthSession)).one().revoked_at is None
+    session = db.scalars(select(models.AuthSession)).one()
+    assert session.revoked_at is not None
+    assert session.revoke_reason is models.AuthSessionRevokeReason.LOGOUT
     assert _events(db, A.AUTH_LOGOUT) == []
+
+
+def _contract_refuses_every_row(monkeypatch) -> None:
+    """기록 계약이 행을 받지 않는 경우 — record_detached 는 세션을 열기 전에 ValueError 를 올린다."""
+    import platform_event_log
+
+    def refuse(*args, **kwargs):
+        raise ValueError("outside the event contract")
+
+    monkeypatch.setattr(platform_event_log, "record_detached", refuse)
+
+
+def test_logout_is_not_undone_by_a_row_outside_the_contract(http, db, flow, user, monkeypatch):
+    # 폐기는 이미 commit 됐다 — 그 뒤의 기록이 계약에 걸려도 로그아웃 응답은 그대로다
+    token = _login(http, flow)
+    _contract_refuses_every_row(monkeypatch)
+    headers = {"Cookie": f"{SESSION_COOKIE}={token}", "Origin": ORIGIN}
+    assert http.post("/api/v1/auth/logout", headers=headers).status_code == 204
+    db.expire_all()
+    assert db.scalars(select(models.AuthSession)).one().revoked_at is not None
 
 
 def test_logout_of_an_account_outside_the_contract_revokes_without_a_row(http, db, flow, user):
@@ -493,16 +535,44 @@ def test_reset_failing_before_the_identity_is_known_has_no_target(reset_http, db
     _is_attempt(event, A.AUTH_PASSWORD_RESET, F, reason="AUTH_PROVIDER_UNAVAILABLE")
 
 
-def test_reset_is_a_failure_when_the_event_cannot_be_written(reset_http, db, cog, tenant_id, monkeypatch):
-    # 비밀번호는 이미 바뀌었다(Cognito) — 회수 · 기록이 되돌려지면 204 가 아니라 500 이고, 그 실패가 따로 남는다
+def test_reset_revokes_the_sessions_even_when_the_event_cannot_be_written(
+    reset_http, db, cog, tenant_id, monkeypatch
+):
+    # 비밀번호는 이미 바뀌었다(Cognito) — 기록 한 행을 못 써서 이전 세션 회수가 되돌려지면 안 된다(2026-11-13 결정).
+    # 어느 길로 쓰든 실패하게 둔다: 요청 트랜잭션 안의 쓰기도, 따로 남기는 쓰기도
+    _reset_user(db, tenant_id)
+    _failing_after_write(monkeypatch, A.AUTH_PASSWORD_RESET)
+    _detached_writes_unavailable(reset_http)
+    cog.get_user()
+    cog.confirm()
+    assert reset_harness.confirm(reset_http).status_code == 204
+
+    db.expire_all()
+    session = db.scalars(select(models.AuthSession)).one()
+    assert session.revoked_at is not None
+    assert session.revoke_reason is models.AuthSessionRevokeReason.PASSWORD_RESET
+    assert _events(db) == []
+
+
+def test_reset_is_not_undone_by_a_row_outside_the_contract(reset_http, db, cog, tenant_id, monkeypatch):
+    # 회수는 이미 commit 됐다 — 그 뒤의 기록이 계약에 걸려도 재설정 응답은 그대로다
+    _reset_user(db, tenant_id)
+    _contract_refuses_every_row(monkeypatch)
+    cog.get_user()
+    cog.confirm()
+    assert reset_harness.confirm(reset_http).status_code == 204
+    db.expire_all()
+    assert db.scalars(select(models.AuthSession)).one().revoked_at is not None
+
+
+def test_reset_is_a_failure_when_the_session_revoke_fails(reset_http, db, cog, tenant_id, monkeypatch):
+    # 회수 자체가 실패하면 그대로 500 이고, 그 실패가 따로 남는다 — 성공 행은 없다
     user_id = _reset_user(db, tenant_id)
-    original = event_log.password_reset_succeeded
 
-    def fail(db_, row):
-        original(db_, row)
-        raise OperationalError("event write", {}, Exception("not exposed"))
+    def fail(*args, **kwargs):
+        raise OperationalError("session revoke", {}, Exception("not exposed"))
 
-    monkeypatch.setattr(event_log, "password_reset_succeeded", fail)
+    monkeypatch.setattr(auth_sessions, "revoke_user_sessions", fail)
     cog.get_user()
     cog.confirm()
     assert reset_harness.confirm(reset_http).status_code == 500
@@ -524,13 +594,33 @@ def test_reset_request_and_policy_refusal_record_nothing(reset_http, db, cog, te
 # ----- 따로 남기기 — 독립 세션(운영과 같은 갈래) ----------------------------------------------
 
 
-def test_denied_completion_commits_apart_from_the_rolled_back_request(pg_engine, committed_auth):
-    """세션 발급이 거절되면 요청 트랜잭션은 되돌려진다 — 거절 행은 다른 트랜잭션으로 남는다."""
+def _committing_app(sessions_, overrides=None):
+    """요청 · 따로 남기는 기록이 각자 자기 연결로 commit 하는 앱 — 운영과 같은 갈래다."""
     import api_usage
     import db.session as db_session
     from config import get_settings
     from main import create_app
 
+    get_settings.cache_clear()
+    app = create_app()
+
+    def _get_db():
+        session = sessions_()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[db_session.get_db] = _get_db
+    app.dependency_overrides[db_session.get_session_factory] = lambda: sessions_
+    app.dependency_overrides[api_usage.get_usage_session_factory] = lambda: sessions_
+    app.dependency_overrides[get_auth_settings] = lambda: settings()
+    app.dependency_overrides.update(overrides or {})
+    return app
+
+
+def test_denied_completion_commits_apart_from_the_rolled_back_request(pg_engine, committed_auth):
+    """세션 발급이 거절되면 요청 트랜잭션은 되돌려진다 — 거절 행은 다른 트랜잭션으로 남는다."""
     engine = create_engine(pg_engine.url, connect_args={"options": "-c lock_timeout=5000"})
     sessions_ = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     sub = f"sub-{uuid.uuid4().hex}"
@@ -552,21 +642,7 @@ def test_denied_completion_commits_apart_from_the_rolled_back_request(pg_engine,
             email_proven=True, generation=0,
         ),
     )
-    get_settings.cache_clear()
-    app = create_app()
-
-    def _get_db():
-        session = sessions_()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[db_session.get_db] = _get_db
-    app.dependency_overrides[db_session.get_session_factory] = lambda: sessions_
-    app.dependency_overrides[api_usage.get_usage_session_factory] = lambda: sessions_
-    app.dependency_overrides[get_auth_settings] = lambda: settings()
-    app.dependency_overrides[get_login_flow] = lambda: fake
+    app = _committing_app(sessions_, {get_login_flow: lambda: fake})
     try:
         with TestClient(app, base_url="https://testserver") as client:
             client.cookies.set("__Host-vg_login", "flowtok-abc123")
@@ -584,6 +660,79 @@ def test_denied_completion_commits_apart_from_the_rolled_back_request(pg_engine,
             cleanup.execute(text("DELETE FROM app_users WHERE user_id = :id"), {"id": user_id})
             cleanup.commit()
         engine.dispose()
+
+
+def test_logout_does_not_deadlock_with_a_reset_revoking_the_same_session(pg_engine, committed_auth):
+    """로그아웃이 세션 행을 폐기한 채 기록을 쓰면, app_users 를 잠그고 같은 세션을 회수하는 쪽과 교착한다(PR 리뷰).
+
+    두 연결로 순서를 고정한다.
+      ① 한 연결이 비밀번호 재설정 · 로그인 완료처럼 app_users 를 EXCLUSIVE 로 잠근다.
+      ② 다른 연결이 같은 사용자의 세션으로 로그아웃한다 — 기록 INSERT 가 행위자 FK 검사(app_users ROW SHARE)로
+         ①을 기다리는 데까지 간다.
+      ③ ①의 연결이 그 사용자의 세션을 회수하고 commit 한다.
+    로그아웃이 폐기를 먼저 commit 하면 ②가 기다리는 동안 쥔 잠금이 없어 ③이 바로 끝나고, 기록은 그 뒤에 남는다.
+    기록을 폐기와 같은 트랜잭션에 쓰면 ②는 세션 행 잠금을 쥔 채 ①을 기다리고 ③은 그 행 잠금을 기다려 서로 물린다 —
+    PostgreSQL 이 한쪽을 교착으로 끝낸다."""
+    engine = create_engine(pg_engine.url, connect_args={"options": "-c lock_timeout=15000"})
+    sessions_ = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    seed = committed_auth.make()
+    headers = {"Cookie": f"{SESSION_COOKIE}={seed.token}", "Origin": ORIGIN}
+    app = _committing_app(sessions_)
+    ready, locked = threading.Event(), threading.Event()
+    result: dict[str, object] = {}
+
+    def logout():
+        try:
+            with TestClient(app, base_url="https://testserver") as client:
+                ready.set()  # 앱 기동은 잠금 전에 끝낸다
+                locked.wait(timeout=20)
+                result["logout"] = client.post("/api/v1/auth/logout", headers=headers).status_code
+        except Exception as exc:  # noqa: BLE001 — 스레드의 실패를 본 스레드가 단언한다
+            result["logout"] = exc
+
+    request = threading.Thread(target=logout)
+    try:
+        request.start()
+        assert ready.wait(timeout=20), "앱이 뜨지 않았다"
+        with sessions_() as other:
+            auth_repo.lock_users_table(other)  # ①
+            locked.set()  # ②
+            # pg_stat_activity 는 트랜잭션 안에서 굳는다 — AUTOCOMMIT 으로 매번 새로 읽는다
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as watch:
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    if watch.execute(text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                        " AND wait_event_type = 'Lock' AND query ILIKE 'INSERT INTO platform_events%'"
+                    )).scalar_one():
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("로그아웃의 기록 INSERT 가 app_users 잠금을 기다리는 데까지 가지 않았다")
+            auth_sessions.revoke_user_sessions(  # ③ — 교착이면 여기서 한쪽이 DeadlockDetected 로 끝난다
+                other,
+                user_id=seed.user_id,
+                now=datetime.now(UTC),
+                reason=models.AuthSessionRevokeReason.PASSWORD_RESET,
+            )
+            other.commit()
+        request.join(timeout=40)
+        assert not request.is_alive()
+
+        assert result["logout"] == 204
+        with sessions_() as check:
+            session = check.get(models.AuthSession, seed.session_id)
+            # 먼저 폐기한 쪽은 로그아웃이다 — ③의 회수는 이미 폐기된 세션을 건드리지 않는다
+            assert session.revoke_reason is models.AuthSessionRevokeReason.LOGOUT
+            [event] = check.scalars(
+                select(models.PlatformEvent).where(models.PlatformEvent.actor_user_id == seed.user_id)
+            ).all()
+            assert (event.action, event.outcome) == (A.AUTH_LOGOUT.value, S)
+            assert event.session_id == seed.session_id
+    finally:
+        locked.set()
+        request.join(timeout=40)
+        engine.dispose()  # 남은 행은 committed_auth 가 지운다(행위자 = 시드 사용자)
 
 
 # ----- LoginFlow.subject — 실제 흐름 저장소 -------------------------------------------------

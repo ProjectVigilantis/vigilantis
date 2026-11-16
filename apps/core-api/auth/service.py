@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -201,18 +202,31 @@ def resolve_current_user(
     )
 
 
-def logout(db: Session, token: str | None, *, now: datetime) -> None:
+def logout(
+    db: Session,
+    token: str | None,
+    *,
+    now: datetime,
+    session_factory: Callable[[], Session],
+) -> None:
     """멱등 — 토큰이 없거나 이미 폐기돼도 조용히 끝난다.
 
-    이번 호출이 실제로 폐기했을 때만 로그아웃을 활동 로그에 남긴다(#589 B · 같은 트랜잭션) — 다시 부른 로그아웃 ·
-    이미 만료 · 폐기된 세션은 새 행을 만들지 않는다."""
+    이번 호출이 실제로 폐기했을 때만 로그아웃을 활동 로그에 남긴다(#589 B) — 다시 부른 로그아웃 · 이미 만료 ·
+    폐기된 세션은 새 행을 만들지 않는다.
+
+    **폐기를 먼저 commit 하고 기록은 그 뒤에 따로 남긴다**(session_factory · auth.event_log 머리말). 기록을 못 써도
+    세션은 폐기된 채다. 세션 행 잠금을 쥔 채 기록을 쓰지 않으므로, app_users 를 잠근 채 이 세션을 폐기하려는 로그인
+    완료 · 비밀번호 재설정과 서로를 기다리지 않는다."""
     if not token:
         return
+    who = None
     try:
         row = auth_repo.get_session_by_token_hash(db, sessions.hash_token(token))
         if sessions.revoke_session(db, token, now=now) and row is not None:
-            event_log.logged_out(db, row)
+            who = event_log.logout_actor(db, row)  # 읽기만 — 기록은 commit 뒤다
         db.commit()
     except Exception:
         db.rollback()
         raise
+    if who is not None:
+        event_log.logged_out(session_factory, who)

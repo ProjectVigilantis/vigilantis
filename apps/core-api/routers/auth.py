@@ -287,8 +287,11 @@ def logout(
     request: Request,
     db: Session = _DB,
     clock: Callable[[], datetime] = _CLOCK,
+    session_factory: Callable[[], Session] = _SESSIONS,
 ) -> Response:
-    service.logout(db, request.cookies.get(SESSION_COOKIE), now=clock())
+    service.logout(
+        db, request.cookies.get(SESSION_COOKIE), now=clock(), session_factory=session_factory
+    )
     response = Response(status_code=204)
     delete_session_cookie(response)
     return response
