@@ -46,6 +46,7 @@ import { isTerminalStatus } from '@/lib/execution-status';
 import {
   GUARDRAIL_STEP_LABELS,
   UNCONFIRMED,
+  auditGapNotice,
   executionRows,
   latestResolution,
   startedByLabel,
@@ -508,14 +509,11 @@ function ExecutionsArea({
 }) {
   if (incident.executions.length === 0) return null;
   const rows = executionRows(incident.executions, audit.kind === 'ready' ? audit.items : []);
+  const notice = auditGapNotice(audit, '요청 주체와 대상을');
 
   return (
     <Section title="수행된 조치">
-      {audit.kind === 'failed' ? (
-        <p className="text-muted-foreground text-xs">감사 기록을 읽지 못해 요청 주체와 대상을 확인하지 못했습니다.</p>
-      ) : audit.truncated ? (
-        <p className="text-muted-foreground text-xs">감사 기록이 많아 최근 {audit.items.length}건만 읽었습니다.</p>
-      ) : null}
+      {notice === null ? null : <p className="text-muted-foreground text-xs">{notice}</p>}
       <ul className="flex flex-col gap-2">
         {rows.map((row) => (
           <li key={row.execution.execution_id}>
@@ -831,6 +829,7 @@ export function IncidentDetail({
     (shownOutcome !== null && !isTerminalStatus(shownOutcome.execution.status));
   const subjectHref = subject ? `/monitoring?asset=${encodeURIComponent(subject.arn)}` : null;
   const resolvedBy = audit.kind === 'ready' ? latestResolution(audit.items) : null;
+  const resolvedByNotice = auditGapNotice(audit, '종료 처리자를');
 
   function openAction(candidates: ActionCandidate[]) {
     setRequest({
@@ -1007,6 +1006,10 @@ export function IncidentDetail({
             <Row label="종료 시각">{incident.resolved_at === null ? '기록 없음' : formatKst(incident.resolved_at)}</Row>
             {/* 종료 처리자는 감사 기록(`INCIDENT_RESOLVED`)에만 있다. 감사 기록 도입 전 종료나 읽기 실패는 "확인 안 됨"이다. */}
             <Row label="종료 처리">{resolvedBy === null ? UNCONFIRMED : actorLabel(resolvedBy.actor)}</Row>
+            {/* 실행이 없는 인시던트는 「수행된 조치」 구역이 없어 조회 실패를 여기서 알린다(PR #647 리뷰). */}
+            {resolvedBy === null && resolvedByNotice !== null ? (
+              <p className="text-muted-foreground text-xs">{resolvedByNotice}</p>
+            ) : null}
             <Row label="종료 사유"><span className="whitespace-pre-wrap break-words">{incident.resolution_note ?? '기록 없음'}</span></Row>
             <p className="text-muted-foreground text-xs">종료 판단은 위협 해소·차단 해제·최적화 완료를 뜻하지 않습니다.</p>
           </div>

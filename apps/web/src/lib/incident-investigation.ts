@@ -27,6 +27,16 @@ export type IncidentAudit =
   | { kind: 'failed' };
 
 /**
+ * 감사 목록이 온전하지 않을 때 구역에 붙이는 안내. 이 안내가 없으면 조회 실패와 "원래 기록 없음"이
+ * 같은 "확인 안 됨"으로 보인다(PR #647 리뷰). `what`은 그 구역이 감사 기록에서 얻는 칸이다(목적격 조사 포함).
+ */
+export function auditGapNotice(audit: IncidentAudit, what: string): string | null {
+  if (audit.kind === 'failed') return `감사 기록을 읽지 못해 ${what} 확인하지 못했습니다.`;
+  if (audit.truncated) return `감사 기록이 많아 최근 ${audit.items.length}건만 읽었습니다.`;
+  return null;
+}
+
+/**
  * `next_cursor`가 null이 될 때까지 받아 합친다. 커서는 받은 값을 그대로 돌려줄 뿐 해석하지 않는다.
  * 쪽 상한에 닿으면 `truncated`로 알린다. 실패는 호출부가 접는다(401 redirect를 삼키지 않게).
  */

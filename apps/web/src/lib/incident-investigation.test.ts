@@ -217,6 +217,21 @@ test('상세 화면: 요청 주체 · 대상은 감사 기록에서만, 없으�
     assert.match(failed, /감사 기록을 읽지 못해/);
     assert.doesNotMatch(failed, /ops@example\.com|closer@example\.com/);
     assert.match(failed, new RegExp(`종료 처리[\\s\\S]*${UNCONFIRMED}`));
+
+    // 실행이 없으면 「수행된 조치」 구역이 없다. 조회 실패 · 잘림 안내는 종료 기록 구역에 남아야 한다(PR #647 리뷰).
+    const noExecutions: IncidentResponse = { ...closed, executions: [] };
+    const failedNoExec = render({ kind: 'failed' }, noExecutions);
+    assert.doesNotMatch(failedNoExec, />수행된 조치<\/h2>/);
+    assert.match(failedNoExec, /감사 기록을 읽지 못해 종료 처리자를 확인하지 못했습니다/);
+    const truncatedNoExec = render({ kind: 'ready', items: [], truncated: true }, noExecutions);
+    assert.match(truncatedNoExec, /감사 기록이 많아 최근 0건만 읽었습니다/);
+    // 온전히 읽었는데 종료 기록이 없으면(감사 기록 도입 전 종료) 안내 없이 확인 안 됨만 쓴다.
+    const legacyNoExec = render({ kind: 'ready', items: [], truncated: false }, noExecutions);
+    assert.match(legacyNoExec, new RegExp(`종료 처리[\\s\\S]*${UNCONFIRMED}`));
+    assert.doesNotMatch(legacyNoExec, /감사 기록을 읽지 못해|감사 기록이 많아/);
+    // 처리자를 찾았으면 잘렸어도 그 칸 안내는 붙이지 않는다.
+    const foundNoExec = render({ kind: 'ready', items: [resolved('r', T0, 'closer@example.com')], truncated: true }, noExecutions);
+    assert.doesNotMatch(foundNoExec, /감사 기록이 많아/);
   } finally {
     hooks.deregister();
   }
