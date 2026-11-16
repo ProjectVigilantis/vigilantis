@@ -48,10 +48,18 @@ export function TenantGroupField({ tenantId, groupId }: { tenantId: string; grou
       await setTenantGroup(tenantId, selected === '' ? null : selected);
     } catch (error) {
       setFailure(error);
+      // 고른 그룹이 그 사이 지워졌으면(404 GROUP_NOT_FOUND) 지금 그룹은 그대로라 `key`가 바뀌지 않고, 이 칸의 그룹 목록과
+      // 선택값이 남아 같은 그룹을 다시 보내게 된다. 목록을 다시 받고 선택을 지금 그룹으로 되돌린다.
+      if (error instanceof ApiError && error.code === 'GROUP_NOT_FOUND') {
+        setSelected(groupId ?? '');
+        await listGroups()
+          .then((res) => setGroups(res.items))
+          .catch(() => setGroups('error'));
+      }
     } finally {
       setSaving(false);
     }
-    // 실패해도 다시 읽는다. 그 사이 그룹이 지워졌으면(GROUP_NOT_FOUND) 지금 그룹을 보여야 한다.
+    // 실패해도 상세를 다시 읽는다. 지금 그룹이 지워졌으면 `key`가 바뀌어 이 칸이 새로 그려진다.
     router.refresh();
   }
 

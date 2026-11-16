@@ -7,12 +7,16 @@
 import { useEffect, useState } from 'react';
 
 import { searchTenants } from '@/lib/api/client';
-import { outOfScopeResults, tenantSearchQuery } from '@/lib/tenant-groups';
+import { outOfScopeResults, TENANT_SEARCH_RESULT_MAX, tenantSearchQuery } from '@/lib/tenant-groups';
 import type { TenantSearchItem } from '@/types/api';
 
-type Result = { q: string; items: TenantSearchItem[] } | { q: string; failed: true };
+type Result = { q: string; items: TenantSearchItem[]; capped: boolean } | { q: string; failed: true };
 
-export function OutOfScopeTenants({ query }: { query: string }) {
+/**
+ * `showEmpty`: 일치 0건일 때도 문구를 보인다. 목록 표가 없는 화면(담당 고객사 0곳)에서 쓴다. 표가 있으면
+ * 표가 이미 "검색어와 맞는 고객사가 없습니다"를 보이므로 끈다.
+ */
+export function OutOfScopeTenants({ query, showEmpty = false }: { query: string; showEmpty?: boolean }) {
   const q = tenantSearchQuery(query);
   const [result, setResult] = useState<Result | null>(null);
 
@@ -21,7 +25,11 @@ export function OutOfScopeTenants({ query }: { query: string }) {
     let alive = true;
     const timer = setTimeout(() => {
       searchTenants(q)
-        .then((res) => alive && setResult({ q, items: outOfScopeResults(res.items) }))
+        .then(
+          (res) =>
+            alive &&
+            setResult({ q, items: outOfScopeResults(res.items), capped: res.items.length >= TENANT_SEARCH_RESULT_MAX }),
+        )
         .catch(() => alive && setResult({ q, failed: true }));
     }, 300);
     return () => {
@@ -39,18 +47,31 @@ export function OutOfScopeTenants({ query }: { query: string }) {
       </p>
     );
   }
-  if (result.items.length === 0) return null;
+  // 앞 20건이 전부 담당 안이어도 잘린 결과면 0곳이 아니므로 아래 블록에서 상한을 함께 보인다.
+  if (result.items.length === 0 && !result.capped) {
+    return showEmpty ? (
+      <p className="text-muted-foreground border-t px-6 py-8 text-center text-sm" aria-live="polite">
+        검색어와 맞는 고객사가 없습니다.
+      </p>
+    ) : null;
+  }
   return (
     <div className="border-t px-6 py-4">
       <h3 className="text-sm font-semibold">담당 밖 고객사 {result.items.length}곳</h3>
-      <ul className="mt-2 flex flex-col gap-1.5">
+      {/* 서버가 담당 안팎을 합쳐 앞 20건에서 자르므로, 이 수는 전체 일치 수가 아닐 수 있다. */}
+      {result.capped ? (
+        <p className="text-muted-foreground mt-1 text-xs">
+          이름순 앞 {TENANT_SEARCH_RESULT_MAX}건 안에서 찾은 결과입니다. 일치하는 고객사가 더 있을 수 있습니다.
+        </p>
+      ) : null}
+      {result.items.length === 0 ? null : <ul className="mt-2 flex flex-col gap-1.5">
         {result.items.map((item) => (
           <li key={item.tenant_id} className="flex items-center gap-2 text-sm">
             <span>{item.name}</span>
             <span className="bg-muted text-muted-foreground rounded-full px-2 py-0.5 text-xs">권한 없음</span>
           </li>
         ))}
-      </ul>
+      </ul>}
     </div>
   );
 }

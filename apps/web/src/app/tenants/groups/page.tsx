@@ -22,7 +22,8 @@ export default async function TenantGroupsPage() {
   }
   if (!isCentralAdmin(user)) redirect('/tenants');
 
-  // 고객사 목록은 그룹별 이름을 채우는 데만 쓴다. 못 읽으면 서버가 센 고객사 수로 그린다.
+  // 고객사 목록은 배정 표를 그리는 데 쓴다. 못 읽으면(null) 그룹 목록은 서버가 센 수로 그리고, 배정 표 자리에
+  // 조회 실패를 적는다(tenant-groups-view.tsx).
   const tenantsPromise = orNull(getTenants());
   let groups;
   try {

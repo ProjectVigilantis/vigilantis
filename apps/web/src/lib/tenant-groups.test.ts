@@ -1,8 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { TenantListItem } from '../types/api.ts';
-import { outOfScopeResults, tenantSearchQuery, tenantsByGroup, TENANT_SEARCH_MAX } from './tenant-groups.ts';
+import {
+  assignmentRows, GROUP_FILTER_ALL, GROUP_FILTER_NONE, outOfScopeResults, tenantSearchQuery, TENANT_SEARCH_MAX,
+} from './tenant-groups.ts';
+
+test('assignmentRows: 덮어 쓴 그룹으로 필터를 가르고 이름순으로 낸다', () => {
+  const rows = [
+    { tenant_id: 't1', name: '다', aws_account_id: '1', group_id: 'g1' },
+    { tenant_id: 't2', name: '가', aws_account_id: '2', group_id: null },
+    { tenant_id: 't3', name: '나', aws_account_id: '3', group_id: 'g1' },
+  ];
+  // t2를 g1으로 저장하는 중이다.
+  const groupOf = (t: (typeof rows)[number]) => (t.tenant_id === 't2' ? 'g1' : t.group_id);
+  const all = () => true;
+  assert.deepEqual(assignmentRows(rows, groupOf, GROUP_FILTER_ALL, all).map((t) => t.tenant_id), ['t2', 't3', 't1']);
+  assert.deepEqual(assignmentRows(rows, groupOf, 'g1', all).map((t) => t.tenant_id), ['t2', 't3', 't1']);
+  assert.deepEqual(assignmentRows(rows, groupOf, GROUP_FILTER_NONE, all), []);
+  assert.deepEqual(assignmentRows(rows, groupOf, GROUP_FILTER_ALL, (t) => t.name === '나').map((t) => t.tenant_id), ['t3']);
+});
 
 test('tenantSearchQuery: 공백은 보내지 않고, 한도를 넘는 검색어도 보내지 않는다', () => {
   assert.equal(tenantSearchQuery('   '), null);
@@ -17,12 +33,4 @@ test('outOfScopeResults: 담당 밖 결과만 남긴다', () => {
     { tenant_id: 't2', name: '나', accessible: false },
   ];
   assert.deepEqual(outOfScopeResults(items).map((i) => i.tenant_id), ['t2']);
-});
-
-test('tenantsByGroup: 그룹별로 이름순으로 묶고, 그룹 없는 고객사는 null 키에 둔다', () => {
-  const tenant = (tenant_id: string, name: string, group_id: string | null) => ({ tenant_id, name, group_id }) as TenantListItem;
-  const byGroup = tenantsByGroup([tenant('t1', '다', 'g1'), tenant('t2', '가', 'g1'), tenant('t3', '나', null)]);
-  assert.deepEqual(byGroup.get('g1')?.map((t) => t.tenant_id), ['t2', 't1']);
-  assert.deepEqual(byGroup.get(null)?.map((t) => t.tenant_id), ['t3']);
-  assert.equal(byGroup.get('g2'), undefined);
 });

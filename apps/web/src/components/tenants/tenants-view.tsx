@@ -63,18 +63,38 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
       </div>
 
       {tenants.length === 0 ? (
-        unassigned ? (
-          <EmptyState
-            message="담당 고객사가 배정되지 않았습니다."
-            description="배정 전에는 고객사 정보 · 조치 · 고객사 계정 관리를 이용할 수 없습니다. 중앙 관리계정에서 담당 고객사를 배정받아야 합니다."
-          />
-        ) : canCreate ? (
-          <EmptyState
-            message="등록된 고객사가 없습니다."
-          />
-        ) : (
-          <EmptyState message="표시할 고객사가 없습니다." />
-        )
+        <>
+          {unassigned ? (
+            <EmptyState
+              message="담당 고객사가 배정되지 않았습니다."
+              description="배정 전에는 고객사 정보 · 조치 · 고객사 계정 관리를 이용할 수 없습니다. 중앙 관리계정에서 담당 고객사를 배정받아야 합니다."
+            />
+          ) : canCreate ? (
+            <EmptyState
+              message="등록된 고객사가 없습니다."
+            />
+          ) : (
+            <EmptyState message="표시할 고객사가 없습니다." />
+          )}
+          {/* 담당 고객사가 0곳이어도 서버는 이름 검색을 허용한다(#572 7번). 목록 표가 없으니 검색 칸만 따로 둔다. */}
+          {me?.platform_role === 'TENANT_MANAGER' ? (
+            <section className="bg-card ring-foreground/10 overflow-hidden rounded-xl ring-1">
+              <div className="flex flex-wrap items-center gap-3 px-6 py-4">
+                <h2 className="text-base font-bold">담당 밖 고객사 검색</h2>
+                <input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  aria-label="담당 밖 고객사 검색"
+                  maxLength={TENANT_SEARCH_MAX}
+                  placeholder="고객사 이름 검색"
+                  className={cn(INPUT_CLASS, 'h-8 w-64')}
+                />
+              </div>
+              <OutOfScopeTenants query={query} showEmpty />
+            </section>
+          ) : null}
+        </>
       ) : (
         <>
           <section className="bg-card ring-foreground/10 overflow-hidden rounded-xl ring-1">
