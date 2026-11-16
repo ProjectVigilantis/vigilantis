@@ -8,7 +8,7 @@ from botocore.exceptions import ClientError, ReadTimeoutError
 from botocore.response import StreamingBody
 from pydantic import BaseModel, ConfigDict
 
-from ai.bedrock_client import BedrockModelClient, build_bedrock_model_client
+from ai.bedrock_anthropic_client import BedrockModelClient, build_bedrock_model_client
 from ai.model_client import (
     AIModelAdapterError,
     AIModelContractError,
@@ -86,7 +86,7 @@ def no_sleep(monkeypatch):
 
 def client(
     factory, *, owner=OWNER, consent=lambda: True, attempts=3,
-    region="ap-northeast-2", model_id="anthropic.claude-sonnet-5",
+    region="ap-northeast-2", model_id="global.anthropic.claude-sonnet-5-5",
 ):
     return BedrockModelClient(
         owner=owner,
@@ -105,7 +105,7 @@ REQUEST = AIModelRequest("판정", {"account_id": "111111111111", "secret": "AKI
 
 
 @pytest.mark.parametrize("region,model_id", [
-    ("ap-northeast-2", "anthropic.claude-sonnet-5"),
+    ("ap-northeast-2", "global.anthropic.claude-sonnet-5-5"),
     ("us-east-1", "global.anthropic.claude-opus-5"),
 ])
 def test_native_request_uses_caller_target_and_masks_credentials_not_identifiers(region, model_id):
@@ -296,6 +296,39 @@ def test_invalid_or_refused_output_is_not_retried(outcome, exception, kind, no_s
         client(factory).complete(REQUEST, Answer)
     assert caught.value.kind is kind
     assert len(factory.calls) == 1 and no_sleep == []
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "tool_use", "pause_turn", "stop_sequence", None])
+def test_only_completed_sonnet55_text_response_succeeds(stop_reason, no_sleep):
+    reply = message(
+        model="claude-sonnet-5-5",
+        stop_reason=stop_reason,
+        content=[
+            {"type": "thinking", "thinking": "synthetic reasoning"},
+            {"type": "text", "text": '{"verdict":"ok"}'},
+        ],
+    )
+    if stop_reason is None:
+        del reply["stop_reason"]
+    factory = Factory(reply)
+    model = client(factory, model_id="global.anthropic.claude-sonnet-5-5")
+
+    if stop_reason == "end_turn":
+        result = model.complete(REQUEST, Answer)
+        assert result.output.verdict == "ok"
+    else:
+        with pytest.raises(AIModelAdapterError) as caught:
+            model.complete(REQUEST, Answer)
+        result = caught.value
+        assert result.kind is FailureKind.RESPONSE_SHAPE
+
+    assert result.usage.prompt_tokens == 10
+    assert result.usage.completion_tokens == 5
+    assert result.usage.total_tokens == 15
+    assert result.trace.returned_model == "claude-sonnet-5-5"
+    assert result.trace.attempt_count == 1
+    assert len(factory.calls) == 1 and no_sleep == []
+    assert factory.runtimes[0].closed and factory.runtimes[0].stream.closed
 
 
 def test_factory_accepts_explicit_arguments_without_app_settings():

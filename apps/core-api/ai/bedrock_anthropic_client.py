@@ -1,7 +1,8 @@
 """고객 역할의 Bedrock InvokeModel 어댑터. 앱의 모델 경로를 선택하거나 바꾸지 않는다.
 
-Anthropic Messages와 native structured output에 호환되는 모델 ID를 호출자가 지정한다.
-다른 공급자의 요청 형식으로 변환하지 않는다. region은 접속·서명 리전이며, 교차 리전
+Claude Sonnet 5.5의 Anthropic Messages와 native structured output 계약을 따른다.
+모델 ID는 호출자가 지정한다. 다른 공급자의 요청 형식으로 변환하지 않는다.
+region은 접속·서명 리전이며, 교차 리전
 추론 프로필의 실제 처리 위치를 보장하지 않는다. 모델·리전·계정 폴백은 없다.
 """
 
@@ -23,7 +24,8 @@ from ai.model_client import (
     build_outbound_payload,
 )
 from ai.model_retry import (
-    AttemptFailure, AttemptOutcome, ModelCallEngine, RetryPolicy, retry_after_seconds,
+    AttemptFailure, AttemptOutcome, AttemptSuccess, ModelCallEngine, RetryPolicy,
+    retry_after_seconds,
 )
 from services.aws.client import (
     BEDROCK_CREDENTIAL_BUDGET_SECONDS,
@@ -147,6 +149,33 @@ class BedrockModelClient:
         self._read_timeout = read_timeout
         self._runtime_factory = runtime_factory
 
+    def _request_body(
+        self, payload: dict[str, Any], response_model: type[StructuredOutputT]
+    ) -> dict[str, Any]:
+        return {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": self._max_tokens,
+            "system": payload["system_prompt"],
+            "messages": [{"role": "user", "content": payload["user_json"]}],
+            "output_config": {
+                "format": {"type": "json_schema", "schema": _schema_for(response_model)}
+            },
+        }
+
+    def _classify_body(
+        self, message: dict[str, Any], response_model: type[StructuredOutputT]
+    ) -> AttemptOutcome[StructuredOutputT]:
+        outcome = _classify_message(message, response_model)
+        if isinstance(outcome, AttemptSuccess) and message.get("stop_reason") != "end_turn":
+            return AttemptFailure(
+                FailureKind.RESPONSE_SHAPE,
+                "완료된 텍스트 응답이 아닙니다",
+                usage=outcome.usage,
+                returned_model=outcome.returned_model,
+                returned_service_tier=outcome.returned_service_tier,
+            )
+        return outcome
+
     def complete(
         self, request: AIModelRequest, response_model: type[StructuredOutputT]
     ) -> AIModelResponse[StructuredOutputT]:
@@ -159,15 +188,7 @@ class BedrockModelClient:
                     "고객 역할과 호출자의 인가가 필요합니다",
                     phase="consent",
                 )
-            body = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": self._max_tokens,
-                "system": payload["system_prompt"],
-                "messages": [{"role": "user", "content": payload["user_json"]}],
-                "output_config": {
-                    "format": {"type": "json_schema", "schema": _schema_for(response_model)}
-                },
-            }
+            body = self._request_body(payload, response_model)
             # 정적 임시 자격을 받으므로 InvokeModel 서명 도중 STS 갱신이 섞이지 않는다.
             try:
                 runtime = self._runtime_factory(
@@ -203,7 +224,7 @@ class BedrockModelClient:
                         "Bedrock 응답 본문이 JSON 객체가 아닙니다",
                         usage=_token_usage(None),
                     )
-                return _classify_message(message, response_model)
+                return self._classify_body(message, response_model)
             finally:
                 runtime.close()
 
