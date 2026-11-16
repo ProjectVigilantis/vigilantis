@@ -47,6 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 import agent_dispatcher  # noqa: E402
 import dispatcher  # noqa: E402
+from access_denial_log import DeferredPlatformEventMiddleware  # noqa: E402
 from api_usage import TenantApiUsageMiddleware  # noqa: E402
 from auth.access import require_user  # noqa: E402
 from auth.http import log_provider_status, register_auth_http, require_origin  # noqa: E402
@@ -212,6 +213,9 @@ def create_app() -> FastAPI:
     # 고객사별 API 호출 집계(#572 6번) — request_context 바깥이라 응답 · 접근 로그가 끝난 뒤 그 요청의 신원
     # (request.state.current_user)으로 센다. 기록 시간은 접근 로그의 duration_ms 에 들지 않는다
     app.add_middleware(TenantApiUsageMiddleware)
+    # 범위 밖 404 의 활동 로그(#589 B) — 처리기가 만들어 둔 행을 응답이 끝난 뒤에 쓴다. 호출 집계와 같은 이유로
+    # request_context 바깥이다(응답 전에 쓰면 「범위 밖」일 때만 응답이 늦어진다)
+    app.add_middleware(DeferredPlatformEventMiddleware)
 
     # CORS는 request_context보다 나중에 추가한다 — 나중 추가가 바깥층이라
     # 미들웨어가 만든 오류 봉투 응답에도 CORS 헤더가 붙는다.

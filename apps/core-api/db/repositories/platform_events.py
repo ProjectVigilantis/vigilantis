@@ -183,6 +183,10 @@ def list_events(
     시도는 로그인 전이라 행위자가 ANONYMOUS 이고 계정은 대상으로만 이어지기 때문이다. 인증 행은 행위자가
     누구든 들어간다 — 다른 직원이 내 인증 앱을 초기화한 행(AUTH_TOTP_RECOVERY)도 내 로그인 수단이 바뀐
     일이라 본인이 본다. 인증 밖에서 나를 대상으로 한 일(내 등급 변경 등)은 넣지 않는다 — 다른 직원의 행이다.
+    범위 밖 404(ACCESS_OUT_OF_SCOPE)는 tenant_ids 가 None 인 조회(중앙 관리자)에만 나온다 — 이 행은 「있는데
+    범위 밖」일 때만 생기므로, 낸 사람이나 그 고객사의 담당자가 읽으면 행이 있다는 것만으로 그 ID 가 있다는 답이
+    된다(#589 · 안성일 2026-11-13). 두 갈래(배정 고객사의 행 · 본인 행)를 묶은 조건 **바깥**에서 뺀다 — 갈래가
+    늘어도 빠지지 않고, action 필터로 골라도 나오지 않는다.
     before 는 직전 쪽의 마지막 (occurred_at, event_id) — 그보다 앞선 것만.
     """
     event = models.PlatformEvent
@@ -197,6 +201,7 @@ def list_events(
         )
         own = and_(event.tenant_id.is_(None), or_(event.actor_user_id == viewer_user_id, about_me))
         query = query.where(or_(event.tenant_id.in_(tenant_ids), own) if tenant_ids else own)
+        query = query.where(event.action != PlatformEventAction.ACCESS_OUT_OF_SCOPE.value)
     f = filters
     if f.since is not None:
         query = query.where(event.occurred_at >= f.since)

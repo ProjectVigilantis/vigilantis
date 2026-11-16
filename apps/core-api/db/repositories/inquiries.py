@@ -22,7 +22,7 @@ from schemas.api.support import (
     InquiryEventAction,
     InquiryStatus,
 )
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -109,6 +109,14 @@ def get_inquiry(
         return None
     row = db.execute(_select_rows(scope_ids).where(_I.inquiry_id == inquiry_id)).first()
     return None if row is None else InquiryRow(*row)
+
+
+def inquiry_exists(db: Session, inquiry_id: str) -> bool:
+    """그 문의 행이 **있는지만** 돌려준다(범위를 걸지 않고, 행 · 소속 고객사는 돌려주지 않는다).
+
+    **권한 판정에 쓰지 않는다.** 범위를 건 조회가 못 찾아 404 로 가는 길에서, 없는 것인지 있는데 범위 밖인지를
+    가르는 데만 쓴다(#589 범위 밖 404 기록 · exceptions.OutOfScopeError)."""
+    return bool(db.scalar(select(exists().where(_I.inquiry_id == inquiry_id))))
 
 
 def lock_inquiry(
