@@ -225,10 +225,11 @@ def test_rejected_requests_write_no_inquiry_row(client_pg, db, make_tenant, make
     assert client_pg.post(f"{BASE}/{mine}/notes", json={"note": NOTE}, headers=customer.headers).status_code == 403
     assert client_pg.post(BASE, json={"category": "BUG", "title": " ", "body": BODY}).status_code == 422
 
-    # 문의 · 문의 기록 · 알림은 그대로다. 활동 로그에는 403 한 건의 권한 거절(ACCESS_FORBIDDEN · #589 B)만 는다
+    # 문의 · 문의 기록 · 알림은 그대로다. 활동 로그에는 거절만 는다(#589 B) — 403 한 건의 권한 거절
+    # (ACCESS_FORBIDDEN)과, 담당 밖 고객사의 문의를 연 404 두 건(ACCESS_OUT_OF_SCOPE). 422 는 남지 않는다
     inquiries, inquiry_events, notifications, platform_rows = _counts(db)
     assert (inquiries, inquiry_events, notifications) == before[:3]
-    assert platform_rows == before[3] + 1
+    assert platform_rows == before[3] + 3
     denied = db.execute(
         text(
             "SELECT action, details->>'path' FROM platform_events"
@@ -237,6 +238,17 @@ def test_rejected_requests_write_no_inquiry_row(client_pg, db, make_tenant, make
         {"u": customer.user_id},
     ).all()
     assert denied == [("ACCESS_FORBIDDEN", f"{BASE}/{mine}/notes")]
+    out_of_scope = db.execute(
+        text(
+            "SELECT action, details->>'method', details->>'path', details->>'reason_code' FROM platform_events"
+            " WHERE category = 'ACCESS' AND actor_user_id::text = :u ORDER BY details->>'method' DESC"
+        ),
+        {"u": scoped.user_id},
+    ).all()
+    assert out_of_scope == [
+        ("ACCESS_OUT_OF_SCOPE", "PUT", f"{BASE}/{foreign}/status", "INQUIRY_NOT_FOUND"),
+        ("ACCESS_OUT_OF_SCOPE", "POST", f"{BASE}/{foreign}/notes", "INQUIRY_NOT_FOUND"),
+    ]
 
 
 # --- 원자성 --------------------------------------------------------------------------------------

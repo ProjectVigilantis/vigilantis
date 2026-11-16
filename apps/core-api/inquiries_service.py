@@ -25,7 +25,7 @@ from db import models
 from db.repositories import inquiries as inquiries_repo
 from db.repositories import operator_notifications
 from db.repositories.platform_events import person, record_platform_event
-from exceptions import ApiError
+from exceptions import ApiError, OutOfScopeError
 from identifiers import canonical_id
 from schemas.api.errors import ErrorCode
 from schemas.api.inquiries import (
@@ -97,18 +97,28 @@ def _reload(db: Session, inquiry_id: str) -> InquiryItem:
     return _item(row)
 
 
+def _not_found(db: Session, stored_id: str | None, scope_ids) -> ApiError:
+    """범위를 건 조회가 못 찾은 문의의 404. 그 문의가 있으면(있는데 범위 밖) 활동 로그에 남는 표시를 단다(#589 B).
+
+    존재 확인은 이 404 갈래에서만 한다. 형식이 어긋난 ID 와 전체 범위(중앙 관리자)의 「없음」은 더 보지 않는다."""
+    if stored_id is not None and scope_ids is not None and inquiries_repo.inquiry_exists(db, stored_id):
+        return OutOfScopeError(ErrorCode.INQUIRY_NOT_FOUND)
+    return ApiError(ErrorCode.INQUIRY_NOT_FOUND)
+
+
 def _locked_target(
     db: Session, user: service.CurrentUser, inquiry_id: str
 ) -> models.Inquiry:
     """범위 안의 문의를 잠가 돌려준다. 형식 오류 · 없음 · 범위 밖은 모두 404."""
     stored_id = canonical_id(inquiry_id)
+    scope_ids = tenant_scope_ids(user)
     inquiry = (
         None
         if stored_id is None
-        else inquiries_repo.lock_inquiry(db, stored_id, scope_ids=tenant_scope_ids(user))
+        else inquiries_repo.lock_inquiry(db, stored_id, scope_ids=scope_ids)
     )
     if inquiry is None:
-        raise ApiError(ErrorCode.INQUIRY_NOT_FOUND)
+        raise _not_found(db, stored_id, scope_ids)
     return inquiry
 
 
@@ -249,12 +259,13 @@ def add_note(
 def list_events(db: Session, actor: Actor, inquiry_id: str) -> InquiryEventsResponse:
     user = authorize(db, actor, require_tenant_management)
     stored_id = canonical_id(inquiry_id)
+    scope_ids = tenant_scope_ids(user)
     row = (
         None
         if stored_id is None
-        else inquiries_repo.get_inquiry(db, stored_id, scope_ids=tenant_scope_ids(user))
+        else inquiries_repo.get_inquiry(db, stored_id, scope_ids=scope_ids)
     )
     if row is None:
-        raise ApiError(ErrorCode.INQUIRY_NOT_FOUND)
+        raise _not_found(db, stored_id, scope_ids)
     events = inquiries_repo.list_events(db, row.inquiry.inquiry_id)
     return InquiryEventsResponse(items=[_event_item(event, email) for event, email in events])

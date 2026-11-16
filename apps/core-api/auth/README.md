@@ -490,6 +490,18 @@ SDK 호출 뒤 잠금 안의 재확인(행위자 · 대상 신원 · 대상 테�
 
 권한 거절(403 `AUTH_FORBIDDEN`)은 이 모듈이 아니라 공통 오류 처리기가 `ACCESS_FORBIDDEN`으로 남긴다(`apps/core-api/access_denial_log.py`).
 
+범위 밖 404도 같은 처리기가 `ACCESS_OUT_OF_SCOPE`로 남긴다. 다만 404는 「없다」와 「범위 밖」이 같은 코드라, 범위를 판정한 자리가 `exceptions.OutOfScopeError`로 표시한 것만 남는다 — 없는 ID · 형식이 어긋난 ID는 남지 않는다. 이 모듈의 표시 자리는 셋이다.
+
+| 자리 | 응답 | 표시하는 경우 |
+| --- | --- | --- |
+| `admin_service._target`(사용자 관리 대상) | `USER_NOT_FOUND` | 대상 행은 있는데 다른 고객사 · 플랫폼 계정 · 미지정 계정이다. 어느 경우인지는 싣지 않는다 |
+| `admin_service._invite_tenant`(초대 대상 고객사) | `TENANT_NOT_FOUND` | 범위 밖이고, 404로 가는 길에서 한 번 더 본 존재 확인(`tenants_repo.tenant_exists`)이 「있다」다 |
+| `totp_recovery_http.make_authorize`(TOTP 분실 복구 대상) | `USER_NOT_FOUND` | 대상 행은 있는데 고객사 계정이 아니거나 다른 고객사 계정이다 |
+
+- 나가는 응답은 표시가 있든 없든 같은 404다. 행은 처리기가 응답 전에 만들고 **쓰기는 응답을 보낸 뒤**에 한다 — 응답 전에 쓰면 「범위 밖」일 때만 응답이 늦어져 그 ID가 있다는 것이 드러난다.
+- 이 행은 **중앙 관리자만 읽는다**(`GET /api/v1/platform-events`). 행이 「있는데 범위 밖」일 때만 생기므로, 낸 사람이나 그 고객사의 담당자가 읽으면 그 ID가 있다는 답이 된다.
+- 싣는 것은 메서드 · 경로 · 사유 코드(나간 응답 코드) · 요청자의 고객사다. 초대의 대상 고객사는 본문에 있어 행에 남지 않는다.
+
 ## TOTP 분실 복구 (#515)
 
 인증 앱을 잃은 사용자의 Cognito TOTP 등록을 지우고, 그 사용자가 다음 로그인에서 새 TOTP 등록과 이메일 코드 확인을 다시 거치게 한다. 비밀번호 · 계정 상태 · 계정 종류 · 역할 · 소속은 바꾸지 않는다. 진입점은 관리자 API `POST /api/v1/users/{user_id}/totp/reset`(TENANT 대상)과 앱 세션 없이 쓰는 운영자 CLI `auth.recover_totp`(§운영자 CLI) 둘이다. 둘 다 같은 코어 `totp_recovery.reset_totp`를 부르고, 누가 누구를 초기화하는지는 진입점이 넘기는 `authorize` 콜백이 정한다. 요청 계약은 `packages/schemas/api/totp_recovery.py`의 `TotpRecoveryRequest`다. 웹 화면, 세션 없는 공개 초기화 경로, 앱의 별도 정리(reconcile) API는 없다.

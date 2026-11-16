@@ -211,6 +211,71 @@ def test_manager_sees_assigned_tenants_and_only_own_tenantless_rows(
     assert get(actor_user_id=colleague.user_id)["items"] == []
 
 
+def _out_of_scope(seed, at, actor, tenant_id=None):
+    """범위 밖 404 한 건 — 있는 ID 를 열었다가 404 를 받은 요청."""
+    return seed(
+        A.ACCESS_OUT_OF_SCOPE, at, actor=actor, outcome=OUT.DENIED, tenant_id=tenant_id,
+        details={"reason_code": "INCIDENT_NOT_FOUND", "method": "GET",
+                 "path": f"/api/v1/incidents/{uuid.uuid4()}"},
+    )
+
+
+def test_out_of_scope_rows_are_read_by_the_central_admin_only(
+    make_tenant, make_auth_session, login_as, seed, get
+):
+    """이 행은 「있는데 범위 밖」일 때만 생긴다 — 낸 사람이나 그 고객사의 담당자가 읽으면 그 ID 가 있다는 답이 된다."""
+    mine = make_tenant()
+    customer = make_auth_session(UserRole.ADMIN, tenant_id=mine)
+    customer_actor = repo.EventActor(
+        PlatformActorKind.USER, user_id=customer.user_id, account_type=AccountType.TENANT,
+    )
+    manager = login_as(UserRole.ADMIN, assigned_tenant_ids=(mine,), **MANAGER)
+    me = _person(manager, role=PlatformRole.TENANT_MANAGER)
+    kept = seed(A.AUTH_LOGOUT, 0, actor=me)
+    own = _out_of_scope(seed, 1, me)                      # 담당자 본인이 낸 행(고객사 없음 — 「본인 행」 갈래)
+    theirs = _out_of_scope(seed, 2, customer_actor, mine)  # 담당 고객사의 계정이 낸 행(「배정 고객사」 갈래)
+    # 같은 사람 · 같은 고객사의 권한 거절(403)은 그대로 보인다 — 빼는 것은 범위 밖 404 뿐이다
+    forbidden = seed(
+        A.ACCESS_FORBIDDEN, 3, actor=customer_actor, outcome=OUT.DENIED, tenant_id=mine,
+        details={"reason_code": "AUTH_FORBIDDEN", "method": "GET", "path": "/api/v1/tenants"},
+    )
+
+    assert _ids(get()) == [forbidden.event_id, kept.event_id]
+    for narrowed in (
+        {"action": "ACCESS_OUT_OF_SCOPE"},
+        {"category": "ACCESS", "outcome": "DENIED", "actor_user_id": manager.user_id},
+        {"tenant_id": mine, "action": "ACCESS_OUT_OF_SCOPE"},
+        {"actor_user_id": customer.user_id, "action": "ACCESS_OUT_OF_SCOPE"},
+    ):
+        assert get(**narrowed)["items"] == [], narrowed
+
+    login_as(UserRole.ADMIN)  # 중앙 관리자
+    assert _ids(get()) == [forbidden.event_id, theirs.event_id, own.event_id, kept.event_id]
+    assert _ids(get(action="ACCESS_OUT_OF_SCOPE")) == [theirs.event_id, own.event_id]
+
+
+def test_hidden_out_of_scope_rows_leave_no_trace_in_paging(login_as, seed, get):
+    """쪽 넘김에서도 자리가 드러나지 않는다 — 건수 · 순서 · 마지막 쪽이 그 행이 없을 때와 같다."""
+    manager = login_as(UserRole.ADMIN, **MANAGER)
+    me = _person(manager, role=PlatformRole.TENANT_MANAGER)
+    visible = [seed(A.AUTH_LOGOUT, n * 2, actor=me) for n in range(4)]
+    for n in range(4):
+        _out_of_scope(seed, n * 2 + 1, me)  # 보이는 행 사이사이에 낀다
+
+    seen, cursor, pages = [], None, 0
+    while True:
+        body = get(limit=2) if cursor is None else get(limit=2, cursor=cursor)
+        assert len(body["items"]) == 2  # 숨긴 행 때문에 쪽이 덜 차지 않는다
+        seen += _ids(body)
+        pages += 1
+        cursor = body["next_cursor"]
+        if cursor is None or pages > 4:
+            break
+
+    assert seen == [row.event_id for row in reversed(visible)]
+    assert pages == 2  # 4건 · 한 쪽 2건 — 숨긴 4건이 쪽 수를 늘리지 않는다
+
+
 def test_unassigned_manager_sees_only_own_rows(make_tenant, login_as, seed, get):
     tenant_id = make_tenant()
     manager = login_as(UserRole.ADMIN, **MANAGER)

@@ -5,6 +5,8 @@
 #
 #   - 내부 예외·ORM 원본·스택은 응답에 노출하지 않는다(스택은 로그로만).
 #   - 403 AUTH_FORBIDDEN 은 봉투로 바꾸기 전에 플랫폼 활동 로그에 남긴다(access_denial_log · #589 B).
+#   - 범위 밖 404 는 그 판정을 한 자리가 OutOfScopeError 로 표시한 것만 남긴다. 표시 없는 404 는 남기지 않는다.
+#     행은 여기서 만들어 두고 쓰기는 응답을 보낸 뒤에 한다(access_denial_log.DeferredPlatformEventMiddleware).
 #   - 409 2종(IDEMPOTENCY_KEY_CONFLICT·PROPOSAL_NOT_EXECUTABLE)의 발생 경로는
 #     조치 실행 API 작업에서 붙는다 — 여기서는 공통 봉투 변환만 둔다.
 # ==============================================================================
@@ -119,6 +121,15 @@ class ApiError(Exception):
         self.code = code
 
 
+class OutOfScopeError(ApiError):
+    """**있지만** 요청자의 범위 밖인 대상을 연 거절. 나가는 응답은 같은 코드의 ApiError 와 똑같다(404).
+
+    범위를 판정한 자리가 「없다」와 「범위 밖」을 가른 뒤 범위 밖에만 쓴다 — 공통 처리기가 이 표시가 붙은 것만
+    ACCESS_OUT_OF_SCOPE 로 남긴다(#589 B). 없는 ID · 형식이 어긋난 ID 에는 쓰지 않는다: 그 행의 뜻은 「남의 것을
+    열려 했다」이고, 오타나 무작위 ID 로 행이 불어나지 않아야 한다. 대상이 있는지 모르는 자리는 404 로 가는
+    길에서만 저장소의 존재 확인(「있는지만」 돌려주는 함수)으로 가른다 — 권한 판정에는 쓰지 않는다."""
+
+
 def _request_id(request: Request) -> str:
     rid = getattr(request.state, "request_id", None) or request_id_var.get()
     return rid or "-"
@@ -155,6 +166,12 @@ def register_error_handlers(app: FastAPI) -> None:
             import access_denial_log
 
             await run_in_threadpool(access_denial_log.record_forbidden, request)
+        elif isinstance(exc, OutOfScopeError):
+            # 범위 밖 404(ACCESS_OUT_OF_SCOPE). 여기서는 행만 만들어 둔다(DB 를 쓰지 않는다) — 쓰기가 응답 전에
+            # 끼면 「범위 밖」일 때만 응답이 늦어져 그 ID 가 있다는 것이 응답 시간으로 드러난다
+            import access_denial_log
+
+            access_denial_log.defer_out_of_scope(request, exc.code)
         return api_error_response(request, exc.code)
 
     @app.exception_handler(RequestValidationError)

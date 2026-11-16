@@ -163,6 +163,14 @@ def get_tenant(
     return None if row is None else TenantWithCounts(*row)
 
 
+def tenant_exists(db: Session, tenant_id: str) -> bool:
+    """그 고객사 행이 **있는지만** 돌려준다(범위를 걸지 않고, 행 · 상태 · 소속은 돌려주지 않는다).
+
+    **권한 판정에 쓰지 않는다.** 범위 판정이 이미 「아니다」로 끝나 404 로 가는 길에서, 그 ID 가 없는 것인지
+    있는데 범위 밖인지를 가르는 데만 쓴다(#589 범위 밖 404 기록 · exceptions.OutOfScopeError)."""
+    return bool(db.scalar(select(exists().where(_T.tenant_id == tenant_id))))
+
+
 def read_tenant_for_share(db: Session, tenant_id: str) -> Optional[models.Tenant]:
     """테넌트 행을 FOR SHARE 로 읽는다 — 트랜잭션이 끝날 때까지 그 행의 UPDATE(끄기 · 정지)를 막는다.
 

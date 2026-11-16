@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any, Optional
 
+from db import models
 from db.repositories.platform_events import EventActor, build_platform_event
 from schemas.platform_events import PlatformEventAction, PlatformEventOutcome
 from sqlalchemy.orm import Session
@@ -49,6 +50,14 @@ def record_detached(
         session_id=session_id,
         occurred_at=occurred_at,
     )
+    return write_detached(session_factory, row)
+
+
+def write_detached(session_factory: Callable[[], Session], row: models.PlatformEvent) -> bool:
+    """이미 만든 행(build_platform_event — 계약 검증 · 요청 문맥 포함)을 따로 쓴다. 남겼으면 True.
+
+    만드는 일과 쓰는 일을 다른 때에 하는 자리가 쓴다 — 범위 밖 404 는 응답 전에 행을 만들고 응답 뒤에 쓴다
+    (요청 문맥은 요청이 끝나면 풀린다). DB 쓰기가 실패하면 앱 로그에 남기고 False 다."""
     try:
         with session_factory() as session:
             session.add(row)
@@ -58,8 +67,8 @@ def record_detached(
         _logger.error(
             "platform_event_write_failed",
             extra={
-                "event_action": getattr(action, "value", str(action)),
-                "event_outcome": getattr(outcome, "value", str(outcome)),
+                "event_action": row.action,
+                "event_outcome": getattr(row.outcome, "value", str(row.outcome)),
                 "error_type": type(exc).__name__,
             },
         )

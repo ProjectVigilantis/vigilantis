@@ -65,7 +65,7 @@ from db import mappers, models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from db.session import get_db
-from exceptions import ApiError
+from exceptions import ApiError, OutOfScopeError
 from evidence_export import ExportFormat, export_incident_evidence
 from ai.model_client import AIModelClient
 from ai.report_draft import get_report_model_client
@@ -212,8 +212,11 @@ def _load_incident(db: Session, incident_id: str, scope: TenantScope) -> models.
     if stored_id is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
     row = incidents_repo.get_incident(db, stored_id)
-    if row is None or not scope.covers(row.tenant_id):
+    if row is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+    if not scope.covers(row.tenant_id):
+        # 있는데 범위 밖 — 응답은 같은 404 이고 활동 로그에만 남는다(#589 B · ACCESS_OUT_OF_SCOPE)
+        raise OutOfScopeError(ErrorCode.INCIDENT_NOT_FOUND)
     return row
 
 

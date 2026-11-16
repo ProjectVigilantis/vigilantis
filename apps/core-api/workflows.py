@@ -89,7 +89,7 @@ from db.repositories import guardrails as guardrails_repo
 from db.repositories import incidents as incidents_repo
 from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenants as tenants_repo
-from exceptions import ApiError
+from exceptions import ApiError, OutOfScopeError
 from identifiers import canonical_id
 from incident_analysis import analysis_result_from
 from isolation_timing import current_trace
@@ -319,8 +319,11 @@ def _check_scope(db: Session, incident_id: str, scope: TenantScope) -> None:
         return
     stored_id = canonical_id(incident_id)
     incident = incidents_repo.get_incident(db, stored_id) if stored_id else None
-    if incident is None or not scope.covers(incident.tenant_id):
+    if incident is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+    if not scope.covers(incident.tenant_id):
+        # 있는데 범위 밖 — 응답은 같은 404 이고 활동 로그에만 남는다(#589 B · ACCESS_OUT_OF_SCOPE)
+        raise OutOfScopeError(ErrorCode.INCIDENT_NOT_FOUND)
 
 
 def _tenant_suspended(db: Session, tenant_id: str | None) -> bool:
@@ -732,8 +735,11 @@ def resolve_incident(
         feature=FeaturePermission.RESOLVE_INCIDENT,
     )
     incident = incidents_repo.lock_incident(db, incident_id)
-    if incident is None or not context.scope.covers(incident.tenant_id):
+    if incident is None:
         raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+    if not context.scope.covers(incident.tenant_id):
+        # 잠금 뒤 다시 본 범위 — 그 사이 배정이 회수된 경우도 여기다. 있는데 범위 밖(#589 B)
+        raise OutOfScopeError(ErrorCode.INCIDENT_NOT_FOUND)
     if context.customer and _tenant_suspended(db, incident.tenant_id):
         raise ApiError(ErrorCode.TENANT_SUSPENDED)
     if incident.status is IncidentStatus.RESOLVED:

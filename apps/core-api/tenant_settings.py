@@ -29,7 +29,8 @@ from auth import access, admin_service, service
 from db import models
 from db.repositories import auth as auth_repo
 from db.repositories import tenant_settings as settings_repo
-from exceptions import ApiError
+from db.repositories import tenants as tenants_repo
+from exceptions import ApiError, OutOfScopeError
 from identifiers import canonical_id
 from notifications.settings_source import destination_hash, sync_tenant
 from schemas.api.errors import ErrorCode
@@ -88,7 +89,12 @@ class _StagingRequired(Exception):
 def _target(db: Session, user: service.CurrentUser, tenant_id: str, *, lock: bool = False) -> models.Tenant:
     """범위 안의 고객 행. 형식 오류 · 범위 밖 · 없음은 같은 404 다(DB 캐스트 오류를 내지 않는다)."""
     stored = canonical_id(tenant_id)
-    if stored is None or not access.can_access_tenant(user, stored):
+    if stored is None:
+        raise ApiError(ErrorCode.TENANT_NOT_FOUND)
+    if not access.can_access_tenant(user, stored):
+        # 범위 밖 — 404 로 가는 길에서만 그 고객사가 있는지 본다. 있으면 활동 로그에 남는 범위 밖 404 다(#589 B)
+        if tenants_repo.tenant_exists(db, stored):
+            raise OutOfScopeError(ErrorCode.TENANT_NOT_FOUND)
         raise ApiError(ErrorCode.TENANT_NOT_FOUND)
     statement = (
         select(models.Tenant)

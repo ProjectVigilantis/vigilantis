@@ -672,16 +672,17 @@ def test_authority_revoked_after_the_dependencies_cannot_authorize_the_write(
     assert revoked == [seed.user_id]  # 의존성을 통과해 Workflow 의 쓰기 직전 잠금까지 왔다
     assert (resp.status_code, _code(resp)) == expected
     assert _effects(db, mine) == before
-    # 회수된 권한의 쓰기는 조치 · 종료의 활동 로그를 남기지 않는다(#589). 403 으로 끝난 거절만 권한 거절
-    # (ACCESS_FORBIDDEN) 한 행을 남긴다 — 범위 밖 404 · 세션 없음 401 은 남기지 않는다
-    denials = db.scalar(
-        select(func.count()).select_from(models.PlatformEvent).where(
-            models.PlatformEvent.action == "ACCESS_FORBIDDEN",
+    # 회수된 권한의 쓰기는 조치 · 종료의 활동 로그를 남기지 않는다(#589). 거절 자체만 한 행 남는다 — 403 은 권한
+    # 거절(ACCESS_FORBIDDEN), 범위 밖 404 는 ACCESS_OUT_OF_SCOPE(인시던트는 있는데 회수된 범위 밖이다).
+    # 세션 없음 401 은 남기지 않는다
+    denials = db.scalars(
+        select(models.PlatformEvent.action).where(
+            models.PlatformEvent.category == "ACCESS",
             models.PlatformEvent.actor_user_id == seed.user_id,
         )
-    )
-    assert denials == (1 if expected[0] == 403 else 0)
-    assert _platform_event_count(db) == events_before + denials
+    ).all()
+    assert denials == {403: ["ACCESS_FORBIDDEN"], 404: ["ACCESS_OUT_OF_SCOPE"]}.get(expected[0], [])
+    assert _platform_event_count(db) == events_before + len(denials)
     assert published == []
 
 
@@ -728,5 +729,13 @@ def test_manager_write_is_audited_as_that_platform_user_only_while_assigned(
 
     assert (refused.status_code, _code(refused)) == (404, "INCIDENT_NOT_FOUND")
     assert _effects(db, mine) == before
-    assert _platform_event_count(db) == events_before
+    # 조치 · 종료의 활동 로그는 없다. 회수된 범위 밖의 인시던트를 연 거절 한 행(ACCESS_OUT_OF_SCOPE · #589 B)만 는다
+    out_of_scope = db.scalars(
+        select(models.PlatformEvent).where(
+            models.PlatformEvent.action == "ACCESS_OUT_OF_SCOPE",
+            models.PlatformEvent.actor_user_id == seed.user_id,
+        )
+    ).all()
+    assert [row.details["reason_code"] for row in out_of_scope] == ["INCIDENT_NOT_FOUND"]
+    assert _platform_event_count(db) == events_before + 1
     assert published == []
