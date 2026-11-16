@@ -6,6 +6,7 @@
 // 개인정보 보호를 위해 처음에는 아무 계정도 보이지 않고, 이메일로 검색한 결과만 보인다.
 // 중앙 관리계정 자신은 목록에서 뺀다. 최종 결정자라 스스로를 관리할 일이 없고, 서버도 자기 변경을 거절한다.
 
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, type FormEvent } from 'react';
 
@@ -262,7 +263,10 @@ function GroupAssignDialog({
           <ul className="max-h-72 overflow-y-auto rounded-md border">
             {groups.length === 0 ? (
               <li className="px-3 py-2 text-sm text-muted-foreground">
-                그룹이 아직 없습니다. 중앙 관리계정에서 그룹을 먼저 만들어 주세요.
+                그룹이 아직 없습니다.{' '}
+                <Link href="/tenants/groups" className="text-foreground hover:underline">
+                  고객사 그룹 만들기
+                </Link>
               </li>
             ) : options.length === 0 ? (
               <li className="px-3 py-2 text-sm text-muted-foreground">맞는 그룹이 없습니다.</li>
