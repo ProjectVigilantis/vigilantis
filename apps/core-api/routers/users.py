@@ -20,7 +20,7 @@ from collections.abc import Callable
 from datetime import datetime
 from functools import partial
 
-from auth import admin_service
+from auth import admin_service, service
 from auth.cognito import CognitoAdapter
 from auth.http import SESSION_COOKIE, get_clock, get_cognito_adapter
 from auth.permissions import require_user_management
@@ -175,6 +175,7 @@ def get_recovery_adapter_factory(
 
 
 _RECOVERY_ENGINE = Depends(get_recovery_engine)
+_RECOVERY_ACTOR = Depends(require_recovery_actor)
 _RECOVERY_ADAPTER = Depends(get_recovery_adapter_factory)
 
 
@@ -189,6 +190,8 @@ def reset_user_totp(
     engine: Engine = _RECOVERY_ENGINE,
     actor: admin_service.Actor = _ACTOR,
     get_adapter: Callable[[], CognitoAdapter] = _RECOVERY_ADAPTER,
+    # 관문(위 dependencies)과 같은 의존성이라 한 번만 돈다 — 활동 로그의 행위자로 넘긴다(#589 B)
+    requester: service.CurrentUser = _RECOVERY_ACTOR,
 ) -> Response:
     recover_totp(
         engine,
@@ -197,6 +200,7 @@ def reset_user_totp(
         user_id=user_id,
         operation_id=body.operation_id,
         identity_verified=body.identity_verified,
+        requester=requester,
     )
     return Response(status_code=204)
 
