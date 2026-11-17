@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 import pytest
 import workflows
 from db import models
+from db.repositories import audit as audit_repo
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
 from exceptions import ApiError
@@ -39,6 +40,7 @@ from schemas.runbooks import RunbookId
 from sqlalchemy import create_engine, delete, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
+from tests.platform_event_faults import failing_platform_event_write
 from tests.test_auto_isolation_workflow import (
     PRE,
     SKIP,
@@ -483,6 +485,37 @@ def test_http_resolution_records_the_transition_once(
     _is_person(row, platform_session, tenant_id)
 
 
+def test_a_failed_platform_event_write_leaves_the_incident_unresolved(
+    client_pg, db, make_tenant, make_incident, make_candidate
+):
+    incident = make_incident(db, category=IncidentCategory.FINOPS)
+    incident.tenant_id = make_tenant()
+    make_candidate(db, incident)  # 종료가 함께 무효화하는 제안
+    db.commit()
+    incident_id = incident.incident_id
+    url = f"/api/v1/incidents/{incident_id}/resolve"
+    before = _total(db)
+    audit_before = len(audit_repo.list_by_incident(db, incident_id))
+
+    with failing_platform_event_write() as failed:
+        # 미처리 예외는 미들웨어가 500 봉투로 바꾼다
+        response = client_pg.post(url, json={"resolution": "NO_FURTHER_ACTION"})
+    db.rollback()
+
+    assert failed.count == 1
+    assert (response.status_code, _code(response)) == (500, "INTERNAL_ERROR")
+    stored = incidents_repo.get_incident(db, incident_id)
+    assert (stored.status, stored.resolution) == (IncidentStatus.AWAITING_APPROVAL, None)
+    [candidate] = incidents_repo.list_candidates(db, incident_id)
+    assert candidate.status is CandidateStatus.EXECUTABLE  # 제안 무효화도 함께 되돌아간다
+    assert len(audit_repo.list_by_incident(db, incident_id)) == audit_before
+    assert _total(db) == before
+
+    # 기록이 다시 써지면 같은 요청이 그대로 통과하고 한 행만 남는다
+    assert client_pg.post(url, json={"resolution": "NO_FURTHER_ACTION"}).status_code == 200
+    assert _facts(db, incident_id) == [("INCIDENT_RESOLVE", "SUCCEEDED", incident_id, None)]
+
+
 # ==============================================================================
 # 분석 — INCIDENT_ANALYZE (SYSTEM)
 # ==============================================================================
@@ -547,6 +580,27 @@ def test_refused_analysis_records_nothing(db, make_incident):
     db.rollback()
 
     assert _rows(db, incident.incident_id) == []
+
+
+@pytest.mark.parametrize("case", sorted(_ANALYSES))
+def test_a_failed_platform_event_write_leaves_the_analysis_unsaved(db, make_incident, make_tenant, case):
+    output, _outcome, after, _reason = _ANALYSES[case]
+    incident_id = _analyzing(db, make_incident, make_tenant())
+    claimed = incidents_repo.get_incident(db, incident_id).agent_invocation_status
+
+    with failing_platform_event_write() as failed, pytest.raises(IntegrityError):
+        workflows.record_agent_analysis(db, incident_id, output)
+    db.rollback()
+
+    assert failed.count == 1
+    stored = incidents_repo.get_incident(db, incident_id)
+    # 호출 종료 전이 · 상태 전이 둘 다 되돌아가 다음 주기가 다시 집을 수 있다
+    assert (stored.status, stored.agent_invocation_status) == (IncidentStatus.ANALYZING, claimed)
+    assert _rows(db, incident_id) == []
+
+    workflows.record_agent_analysis(db, incident_id, output)
+    assert incidents_repo.get_incident(db, incident_id).status.value == after
+    assert [row.action for row in _rows(db, incident_id)] == ["INCIDENT_ANALYZE"]
 
 
 # ==============================================================================
@@ -659,6 +713,34 @@ def test_isolation_commit_failure_takes_its_event_with_it(db, make_incident, mak
 
     assert executions_repo.list_by_incident(db, seeded.incident_id) == []
     assert _total(db) == before
+
+
+@pytest.mark.parametrize("rejected", [False, True], ids=["trigger", "guardrail-block"])
+def test_a_failed_platform_event_write_leaves_no_isolation_attempt_behind(
+    db, make_incident, make_candidate, rejected
+):
+    """발동(ACTION_AUTO_TRIGGER)도, 가드레일이 거절한 시도(ACTION_BLOCK)도 행을 못 쓰면 실행 행이 남지 않는다."""
+    seeded = _seeded(db, make_incident, make_candidate, "high")
+    status_before = incidents_repo.get_incident(db, seeded.incident_id).status
+    before = _total(db)
+    audit_before = len(audit_repo.list_by_incident(db, seeded.incident_id))
+
+    with failing_platform_event_write() as failed, pytest.raises(IntegrityError):
+        _attempt(db, seeded, PRE, rejected=rejected)
+    db.rollback()
+
+    assert failed.count == 1
+    assert executions_repo.list_by_incident(db, seeded.incident_id) == []
+    assert incidents_repo.get_incident(db, seeded.incident_id).status is status_before
+    assert len(audit_repo.list_by_incident(db, seeded.incident_id)) == audit_before
+    assert _total(db) == before
+
+    # 같은 판정이 다음 시도에서 그대로 접수된다
+    retried = _attempt(db, seeded, PRE, rejected=rejected)
+    assert retried.created is True
+    assert [row.action for row in _rows(db, retried.execution_id, seeded.incident_id)] == [
+        "ACTION_BLOCK" if rejected else "ACTION_AUTO_TRIGGER"
+    ]
 
 
 # ==============================================================================
@@ -906,3 +988,27 @@ def test_abandoned_auto_rollback_is_a_failed_rollback_of_the_origin(db, rolled_b
     assert _facts(db, origin_id, incident_id) == [
         ("ACTION_ROLLBACK", "FAILED", origin_id, "ROLLBACK_FAILED"),
     ]
+
+
+def test_a_failed_platform_event_write_leaves_the_auto_rollback_unstarted(db, rolled_back_origin, aws):
+    incident_id, origin_id = rolled_back_origin(origin_status=ExecutionStatus.IN_PROGRESS)
+    workflows.close_execution(db, origin_id, next_status=ExecutionStatus.ROLLBACK_INITIATED)
+    before = _total(db)
+    audit_before = len(audit_repo.list_by_incident(db, incident_id))
+
+    with failing_platform_event_write() as failed, pytest.raises(IntegrityError):
+        workflows.initiate_auto_rollback(db, origin_id)
+    db.rollback()
+
+    assert failed.count == 1
+    # 자식 행이 멱등 관문이다 — 남으면 원복은 다시 발동하지 않는데 발동 기록은 없게 된다
+    assert executions_repo.list_rollback_children(db, origin_id) == []
+    assert executions_repo.get_execution(db, origin_id).status is ExecutionStatus.ROLLBACK_INITIATED
+    assert len(audit_repo.list_by_incident(db, incident_id)) == audit_before
+    assert _total(db) == before
+    assert aws.calls == []
+
+    started = workflows.initiate_auto_rollback(db, origin_id)  # 다음 주기
+    child_id = only_child(db, origin_id).execution_id
+    assert started.execution_id == child_id
+    assert _facts(db, child_id) == [("ACTION_AUTO_TRIGGER", "SUCCEEDED", child_id, None)]
