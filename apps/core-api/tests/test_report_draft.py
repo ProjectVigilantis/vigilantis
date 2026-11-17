@@ -127,6 +127,7 @@ def test_download_has_three_sections_provenance_and_blank_human_fields(
             assert fact.source_kind and fact.record_id and fact.json_path and fact.recorded_at
             if fact.status == "unknown":
                 assert fact.value is None and fact.reason
+                assert fact.interpretation is None
         assert all(field.value is None for field in document.human_input)
         assert all(field.checked is False for field in document.human_input if field.kind == "confirmation")
         assert {f.reason for f in document.server_facts.facts} >= {"no_history", "not_collected"}
@@ -270,7 +271,6 @@ def test_structured_evidence_retains_flags_without_free_text():
     assert "example.com" not in payload
     source = next(f for f in facts.facts if f.label == "공격 출발지 IP")
     assert source.value == "203.0.113.10"
-    assert source.interpretation == "피해 IP가 아님"
     victim = next(f for f in facts.facts if f.label == "피해 IP 후보")
     assert victim.status == "unknown"
     assert not any(f.label == "피해 IP 후보" and f.value == "203.0.113.10" for f in facts.facts)
@@ -282,29 +282,43 @@ def test_structured_evidence_retains_flags_without_free_text():
         pytest.param(
             "ACTION_EXECUTION_STARTED", "SYSTEM", "PRE_MITIGATION_0_5S",
             (
-                "ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님",
-                "SYSTEM은 사람의 승인이 아님",
-                "시스템 발동은 사람의 승인이 아님",
-                "시스템 발동은 사람의 승인이 아님",
+                "조치 실행 예약 기록", None,
+                "고위험 탐지에 따른 자동 선차단",
+                "고위험 탐지에 따른 자동 선차단",
             ),
             id="system-execution",
         ),
         pytest.param(
+            "ACTION_EXECUTION_STARTED", "SYSTEM", "TIMEOUT_ISOLATION_1M",
+            ("조치 실행 예약 기록", None, "1분 미응답에 따른 자동 격리", "1분 미응답에 따른 자동 격리"),
+            id="timeout-isolation",
+        ),
+        pytest.param(
+            "ACTION_EXECUTION_STARTED", "SYSTEM", "AUTO_ON_FAILURE",
+            ("조치 실행 예약 기록", None, "주 조치 실패에 따른 자동 복구", "주 조치 실패에 따른 자동 복구"),
+            id="automatic-recovery",
+        ),
+        pytest.param(
+            "ACTION_EXECUTION_STARTED", "SYSTEM", "NACL_DENY_EXPIRED_24H",
+            ("조치 실행 예약 기록", None, "차단 24시간 만료에 따른 자동 해제", "차단 24시간 만료에 따른 자동 해제"),
+            id="expired-deny-release",
+        ),
+        pytest.param(
             "ACTION_EXECUTION_STARTED", "TENANT_USER", "USER_APPROVAL",
-            ("ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님", None, None, None),
+            ("조치 실행 예약 기록", None, "사용자 승인", "사용자 승인"),
             id="tenant-approved-execution",
         ),
         pytest.param(
             "ACTION_EXECUTION_STARTED", "PLATFORM_USER", "USER_APPROVAL",
-            ("ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님", None, None, None),
+            ("조치 실행 예약 기록", None, "사용자 승인", "사용자 승인"),
             id="platform-approved-execution",
         ),
         pytest.param(
-            "INCIDENT_RESOLVED", "TENANT_USER", None, (None, None, None, None),
+            "INCIDENT_RESOLVED", "TENANT_USER", None, ("관제 종료 기록", None, None, "사용자 승인"),
             id="tenant-resolution",
         ),
         pytest.param(
-            "INCIDENT_RESOLVED", "PLATFORM_USER", None, (None, None, None, None),
+            "INCIDENT_RESOLVED", "PLATFORM_USER", None, ("관제 종료 기록", None, None, "사용자 승인"),
             id="platform-resolution",
         ),
     ],
@@ -316,6 +330,8 @@ def test_fact_interpretations_follow_audit_and_execution_values(
     from schemas.api.incidents import ResolutionJudgement
 
     incident, evidence = unit_rows()
+    if action == "ACTION_EXECUTION_STARTED":
+        incident.status = IncidentStatus.AWAITING_CLOSURE
     execution = models.ActionExecution(
         execution_id=str(uuid.uuid4()), incident_id=incident.incident_id,
         runbook_id="RUNBOOK_EC2_ISOLATE", target_arn=ARN, status=ExecutionStatus.UNVERIFIED,
@@ -335,7 +351,19 @@ def test_fact_interpretations_follow_audit_and_execution_values(
     status = next(f for f in facts.facts if f.source_kind == "action_execution" and f.json_path == "/status")
     assert status.value == "UNVERIFIED" and status.interpretation == "결과 확인 불가"
     assert next(f for f in facts.facts if f.json_path == "/finished_at").status == "unknown"
-    assert any(f.value == "RESOLVED" and "신고 완료가 아님" in f.interpretation for f in facts.facts)
+    incident_status = next(f for f in facts.facts if f.json_path == "/incident/status")
+    if action == "INCIDENT_RESOLVED":
+        assert incident_status.value == "RESOLVED"
+        assert incident_status.interpretation == "기록된 관제 상태: 종료"
+    else:
+        assert incident_status.value == "AWAITING_CLOSURE"
+        assert incident_status.interpretation is None
+    resolution = next(f for f in facts.facts if f.json_path == "/resolution")
+    if trigger_source is None:
+        assert resolution.value == "NO_FURTHER_ACTION"
+        assert resolution.interpretation == "추가 조치 없이 관제 종료한 판단 기록"
+    else:
+        assert resolution.status == "unknown" and resolution.interpretation is None
     payload = narrative_request(facts).user_payload
     transmitted = {
         (fact["source_kind"], fact["json_path"]): fact for fact in payload["facts"]
@@ -353,13 +381,41 @@ def test_fact_interpretations_follow_audit_and_execution_values(
 
 
 def test_cutoff_excludes_later_evidence_and_marks_later_mutable_state_unknown():
+    from schemas.api.audit import AuditActorKind, AuditEventAction
+    from schemas.api.incidents import ResolutionJudgement
+
     incident, evidence = unit_rows()
     incident.updated_at = AT + timedelta(seconds=10)
     evidence.collected_at = AT + timedelta(seconds=10)
-    facts = collect_facts(incident, [evidence], [], [], AT)
+    execution = models.ActionExecution(
+        execution_id=str(uuid.uuid4()), incident_id=incident.incident_id,
+        runbook_id="RUNBOOK_EC2_ISOLATE", target_arn=ARN, status=ExecutionStatus.SUCCESS,
+        trigger_source=TriggerSource.USER_APPROVAL, created_at=AT,
+        updated_at=AT + timedelta(seconds=10), finished_at=AT + timedelta(seconds=10),
+    )
+    event = models.AuditEvent(
+        event_id=str(uuid.uuid4()), incident_id=incident.incident_id,
+        action=AuditEventAction.INCIDENT_RESOLVED, actor_kind=AuditActorKind.TENANT_USER,
+        actor_user_id=str(uuid.uuid4()), occurred_at=AT,
+        resolution=ResolutionJudgement.NO_FURTHER_ACTION,
+    )
+    facts = collect_facts(incident, [evidence], [event], [execution], AT)
     assert facts.evidence_flags == []
     assert "no_evidence" in facts.missing
     assert next(f for f in facts.facts if f.json_path == "/incident/status").reason == "after_cutoff"
+    payload = narrative_request(facts).user_payload
+    unknown = [fact for fact in payload["facts"] if fact["status"] == "unknown"]
+    assert unknown
+    assert all(fact["value"] is None and fact["interpretation"] is None for fact in unknown)
+    execution_status = next(
+        fact for fact in payload["facts"]
+        if fact["source_kind"] == "action_execution" and fact["json_path"] == "/status"
+    )
+    assert execution_status["reason"] == "after_cutoff"
+    resolution = next(fact for fact in payload["facts"] if fact["json_path"] == "/resolution")
+    assert resolution["status"] == "known"
+    assert resolution["value"] == "NO_FURTHER_ACTION"
+    assert resolution["interpretation"] == "추가 조치 없이 관제 종료한 판단 기록"
 
 
 def test_input_limit_fails_before_call(client_pg, draft_case, monkeypatch):
@@ -471,8 +527,8 @@ def test_guardduty_intake_download_preserves_finding_not_open_ip(
     assert facts[base + "finding_region"]["value"] == finding_region
     assert facts[base + "first_seen_at"]["value"] == "2026-09-02T09:00:00Z"
     assert facts[base + "last_seen_at"]["value"] == "2026-09-02T09:05:00Z"
-    assert "사고인지시점이 아님" in facts[base + "first_seen_at"]["interpretation"]
-    assert "최신" in facts[base + "last_seen_at"]["interpretation"]
+    assert facts[base + "first_seen_at"]["label"] == "GuardDuty 최초 관측 시각"
+    assert facts[base + "last_seen_at"]["interpretation"] == "최초 저장 사본에 기록된 관측 시각"
     target = facts["/evidence/0/content/event/target_arn"]
     expected = f"arn:aws:ec2:ap-northeast-2:{account}:instance/i-0123456789abcdef0"
     assert target["value"] == (expected if resource_type == "Instance" else finding_arn)
