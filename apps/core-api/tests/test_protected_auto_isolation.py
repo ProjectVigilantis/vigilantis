@@ -206,6 +206,59 @@ def test_server_isolation_does_not_turn_missing_ai_action_into_ai_success(
     )
 
 
+@pytest.mark.parametrize("late_offer", [False, True], ids=["during-analysis", "after-escalation"])
+def test_rejected_server_isolation_records_one_activity_block(db, monkeypatch, late_offer):
+    incident_id = _pending_secops(db, medium=True)
+    monkeypatch.setattr(
+        agent_dispatcher, "resolve_nacl_add_deny_rule_number", lambda *args, **kwargs: (1, None),
+    )
+    if late_offer:
+        monkeypatch.setattr(workflows.executor, "precheck", lambda *args, **kwargs: _passing_precheck(None))
+        assert _cycle(db, _secops_client(db, incident_id)).succeeded == 1
+
+    # 보호 태그는 있지만 Target Group은 없어 실제 후보 가드레일이 거절한다.
+    asset = assets_repo.get_asset_by_arn(db, EC2_ARN)
+    asset.spec = {**asset.spec, "tags": {"Environment": "production"}}
+    if late_offer:
+        incident = db.get(models.Incident, incident_id)
+        incident.response_deadline_at = datetime.now(UTC) - timedelta(seconds=1)
+        incident.agent_wait_started_at = incident.response_deadline_at - timedelta(seconds=60)
+    db.commit()
+
+    def unexpected_aws(*args, **kwargs):
+        pytest.fail("Target Group이 없는 후보가 AWS 사전 검사에 도달했습니다")
+
+    monkeypatch.setattr(workflows.executor, "precheck", unexpected_aws)
+    if late_offer:
+        assert soar.prepare_isolation(db, incident_id, TIMEOUT) is None
+        assert workflows.offer_protected_isolation(db, incident_id).candidate_status.value == "REJECTED"
+        assert workflows.offer_protected_isolation(db, incident_id).candidate_status is None
+    else:
+        assert _cycle(db, _secops_client(db, incident_id, candidates=False)).no_proposal == 1
+        assert _cycle(db, _secops_client(db, incident_id, candidates=False)).claimed == 0
+
+    [candidate] = [
+        row for row in incidents_repo.list_candidates(db, incident_id)
+        if row.runbook_id is RunbookId.RUNBOOK_EC2_ISOLATE
+    ]
+    assert candidate.status.value == "REJECTED"
+    [evaluation] = list(db.scalars(select(models.GuardrailEvaluation).where(
+        models.GuardrailEvaluation.candidate_id == candidate.candidate_id,
+    )))
+    assert evaluation.result.value == "FAIL"
+    assert evaluation.execution_id is None
+    assert _executions(db, incident_id) == []
+    blocks = list(db.scalars(select(models.PlatformEvent).where(
+        models.PlatformEvent.target_id == incident_id,
+        models.PlatformEvent.action == "ACTION_BLOCK",
+    )))
+    assert sorted((row.outcome.value, row.details["reason_code"]) for row in blocks) == sorted(
+        [("DENIED", "PRECHECK_TARGET_NOT_FOUND")]
+        + ([("DENIED", "PROTECTED_TAG")] if late_offer else [])
+    )
+    assert all(row.actor_kind.value == "SYSTEM" for row in blocks)
+
+
 @pytest.mark.parametrize("suspended", [False, True])
 def test_late_protection_offer_survives_escalation_and_policy_change(
     db, client_pg, monkeypatch, suspended,

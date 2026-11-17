@@ -6058,6 +6058,8 @@ def _store_candidate(
     db: Session,
     candidate: RunbookCandidateData,
     outcome: guardrails.GuardrailOutcome,
+    *,
+    tenant_id: str | None,
 ) -> bool:
     """가드레일을 마친 후보 1건과 그 판정을 저장한다. PASS면 True.
 
@@ -6085,6 +6087,8 @@ def _store_candidate(
         candidate_id=candidate.candidate_id,
         validated_command=payload if outcome.command is not None else None,
     )
+    if not passed:
+        _record_guardrail_block(db, candidate.incident_id, tenant_id, outcome.result)
     return passed
 
 
@@ -6189,7 +6193,7 @@ def record_agent_analysis(
     executable = 0
     model_executable = 0
     for candidate, outcome in guarded:
-        if _store_candidate(db, candidate, outcome):
+        if _store_candidate(db, candidate, outcome, tenant_id=incident.tenant_id):
             executable += 1
             if isolation_offer is None or candidate.candidate_id != isolation_offer.candidate_id:
                 model_executable += 1
@@ -6483,7 +6487,7 @@ def _store_candidate_offer(
         db.commit()
         return CandidateOffer(incident_id=incident_id, skipped_reason="보호 생략의 후속 제안 대상이 아닙니다")
 
-    passed = _store_candidate(db, candidate, outcome)
+    passed = _store_candidate(db, candidate, outcome, tenant_id=incident.tenant_id)
     if passed and incident.status in {IncidentStatus.AWAITING_CLOSURE, IncidentStatus.FAILED}:
         if not incidents_repo.update_incident_status(
             db,
