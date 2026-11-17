@@ -20,11 +20,13 @@ from evidence_export import (
     ExportFile, ExportFormat, MEDIA_TYPES, build_document, code_span, json_fence,
 )
 from exceptions import ApiError
+from schemas.api.audit import AuditActorKind, AuditEventAction
 from schemas.api.errors import ErrorCode
 from schemas.api.report_draft import (
     ReportDraftDocument, ReportEvidenceFlags, ReportFact, ReportFacts,
     ReportHumanField,
 )
+from schemas.runbooks import TriggerSource
 from sqlalchemy.orm import Session
 
 REPORT_FILE_MAX_BYTES = 2 * 1024 * 1024
@@ -80,6 +82,12 @@ def _guardduty_code(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_:/!&.-]*", value):
         raise ValueError("invalid GuardDuty code")
     return value
+
+
+def _trigger_meaning(trigger_source: TriggerSource | None) -> str | None:
+    if trigger_source is None or trigger_source == TriggerSource.USER_APPROVAL:
+        return None
+    return "시스템 발동은 사람의 승인이 아님"
 
 
 def human_fields() -> list[ReportHumanField]:
@@ -218,9 +226,12 @@ def collect_facts(
         if row.occurred_at > as_of:
             continue
         for field, label, meaning in (
-            ("action", "감사 동작", "ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님"),
-            ("actor_kind", "행위자 종류", "SYSTEM은 사람의 승인이 아님"),
-            ("trigger_source", "발동 원천", "시스템 발동은 사람의 승인이 아님"),
+            ("action", "감사 동작",
+             "ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님"
+             if row.action == AuditEventAction.ACTION_EXECUTION_STARTED else None),
+            ("actor_kind", "행위자 종류",
+             "SYSTEM은 사람의 승인이 아님" if row.actor_kind == AuditActorKind.SYSTEM else None),
+            ("trigger_source", "발동 원천", _trigger_meaning(row.trigger_source)),
             ("execution_id", "연결 실행 ID", None),
             ("resolution", "관제 종료 판단", "사고 처리·신고 완료가 아님"),
         ):
@@ -235,7 +246,7 @@ def collect_facts(
             ("runbook_id", "조치 종류", None),
             ("target_arn", "조치 대상", None),
             ("status", "기록된 실행 상태", _EXECUTION_MEANINGS[row.status.value]),
-            ("trigger_source", "발동 원천", "시스템 발동은 사람의 승인이 아님"),
+            ("trigger_source", "발동 원천", _trigger_meaning(row.trigger_source)),
             ("created_at", "실행 예약 시각", "AWS 실행 시작·성공을 뜻하지 않음"),
             ("finished_at", "기록된 완료 시각", "시각이 있어도 결과를 증명하지 않음"),
         ):

@@ -276,27 +276,80 @@ def test_structured_evidence_retains_flags_without_free_text():
     assert not any(f.label == "피해 IP 후보" and f.value == "203.0.113.10" for f in facts.facts)
 
 
-def test_unverified_reservation_and_system_are_not_success_or_failure():
+@pytest.mark.parametrize(
+    ("action", "actor_kind", "trigger_source", "expected_meanings"),
+    [
+        pytest.param(
+            "ACTION_EXECUTION_STARTED", "SYSTEM", "PRE_MITIGATION_0_5S",
+            (
+                "ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님",
+                "SYSTEM은 사람의 승인이 아님",
+                "시스템 발동은 사람의 승인이 아님",
+                "시스템 발동은 사람의 승인이 아님",
+            ),
+            id="system-execution",
+        ),
+        pytest.param(
+            "ACTION_EXECUTION_STARTED", "TENANT_USER", "USER_APPROVAL",
+            ("ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님", None, None, None),
+            id="tenant-approved-execution",
+        ),
+        pytest.param(
+            "ACTION_EXECUTION_STARTED", "PLATFORM_USER", "USER_APPROVAL",
+            ("ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님", None, None, None),
+            id="platform-approved-execution",
+        ),
+        pytest.param(
+            "INCIDENT_RESOLVED", "TENANT_USER", None, (None, None, None, None),
+            id="tenant-resolution",
+        ),
+        pytest.param(
+            "INCIDENT_RESOLVED", "PLATFORM_USER", None, (None, None, None, None),
+            id="platform-resolution",
+        ),
+    ],
+)
+def test_fact_interpretations_follow_audit_and_execution_values(
+    action, actor_kind, trigger_source, expected_meanings,
+):
+    from schemas.api.audit import AuditActorKind, AuditEventAction
+    from schemas.api.incidents import ResolutionJudgement
+
     incident, evidence = unit_rows()
     execution = models.ActionExecution(
         execution_id=str(uuid.uuid4()), incident_id=incident.incident_id,
         runbook_id="RUNBOOK_EC2_ISOLATE", target_arn=ARN, status=ExecutionStatus.UNVERIFIED,
-        trigger_source=TriggerSource.PRE_MITIGATION_0_5S, created_at=AT, updated_at=AT, finished_at=None,
+        trigger_source=TriggerSource(trigger_source or "USER_APPROVAL"),
+        created_at=AT, updated_at=AT, finished_at=None,
     )
-    from schemas.api.audit import AuditActorKind, AuditEventAction
     event = models.AuditEvent(
         event_id=str(uuid.uuid4()), incident_id=incident.incident_id,
-        action=AuditEventAction.ACTION_EXECUTION_STARTED, actor_kind=AuditActorKind.SYSTEM,
-        execution_id=execution.execution_id, trigger_source=execution.trigger_source,
-        occurred_at=AT, resolution=None,
+        action=AuditEventAction(action), actor_kind=AuditActorKind(actor_kind),
+        actor_user_id=None if actor_kind == "SYSTEM" else str(uuid.uuid4()),
+        execution_id=execution.execution_id if trigger_source else None,
+        trigger_source=TriggerSource(trigger_source) if trigger_source else None,
+        occurred_at=AT,
+        resolution=ResolutionJudgement.NO_FURTHER_ACTION if trigger_source is None else None,
     )
     facts = collect_facts(incident, [evidence], [event], [execution], AT + timedelta(seconds=1))
     status = next(f for f in facts.facts if f.source_kind == "action_execution" and f.json_path == "/status")
     assert status.value == "UNVERIFIED" and status.interpretation == "결과 확인 불가"
     assert next(f for f in facts.facts if f.json_path == "/finished_at").status == "unknown"
-    assert any(f.value == "ACTION_EXECUTION_STARTED" and "실행 예약" in f.interpretation for f in facts.facts)
-    assert any(f.value == "SYSTEM" and "사람의 승인이 아님" in f.interpretation for f in facts.facts)
     assert any(f.value == "RESOLVED" and "신고 완료가 아님" in f.interpretation for f in facts.facts)
+    payload = narrative_request(facts).user_payload
+    transmitted = {
+        (fact["source_kind"], fact["json_path"]): fact for fact in payload["facts"]
+    }
+    fields = [
+        transmitted[("audit_event", "/action")],
+        transmitted[("audit_event", "/actor_kind")],
+        transmitted[("audit_event", "/trigger_source")],
+        transmitted[("action_execution", "/trigger_source")],
+    ]
+    assert [fact["value"] for fact in fields] == [
+        action, actor_kind, trigger_source, trigger_source or "USER_APPROVAL",
+    ]
+    assert tuple(fact["interpretation"] for fact in fields) == expected_meanings
 
 
 def test_cutoff_excludes_later_evidence_and_marks_later_mutable_state_unknown():
