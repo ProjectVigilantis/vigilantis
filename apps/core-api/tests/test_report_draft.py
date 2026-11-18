@@ -380,6 +380,64 @@ def test_fact_interpretations_follow_audit_and_execution_values(
     assert tuple(fact["interpretation"] for fact in fields) == expected_meanings
 
 
+def test_justified_resolution_without_execution_history_remains_a_judgement():
+    from schemas.api.audit import AuditActorKind, AuditEventAction
+    from schemas.api.incidents import ResolutionJudgement
+
+    incident, evidence = unit_rows()
+    event = models.AuditEvent(
+        event_id=str(uuid.uuid4()), incident_id=incident.incident_id,
+        action=AuditEventAction.INCIDENT_RESOLVED, actor_kind=AuditActorKind.TENANT_USER,
+        actor_user_id=str(uuid.uuid4()), occurred_at=AT,
+        resolution=ResolutionJudgement.JUSTIFIED,
+    )
+    facts = collect_facts(incident, [evidence], [event], [], AT + timedelta(seconds=1))
+    payload = narrative_request(facts).user_payload
+    resolution = next(fact for fact in payload["facts"] if fact["json_path"] == "/resolution")
+    assert resolution["status"] == "known"
+    assert resolution["value"] == "JUSTIFIED"
+    assert resolution["interpretation"] == "대응 정당성에 대한 관제 종료 판단 기록"
+    execution_facts = [
+        fact for fact in payload["facts"] if fact["source_kind"] == "action_execution"
+    ]
+    assert len(execution_facts) == 1
+    history = execution_facts[0]
+    assert history["json_path"] == "/action_executions"
+    assert history["status"] == "unknown"
+    assert history["reason"] == "no_history"
+    assert history["value"] is None and history["interpretation"] is None
+
+
+@pytest.mark.parametrize(
+    ("trigger_source", "execution_status"),
+    [(trigger, ExecutionStatus.UNVERIFIED) for trigger in TriggerSource]
+    + [
+        (TriggerSource.USER_APPROVAL, status)
+        for status in ExecutionStatus
+        if status != ExecutionStatus.UNVERIFIED
+    ],
+)
+def test_all_execution_enum_values_have_fact_interpretations(trigger_source, execution_status):
+    incident, evidence = unit_rows()
+    execution = models.ActionExecution(
+        execution_id=str(uuid.uuid4()), incident_id=incident.incident_id,
+        runbook_id="RUNBOOK_EC2_ISOLATE", target_arn=ARN, status=execution_status,
+        trigger_source=trigger_source, created_at=AT, updated_at=AT,
+    )
+    facts = collect_facts(incident, [evidence], [], [execution], AT + timedelta(seconds=1))
+    payload = narrative_request(facts).user_payload
+    fields = {
+        fact["json_path"]: fact for fact in payload["facts"]
+        if fact["source_kind"] == "action_execution"
+    }
+    for path, expected_value in (
+        ("/trigger_source", trigger_source.value), ("/status", execution_status.value),
+    ):
+        assert fields[path]["status"] == "known"
+        assert fields[path]["value"] == expected_value
+        assert fields[path]["interpretation"]
+
+
 def test_cutoff_excludes_later_evidence_and_marks_later_mutable_state_unknown():
     from schemas.api.audit import AuditActorKind, AuditEventAction
     from schemas.api.incidents import ResolutionJudgement
