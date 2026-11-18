@@ -1304,6 +1304,12 @@ export interface StaffInviteRequest {
   email: string;
 }
 
+/** 직원 등급 변경(`PUT /staff/{id}/role` → 204). 자기 자신은 403, 지금과 같은 등급 · 마지막 활성 중앙 관리계정의
+ *  강등은 409 `USER_STATE_CONFLICT`다. 등급이 바뀌면 저장된 담당 그룹이 비워진다. */
+export interface StaffRoleRequest {
+  platform_role: PlatformRole;
+}
+
 export interface StaffItem {
   user_id: string;
   email: string;
