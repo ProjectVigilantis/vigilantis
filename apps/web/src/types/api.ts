@@ -322,9 +322,15 @@ export type ResponseMode = (typeof RESPONSE_MODES)[number];
  * 자동 발동(High 선차단·Medium 1분 격리)이 막힌 이유. 정지가 아니면 사람의 승인이 필요하다(#521).
  * `TENANT_SUSPENDED`: 테넌트가 정지됐다 — 플랫폼이 그 계정에 새로 들어가지 않는다(T-4 · #533).
  * `AUTO_ACTION_DISABLED`: 테넌트가 자동 조치를 껐거나, 그 발동을 정한 시각이 다시 켠 시각 이전이다.
- * 둘 다 해당하면 서버는 `TENANT_SUSPENDED`를 준다.
+ * `THREAT_TYPE_NOT_ELIGIBLE`: 위협 유형 자체가 자동 발동 대상이 아니다.
+ * `PROTECTED_TAG`: 보호 태그에 해당하거나, 보호 판정으로 이미 타임아웃 감시에서 제외됐다.
+ * `WAIT_NOT_STARTED`: 승인 후보는 있지만 자동 격리 응답 기한이 시작되지 않았다.
+ * 정지 → 위협 유형 제외 → 자동 조치 끄기 → 보호 태그 → 기한 미시작 순으로 안내한다.
  */
-export const AUTO_ISOLATION_BLOCKS = ['TENANT_SUSPENDED', 'AUTO_ACTION_DISABLED'] as const;
+export const AUTO_ISOLATION_BLOCKS = [
+  'TENANT_SUSPENDED', 'AUTO_ACTION_DISABLED', 'THREAT_TYPE_NOT_ELIGIBLE', 'PROTECTED_TAG',
+  'WAIT_NOT_STARTED',
+] as const;
 export type AutoIsolationBlock = (typeof AUTO_ISOLATION_BLOCKS)[number];
 
 /**
@@ -386,6 +392,53 @@ export interface AiSavingsEstimate {
   reason: SavingsReason | null;
 }
 
+/** GuardDuty 원문 한 칸의 읽힘 상태. false도 RECORDED 값이다. */
+export type GuardDutyFact<T> =
+  | { status: 'RECORDED'; value: T; source_value?: null }
+  | { status: 'ABSENT' | 'INVALID'; value?: null; source_value?: null }
+  | { status: 'UNRECOGNIZED'; value?: null; source_value: string };
+
+/** packages/schemas/guardduty.py — 같은 탐지 스냅샷에서 수집한 사실이며 대응 판단이 아니다. */
+export interface GuardDutyActivity {
+  resource_role: GuardDutyFact<'ACTOR' | 'TARGET'>;
+  action_type: GuardDutyFact<string>;
+  connection_direction: GuardDutyFact<'INBOUND' | 'OUTBOUND' | 'UNKNOWN'>;
+  remote_ip: GuardDutyFact<string>;
+  blocked: GuardDutyFact<boolean>;
+}
+
+export type IsolationRecommendationReason =
+  | 'GUARDDUTY_SSH_BRUTE_FORCE_ACTOR'
+  | 'TARGET_ADDRESS_NOT_PROVIDED'
+  | 'RESOURCE_ROLE_TARGET'
+  | 'RESOURCE_ROLE_UNKNOWN'
+  | 'RESOURCE_ROLE_NOT_CAPTURED'
+  | 'FINDING_TYPE_NOT_COVERED'
+  | 'DIRECTION_NOT_CONFIRMED'
+  | 'DIRECTION_CONFLICT'
+  | 'EVIDENCE_TARGET_MISMATCH';
+
+/** 후보 생성 시 저장된 서버 판단. 표시할 때 사실에서 다시 계산하지 않는다. */
+export interface IsolationRecommendationBasis {
+  origin: 'SERVER_RULE';
+  rule_id: 'PROTECTED_EC2_ISOLATION';
+  rule_version: 1;
+  classification: 'CONDITIONALLY_RECOMMENDED' | 'OPERATOR_JUDGEMENT_REQUIRED';
+  reason_code: IsolationRecommendationReason;
+  evaluated_at: IsoDateTime;
+}
+
+export interface RecommendationEvidence {
+  evidence_id: string;
+  target_arn: string;
+  finding_id: string;
+  finding_type: string;
+  resource_type: string;
+  first_seen_at: IsoDateTime;
+  last_seen_at: IsoDateTime;
+  activity: GuardDutyActivity | null;
+}
+
 export interface RecommendationItem {
   runbook_id: AiRecommendableRunbookId;
   target_arn: string;
@@ -395,6 +448,11 @@ export interface RecommendationItem {
   ai_savings_estimate: AiSavingsEstimate | null;
   /** NACL_RESTORE의 시스템 해제 예정 시각(UTC). 지난 시각도 해제 성공을 뜻하지 않는다. */
   expires_at?: string | null;
+  /** 이 후보가 참조하는 저장 증거. 과거 응답·fixture에서 생략될 수 있다. */
+  evidence_ids?: string[];
+  /** 부재는 저장된 판단 없음이며 긍정 추천으로 해석하지 않는다. */
+  recommendation_basis?: IsolationRecommendationBasis | null;
+  recommendation_evidence?: RecommendationEvidence | null;
 }
 
 /**
@@ -1504,6 +1562,7 @@ export type PlatformEventAction =
   | 'INCIDENT_ANALYZE'
   | 'INCIDENT_RESOLVE'
   | 'INCIDENT_EVIDENCE_EXPORT'
+  | 'INCIDENT_ESCALATE'
   | 'ACTION_APPROVE'
   | 'ACTION_AUTO_TRIGGER'
   | 'ACTION_BLOCK'

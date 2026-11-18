@@ -4,10 +4,14 @@
 Medium/Low→AGENT_WAIT 짝만 허용(TIMEOUT_ISOLATION_1M은 초기 판정 결과가 아님).
 """
 
+from ipaddress import ip_address
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from schemas.events import (
+    GuardDutyFindingThreatPayload,
+    GuardDutyResourceRole,
     InitialRiskEvaluationResult,
     MockThreatEventInput,
     NormalizedThreatEvent,
@@ -156,3 +160,66 @@ def test_initial_risk_mode_pairing(risk, mode, ok):
     else:
         with pytest.raises(ValidationError):
             InitialRiskEvaluationResult.model_validate(data)
+
+
+def make_guardduty_payload(**over):
+    base = {
+        "finding_id": "f-1",
+        "finding_type": "UnauthorizedAccess:EC2/SSHBruteForce",
+        "severity": 5.0,
+        "resource_type": "Instance",
+        "region": "ap-northeast-2",
+        "finding_region": "ap-northeast-2",
+        "first_seen_at": "2026-11-10T01:02:03Z",
+        "last_seen_at": "2026-11-10T01:02:03Z",
+    }
+    base.update(over)
+    return base
+
+
+def test_guardduty_activity_types_are_shared_with_the_cycle_free_module():
+    import schemas.events as events
+    import schemas.guardduty as shared
+
+    for name in ("GuardDutyActivity", "GuardDutyFact", "GuardDutyFactStatus",
+                 "GuardDutyResourceRole", "GuardDutyConnectionDirection"):
+        assert getattr(events, name) is getattr(shared, name)
+
+
+def test_guardduty_payload_stored_before_activity_existed_stays_valid_as_not_captured():
+    payload = GuardDutyFindingThreatPayload.model_validate(make_guardduty_payload())
+    assert payload.activity is None  # 수집 안 됨 — 읽었지만 없음(ABSENT)과 다르다
+
+
+def test_guardduty_activity_roundtrips_through_json_with_validated_addresses():
+    absent = {"status": "ABSENT"}
+    activity = {
+        "resource_role": {"status": "RECORDED", "value": "ACTOR"},
+        "action_type": {"status": "RECORDED", "value": "NETWORK_CONNECTION"},
+        "connection_direction": {"status": "UNRECOGNIZED", "source_value": "SIDEWAYS"},
+        "remote_ip": {"status": "RECORDED", "value": "2001:db8::1"},
+        "blocked": absent,
+    }
+    payload = GuardDutyFindingThreatPayload.model_validate(make_guardduty_payload(activity=activity))
+    assert payload.activity.resource_role.value is GuardDutyResourceRole.ACTOR
+    assert payload.activity.remote_ip.value == ip_address("2001:db8::1")
+    again = GuardDutyFindingThreatPayload.model_validate_json(payload.model_dump_json())
+    assert again == payload
+
+
+@pytest.mark.parametrize("bad", [
+    {"status": "RECORDED"},                                   # 값 없는 RECORDED
+    {"status": "ABSENT", "value": True},                      # 값 있는 ABSENT
+    {"status": "INVALID", "value": True},
+    {"status": "UNRECOGNIZED"},                               # 원문 없는 UNRECOGNIZED
+    {"status": "ABSENT", "source_value": "x"},
+    {"status": "RECORDED", "value": "not-an-ip"},
+])
+def test_guardduty_fact_rejects_inconsistent_status_and_value(bad):
+    absent = {"status": "ABSENT"}
+    activity = {
+        "resource_role": absent, "action_type": absent, "connection_direction": absent,
+        "remote_ip": bad, "blocked": absent,
+    }
+    with pytest.raises(ValidationError):
+        GuardDutyFindingThreatPayload.model_validate(make_guardduty_payload(activity=activity))

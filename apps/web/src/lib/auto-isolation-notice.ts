@@ -39,6 +39,11 @@ export const AUTO_ISOLATION_BLOCKED_NOTICES: Record<AutoIsolationBlock, string> 
   AUTO_ACTION_DISABLED: AUTO_ISOLATION_BLOCKED_NOTICE,
   TENANT_SUSPENDED:
     '이 고객은 정지 상태라 자동으로 격리되지 않습니다. 정지 중에는 새 조치 실행도 받지 않습니다.',
+  PROTECTED_TAG:
+    '보호 태그 판정으로 이 건은 자동으로 격리되지 않습니다. 관제자 검토가 필요합니다.',
+  THREAT_TYPE_NOT_ELIGIBLE:
+    '이 위협 유형은 자동으로 격리되지 않습니다. 조치 제안을 검토해 주세요.',
+  WAIT_NOT_STARTED: AUTO_ISOLATION_BLOCKED_NOTICE,
 };
 
 /**

@@ -177,11 +177,12 @@ _JUDGES: dict[RunbookId, Callable[[Session, str], workflows.ExecutionJudgement]]
 # 나머지는 여기 없다. REVERT_SIZE는 되돌린 것이 성공이고, 되돌린 인스턴스가 또
 # 부팅에 실패해도 되돌릴 곳이 없어(원복의 원복은 없다, ADR-0008 §6) 판정이 바뀌지
 # 않는다. NACL 2종·삭제 2종(EBS·SG)은 조치가 원자적이거나 마지막 호출이 곧 완료라
-# 뒤따르는 판정 축이 없고, SG_RECREATE도 마지막 규칙 주입이 성공의 경계다. 격리 2종
-# (EC2_ISOLATE·EC2_UNISOLATE)도 마지막 호출(ENI SG 교체·TG 재등록)이 곧 완료다 — 전부
+# 뒤따르는 판정 축이 없고, SG_RECREATE도 마지막 규칙 주입이 성공의 경계다.
+# EC2_UNISOLATE도 마지막 호출(TG 재등록)이 곧 완료다 — 이들은
 # 성공의 경계가 실행 반환 그 자체다. 여기 잘못 넣으면 끝난 실행이 확정되지 않은 채 다음
 # 주기의 판정으로 넘어가고, 그 판정은 재실행이 아니라 실자산 대조라 조치가 끝난
 # 뒤에도 "미완"으로 읽힐 수 있다.
+# EC2_ISOLATE는 자동·승인 발동 모두 실행 반환 직후 같은 주기에서 현물 판정을 거친다.
 #
 # EC2_ENABLE_AUTOSCALING도 여기 있다 — 실행 반환은 "변경 호출이 끝났다"일 뿐이고, 구성이
 # 갖춰졌는지는 judge_ec2_enable_autoscaling이 현물을 읽어 가른다(Issue #446).
@@ -762,6 +763,7 @@ def _dispatch_claimed(
                 in (
                     TriggerSource.PRE_MITIGATION_0_5S,
                     TriggerSource.TIMEOUT_ISOLATION_1M,
+                    TriggerSource.USER_APPROVAL,
                 )
             ):
                 # #447과 공유하는 완료 경계: 접수/호출 반환이 아니라 실제 TG·ENI 격리 판정.

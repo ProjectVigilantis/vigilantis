@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import dispatcher
+import notification_events
 import workflows
 from ai import guardrails
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -33,6 +34,7 @@ from schemas.api.incidents import (
     RiskLevel,
 )
 from schemas.api.ws import WsEvent, WsEventType
+from schemas.candidates import CandidateStatus
 from schemas.guardrails import (
     GuardrailDecision,
     GuardrailValidationContext,
@@ -107,6 +109,11 @@ def prepare_isolation(db: Session, incident_id: str, trigger_source: TriggerSour
             "incident_id": incident_id, "reason": "EC2 instance required",
         })
         db.rollback()
+        return None
+    if workflows.protected_auto_isolation_reason(db, incident) is not None:
+        workflows.record_protected_auto_isolation(
+            db, incident_id, trigger_source=trigger_source, now=datetime.now(UTC),
+        )
         return None
     evidence_ids = [row.evidence_id for row in incidents_repo.list_evidence(db, incident_id)]
     # 가드레일 ③ · ④ 는 인시던트의 소유 테넌트로 본다(#533 E) — 요청자 · 감시 주체의 소속이 아니다
@@ -266,6 +273,9 @@ class TimeoutReport:
     skipped: int = 0
     prerequisite_blocked: int = 0
     errored: int = 0
+    protected_offered: int = 0
+    protected_rejected: int = 0
+    protected_skipped: int = 0
 
 
 def run_timeout_cycle(
@@ -277,6 +287,7 @@ def run_timeout_cycle(
         pending = incidents_repo.list_expired_agent_waits(
             db, now=datetime.now(UTC),
             exclude_event_types=workflows.AUTO_ISOLATION_EXCLUDED_EVENT_TYPES,
+            exclude_notification_kind=notification_events.EventKind.PROTECTED_TARGET_ESCALATION.value,
         )
         db.rollback()
         report.scanned = len(pending)
@@ -295,6 +306,30 @@ def run_timeout_cycle(
                 logger.exception("automatic_isolation_timeout_failed", extra={
                     "incident_id": incident_id,
                 })
+        offers = incidents_repo.list_protected_isolation_offer_pending(
+            db,
+            notification_kind=notification_events.EventKind.PROTECTED_TARGET_ESCALATION.value,
+            incident_statuses=workflows.PROTECTED_ISOLATION_OFFERABLE_STATUSES,
+        )
+        db.rollback()
+        for incident_id in offers:
+            try:
+                offer = workflows.offer_protected_isolation(db, incident_id)
+                if offer.candidate_status is CandidateStatus.EXECUTABLE:
+                    report.protected_offered += 1
+                    if publish is not None:
+                        publish(incident_event(
+                            WsEventType.INCIDENT_UPDATED,
+                            incident_id=incident_id, occurred_at=offer.incident_updated_at,
+                        ))
+                elif offer.candidate_status is CandidateStatus.REJECTED:
+                    report.protected_rejected += 1
+                else:
+                    report.protected_skipped += 1
+            except Exception:
+                db.rollback()
+                report.errored += 1
+                logger.exception("protected_isolation_offer_failed", extra={"incident_id": incident_id})
     logger.info("automatic_isolation_timeout_cycle", extra=vars(report))
     return report
 

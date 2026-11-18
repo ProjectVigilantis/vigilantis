@@ -130,6 +130,7 @@ class PlatformEventAction(str, Enum):
     INCIDENT_ANALYZE = "INCIDENT_ANALYZE"
     INCIDENT_RESOLVE = "INCIDENT_RESOLVE"
     INCIDENT_EVIDENCE_EXPORT = "INCIDENT_EVIDENCE_EXPORT"
+    INCIDENT_ESCALATE = "INCIDENT_ESCALATE"
     ACTION_APPROVE = "ACTION_APPROVE"
     ACTION_AUTO_TRIGGER = "ACTION_AUTO_TRIGGER"
     ACTION_BLOCK = "ACTION_BLOCK"
@@ -267,6 +268,12 @@ class EvidenceExportDetails(PlatformEventDetails):
     evidence_count: int = Field(ge=0, strict=True)
 
 
+class EscalationDetails(PlatformEventDetails):
+    """자동 격리 대신 사람에게 올린 사유. 성공 행이라 기본 reason_code 칸은 쓰지 않고 이 칸에 싣는다."""
+
+    trigger_reason: Literal["PROTECTED_TAG"]
+
+
 # --- 행동별 규칙 --------------------------------------------------------------------
 
 _S = PlatformEventOutcome.SUCCEEDED
@@ -356,6 +363,9 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
     ),
     _A.INCIDENT_EVIDENCE_EXPORT: _spec(
         _C.INCIDENT, {_S}, {_USER}, _T.INCIDENT, EvidenceExportDetails
+    ),
+    _A.INCIDENT_ESCALATE: _spec(
+        _C.INCIDENT, {_S}, {_SYSTEM}, _T.INCIDENT, EscalationDetails
     ),
     _A.ACTION_APPROVE: _spec(_C.ACTION, {_S}, {_USER}, _T.EXECUTION),
     _A.ACTION_AUTO_TRIGGER: _spec(_C.ACTION, {_S}, {_SYSTEM}, _T.EXECUTION),
