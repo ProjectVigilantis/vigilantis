@@ -369,7 +369,7 @@ def tenant_bedrock_runtime_client(
     )
     client = _bedrock_runtime(session, region, connect_timeout, read_timeout)
     client.meta.events.register(
-        "before-send.bedrock-runtime.InvokeModel",
+        "before-send.bedrock-runtime",
         _bedrock_send_guard(region, issued["access_key"], issued["token"]),
     )
     return client

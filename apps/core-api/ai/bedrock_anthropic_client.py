@@ -53,7 +53,8 @@ def bedrock_retry_policy(
     )
 
 
-def _failure(exc: Exception, *, phase: str) -> AttemptFailure:
+def _failure(exc: Exception, *, phase: str | None) -> AttemptFailure:
+    """phase가 None이면 엔진이 kind에서 정한다(FAILURE_PHASE) — 거절·쿼터는 request로 남는다."""
     name = type(exc).__name__
     status = None
     retry_after = None
@@ -213,7 +214,7 @@ class BedrockModelClient:
                     finally:
                         stream.close()
                 except Exception as exc:
-                    return _failure(exc, phase="transport")
+                    return _failure(exc, phase=None)
                 try:
                     message = json.loads(raw)
                 except (ValueError, UnicodeError):

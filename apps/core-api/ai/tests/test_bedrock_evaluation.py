@@ -1,15 +1,20 @@
 """명시 주입한 Bedrock 클라이언트로 같은 평가 로직을 돌리는 경로를 검증한다. AWS·모델 호출 없음."""
 
 import pytest
+from botocore.exceptions import ClientError
+
 from ai.agent import SecOpsEvidenceDecisionOutput
 from ai.bedrock_anthropic_client import BedrockModelClient
+from ai.bedrock_openai_client import BedrockOpenAIModelClient
 from ai.evaluation.secops import runner
 from ai.evaluation.secops.dataset import load_cases as load_secops_cases
 from ai.evaluation.secops.scoring import load_answers
 from ai.evaluation.summary import build_column_report, cli
 from ai.model_client import AIModelRejectedError, FakeAIModelClient
+from ai.model_retry import RetryPolicy
 from ai.openai_client import OpenAIModelClient
 from config import Settings
+from services.aws.client import TenantAccess
 
 
 class _RecordingBedrock(BedrockModelClient):
@@ -104,6 +109,30 @@ def test_run_one_groups_pre_model_failures_as_tool_error_and_keeps_raw_phase(pha
     client = _RecordingBedrock(_Raises(AIModelRejectedError("pre-model", phase=phase)))
     record = runner.run_one(case, 1, client)
     assert record["failure_kind"] == "TOOL_ERROR" and record["error_phase"] == phase
+
+
+class _DeniedRuntime:
+    def invoke_model(self, **_):
+        raise ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "not available for this account"},
+             "ResponseMetadata": {"HTTPStatusCode": 403}},
+            "InvokeModel",
+        )
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("adapter", [BedrockModelClient, BedrockOpenAIModelClient])
+def test_model_access_denial_is_a_request_failure_not_transport(adapter):
+    client = adapter(
+        owner=TenantAccess("t", "arn:aws:iam::111111111111:role/customer", "ext"),
+        consent_check=lambda: True, region="ap-northeast-2", model_id="m",
+        policy=RetryPolicy(155, 1, 0), max_tokens=1024, connect_timeout=5, read_timeout=120,
+        runtime_factory=lambda owner, **_: _DeniedRuntime(),
+    )
+    record = runner.run_one(load_secops_cases()[0], 1, client)
+    assert record["error_phase"] == "request" and record["failure_kind"] == "TOOL_ERROR"
 
 
 def test_bedrock_is_real_model_measurement_but_never_current_service_or_baseline():

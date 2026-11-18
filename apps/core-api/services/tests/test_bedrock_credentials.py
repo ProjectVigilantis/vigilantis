@@ -193,11 +193,16 @@ def test_bearer_token_is_rejected_before_credentials(wire, monkeypatch):
     assert wire.sts == [] and wire.runtime == []
 
 
-def test_bearer_token_set_after_construction_blocks_the_send(wire, monkeypatch):
+def _converse(client):
+    return client.converse(modelId="anthropic.claude-sonnet-5", messages=[{"role": "user", "content": [{"text": "x"}]}])
+
+
+@pytest.mark.parametrize("call", [_invoke, _converse])
+def test_bearer_token_set_after_construction_blocks_the_send(wire, monkeypatch, call):
     client = _client()
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bearer")
     with pytest.raises(K.BedrockBoundaryError):
-        _invoke(client)
+        call(client)
     assert wire.runtime == []
 
 

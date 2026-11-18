@@ -13,6 +13,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
+# SDK 비공개 모듈(같은 기능의 공개 API 없음). openai를 올릴 때 이 이름이 남아 있는지 확인한다.
 from openai.lib._parsing import type_to_response_format_param
 from pydantic import ValidationError
 
