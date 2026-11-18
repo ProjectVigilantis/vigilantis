@@ -140,11 +140,12 @@ def test_the_unique_transition_still_blocks_a_duplicate_escalation(scratch_db):
         _insert(engine, incident_id=incident)
 
 
+# 수집 시점에 만든 무작위 UUID는 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"execution_id": str(uuid.uuid4())},
-        {"related_execution_id": str(uuid.uuid4())},
+        {"execution_id": "5a1e9c3b-2d7f-4b8a-9e6c-0f4d2b8a6c1e"},
+        {"related_execution_id": "8e2b4d6f-1a3c-4e5b-8d7f-9c0a2e4b6d8f"},
         {"runbook_id": "RUNBOOK_EC2_ISOLATE"},
         {"execution_status": "IN_PROGRESS"},
         {"trigger_source": None},
