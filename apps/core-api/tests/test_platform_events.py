@@ -47,7 +47,8 @@ from starlette.requests import Request
 
 A = PlatformEventAction
 OUT = PlatformEventOutcome
-TENANT = str(uuid.uuid4())
+# parametrize에 들어가는 값이라 무작위 UUID면 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
+TENANT = "3d6f1b2a-8c4e-4f7a-b9d1-2e5c7a9f0b3d"
 
 
 def _record(**overrides) -> PlatformEventRecord:

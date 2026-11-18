@@ -137,7 +137,8 @@ def test_resolve_rejects_statuses_that_would_break_the_contract(
     assert incident.resolution is None
 
 
-@pytest.mark.parametrize("path_id", [str(uuid.uuid4()), "not-a-uuid"])
+# 수집 시점에 만든 무작위 UUID는 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
+@pytest.mark.parametrize("path_id", ["7f3c2a1e-5b4d-4c8e-9a6f-1d2e3f4a5b6c", "not-a-uuid"])
 def test_resolve_unknown_or_malformed_id_returns_404(client_pg, path_id):
     response = client_pg.post(
         f"/api/v1/incidents/{path_id}/resolve", json={"resolution": "NO_FURTHER_ACTION"}

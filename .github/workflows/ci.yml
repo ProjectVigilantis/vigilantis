@@ -62,8 +62,11 @@ jobs:
       - name: Verify PostgreSQL reachable
         run: uv run python -c "import psycopg; psycopg.connect('postgresql://vigilantis:vigilantis@localhost:5432/postgres').close()"
 
+      # 러너 vCPU 수만큼 워커를 띄운다(pytest-xdist). 워커마다 일회용 테스트 DB를 따로 만들어
+      # 커밋 잔여 행 · advisory lock · 행 잠금이 워커끼리 섞이지 않는다. loadfile은 같은 파일을
+      # 한 워커에 몰아 파일 안의 순서 · 모듈 상태를 직렬 실행과 같게 둔다. LocalStack은 워커가 공유한다.
       - name: Run pytest
-        run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests apps/core-api/security/tests -q
+        run: uv run pytest tests apps/core-api/services/tests apps/core-api/ai/tests packages/schemas/tests apps/core-api/db/tests apps/core-api/tests apps/core-api/security/tests -q -n auto --dist loadfile
 
   # apps/web 검증 게이트 (Issue #91). test 잡과 독립이라 병렬로 돈다.
   #
