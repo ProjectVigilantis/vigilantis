@@ -104,7 +104,7 @@ def test_enum_values_and_their_order_match(contract: type[Enum]):
     web = _union(contract.__name__)
     assert set(web) == set(values), _difference(values, web)
     assert len(web) == len(values), f"api.ts 의 {contract.__name__} 에 같은 값이 두 번 있습니다"
-    # 순서까지 같게 둔다 — 화면의 필터 목록이 이 순서를 그대로 쓰고, 새 값이 어디에 들어갔는지 눈으로 견주기 쉽다
+    # 순서까지 같게 둔다 — 새 값이 어디에 들어갔는지 견주기 쉽게 api.ts 가 계약의 순서를 따른다
     assert web == values
 
 
