@@ -72,6 +72,7 @@ from ai.evaluation.summary import (
     input_fingerprint,
     observation_cites_input,
 )
+from ai.model_client import AIModelClient
 from ai.openai_client import build_openai_model_client
 
 GOLDEN = REPO_ROOT / "datasets" / "golden" / "finops"
@@ -167,9 +168,18 @@ def _cost(tokens_in: int, tokens_out: int, price_in: Optional[float], price_out:
 
 
 def run(
-    settings: Settings, cases: list[EvalCase], repeats: int
+    settings: Settings | None,
+    cases: list[EvalCase],
+    repeats: int,
+    *,
+    client: AIModelClient | None = None,
 ) -> tuple[list[CaseRun], _UsageRecordingClient]:
-    client = _UsageRecordingClient(build_openai_model_client(settings))
+    """settings(기존 OpenAI 팩토리 경로) 또는 명시 주입한 client 중 정확히 하나만 받는다."""
+    if (settings is None) == (client is None):
+        raise ValueError("settings 또는 client 중 정확히 하나만 지정해야 합니다")
+    client = _UsageRecordingClient(
+        build_openai_model_client(settings) if client is None else client
+    )
     runs: list[CaseRun] = []
     for case in cases:
         payload = _incident_payload(case.graph_input)

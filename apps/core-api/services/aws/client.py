@@ -60,6 +60,7 @@
 from __future__ import annotations
 
 import contextvars
+import functools
 import os
 import threading
 from collections.abc import Iterator
@@ -168,10 +169,17 @@ _tenant_credentials: dict[TenantAccess, _TenantCredentials] = {}
 _tenant_credentials_lock = threading.Lock()
 
 
-def _assume_role(access: TenantAccess) -> dict[str, str]:
-    """플랫폼 태스크 역할로 고객 역할에 들어가 갱신 자격 메타데이터를 돌려준다."""
+def _assume_role(
+    access: TenantAccess, config: Config | None = None, region: str | None = None
+) -> dict[str, str]:
+    """플랫폼 태스크 역할로 고객 역할에 들어가 갱신 자격 메타데이터를 돌려준다.
+
+    config · region 기본값은 기존 경로(공통 Config · 기본 리전)를 그대로 보존한다."""
     sts = _ecs_only_session().create_client(
-        "sts", **_client_kwargs(_BOTO_CONFIG, endpoint_url(), default_region(), {})
+        "sts",
+        **_client_kwargs(
+            config or _BOTO_CONFIG, endpoint_url(), region or default_region(), {}
+        ),
     )
     issued = sts.assume_role(
         RoleArn=access.access_role_arn,
@@ -237,6 +245,134 @@ def verification_session(access: TenantAccess) -> boto3.session.Session:
     return _session_with(
         Credentials(issued["access_key"], issued["secret_key"], issued["token"])
     )
+
+
+# --- Bedrock 고객 자격 경계(추가 전용) -----------------------------------------------
+# 호출부가 고른 리전에서, 고객(소유자) 역할의 임시 자격으로만 Bedrock Runtime InvokeModel 을 서명한다.
+# 캐시·갱신·재시도 없음 — 자격 획득 실패는 SDK 예외 그대로 올라간다(분류는 호출부 소유).
+_BEDROCK_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
+_STS_CONNECT_TIMEOUT = 5.0
+_STS_READ_TIMEOUT = 10.0
+_CONTAINER_CREDENTIAL_ALLOWANCE = 15.0
+# 명목상 합계(컨테이너 자격 조회 + STS connect/read) — DNS·소켓의 강제 상한이 아니다.
+BEDROCK_CREDENTIAL_BUDGET_SECONDS = (
+    _CONTAINER_CREDENTIAL_ALLOWANCE + _STS_CONNECT_TIMEOUT + _STS_READ_TIMEOUT
+)
+
+
+class BedrockBoundaryError(RuntimeError):
+    """Bedrock 고객 자격 경계 위반 — 메시지는 고정이다(값을 싣지 않는다)."""
+
+
+_BOUNDARY_MESSAGE = "Bedrock 고객 자격 경계 위반"
+
+
+def _boundary_violation() -> BedrockBoundaryError:
+    return BedrockBoundaryError(_BOUNDARY_MESSAGE)
+
+
+def _bedrock_runtime_host(region: str) -> str:
+    return f"bedrock-runtime.{region}.amazonaws.com"
+
+
+@functools.lru_cache(maxsize=1)
+def _commercial_regions() -> frozenset[str]:
+    """설치된 SDK 가 아는 상용(aws) 파티션 리전 — 입력 검증의 유일한 원천."""
+    data = botocore.session.get_session().get_data("endpoints")
+    for partition in data["partitions"]:
+        if partition["partition"] == "aws":
+            return frozenset(partition["regions"])
+    return frozenset()
+
+
+def _checked_region(region: Any) -> str:
+    if not isinstance(region, str) or region not in _commercial_regions():
+        raise _boundary_violation()
+    return region
+
+
+def _bedrock_send_guard(region: str, access_key: str, token: str):
+    """전송 직전 점검 — 클라이언트마다 그 리전 · 발급 자격에 묶는다(모듈 전역 없음).
+
+    설정만으로는 실제 서명 방식을 알 수 없어 서명이 끝난 요청을 본다."""
+    host = _bedrock_runtime_host(region)
+    scope = f"/{region}/bedrock/aws4_request"
+    credential = f"Credential={access_key}/"
+
+    def guard(request: Any, **_: Any) -> None:
+        if os.environ.get(_BEDROCK_BEARER_ENV):
+            raise _boundary_violation()
+        if request.url.split("?", 1)[0].split("/", 3)[:3] != ["https:", "", host]:
+            raise _boundary_violation()
+        authorization = request.headers.get("Authorization", b"")
+        if isinstance(authorization, bytes):
+            authorization = authorization.decode("ascii", "replace")
+        if (
+            not authorization.startswith("AWS4-HMAC-SHA256 ")
+            or credential not in authorization
+            or scope not in authorization
+        ):
+            raise _boundary_violation()
+        sent = request.headers.get("X-Amz-Security-Token", b"")
+        if isinstance(sent, bytes):
+            sent = sent.decode("ascii", "replace")
+        if not sent or sent != token:
+            raise _boundary_violation()
+
+    return guard
+
+
+def _bedrock_runtime(
+    session: boto3.session.Session, region: str, connect_timeout: float, read_timeout: float
+):
+    config = Config(
+        retries={"total_max_attempts": 1, "mode": "standard"},
+        user_agent_extra="vigilantis/0.1",
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        signature_version="v4",
+        auth_scheme_preference="sigv4",
+        ignore_configured_endpoint_urls=True,
+    )
+    # 표준 SDK 엔드포인트만 — 호출부 · 설정이 엔드포인트를 정하지 못한다.
+    client = session.client("bedrock-runtime", region_name=region, config=config)
+    if client.meta.endpoint_url != f"https://{_bedrock_runtime_host(region)}":
+        client.close()
+        raise _boundary_violation()
+    return client
+
+
+def tenant_bedrock_runtime_client(
+    access: TenantAccess, *, region: str, connect_timeout: float, read_timeout: float
+):
+    """고객 역할 임시 자격으로 서명하는 그 리전 Bedrock Runtime 클라이언트(호출부가 닫는다).
+
+    리전은 필수이며 SDK 가 아는 상용 파티션 리전만 받는다 — STS 전에 거절한다."""
+    region = _checked_region(region)
+    if (
+        access is None
+        or not access.access_role_arn
+        or not access.external_id
+        or endpoint_url()
+        or os.environ.get(_BEDROCK_BEARER_ENV)
+    ):
+        raise _boundary_violation()
+    sts_config = Config(
+        retries={"total_max_attempts": 1, "mode": "standard"},
+        user_agent_extra="vigilantis/0.1",
+        connect_timeout=_STS_CONNECT_TIMEOUT,
+        read_timeout=_STS_READ_TIMEOUT,
+    )
+    issued = _assume_role(access, sts_config, region)
+    session = _session_with(
+        Credentials(issued["access_key"], issued["secret_key"], issued["token"])
+    )
+    client = _bedrock_runtime(session, region, connect_timeout, read_timeout)
+    client.meta.events.register(
+        "before-send.bedrock-runtime",
+        _bedrock_send_guard(region, issued["access_key"], issued["token"]),
+    )
+    return client
 
 
 def session_client(session: boto3.session.Session, service: str, region: str):
