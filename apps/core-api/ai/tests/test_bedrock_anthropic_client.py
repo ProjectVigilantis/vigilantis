@@ -4,7 +4,13 @@ import io
 import json
 
 import pytest
-from botocore.exceptions import ClientError, ReadTimeoutError
+from botocore.exceptions import (
+    ClientError,
+    HTTPClientError,
+    ProxyConnectionError,
+    ReadTimeoutError,
+    SSLError,
+)
 from botocore.response import StreamingBody
 from pydantic import BaseModel, ConfigDict
 
@@ -187,6 +193,27 @@ def test_runtime_timeout_is_separate_from_credential_failure_and_closes_client()
         client(factory, attempts=1).complete(REQUEST, Answer)
     assert caught.value.phase == "transport"
     assert calls == [OWNER] and runtime.closed
+
+
+@pytest.mark.parametrize("error", [
+    SSLError(endpoint_url="https://unit.test", error="secret-network-diagnostic"),
+    ProxyConnectionError(proxy_url="https://proxy.unit.test", error="secret-network-diagnostic"),
+    HTTPClientError(error="secret-network-diagnostic"),
+])
+def test_connection_family_errors_are_retried_transport_failures(error, no_sleep):
+    runtimes = iter([Runtime(error), Runtime(message())])
+    used = []
+
+    def factory(owner, **kwargs):
+        used.append(next(runtimes))
+        return used[-1]
+
+    response = client(factory).complete(REQUEST, Answer)
+    assert response.output.verdict == "ok"
+    assert response.trace.attempts[0].outcome == "transport_connection"
+    assert "secret-network-diagnostic" not in repr(response.trace)
+    assert len(used) == 2 and all(runtime.closed for runtime in used)
+    assert len(no_sleep) == 1
 
 
 @pytest.mark.parametrize("original_status,kind", [

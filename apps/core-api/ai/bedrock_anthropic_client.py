@@ -92,9 +92,8 @@ def _failure(exc: Exception, *, phase: str | None) -> AttemptFailure:
     elif isinstance(exc, (aws_errors.ConnectTimeoutError, aws_errors.ReadTimeoutError)):
         kind = FailureKind.TRANSPORT_TIMEOUT
     elif isinstance(exc, (
-        aws_errors.EndpointConnectionError,
-        aws_errors.ConnectionClosedError,
-        aws_errors.ResponseStreamingError,
+        aws_errors.ConnectionError,
+        aws_errors.HTTPClientError,
         aws_errors.IncompleteReadError,
         aws_errors.CredentialRetrievalError,
     )):
