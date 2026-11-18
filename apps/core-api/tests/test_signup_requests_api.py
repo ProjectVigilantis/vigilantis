@@ -134,7 +134,8 @@ def test_different_keys_create_separate_requests_even_for_same_email(post, db):
     assert len(ids) == 2
 
 
-@pytest.mark.parametrize("key", [False, "", "not-a-uuid", str(uuid.uuid1()), "12345"])
+# 수집 시점에 만든 무작위 UUID는 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다. uuid1 자리는 RFC 4122의 DNS 네임스페이스 UUID(버전 1)다.
+@pytest.mark.parametrize("key", [False, "", "not-a-uuid", "6ba7b810-9dad-11d1-80b4-00c04fd430c8", "12345"])
 def test_invalid_or_missing_idempotency_key_is_422(post, db, key):
     before = count(db, models.SignupRequest)
     resp = post(key=key)
@@ -341,7 +342,8 @@ def test_new_to_new_and_approved_terminal_are_409(client_pg, post, db, onboardin
     assert count(db, models.SignupRequestDecision) == 1
 
 
-@pytest.mark.parametrize("rid", [str(uuid.uuid4()), "not-a-uuid", "1234"])
+# 수집 시점에 만든 무작위 UUID는 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
+@pytest.mark.parametrize("rid", ["7f3c2a1e-5b4d-4c8e-9a6f-1d2e3f4a5b6c", "not-a-uuid", "1234"])
 def test_missing_or_malformed_id_is_404(client_pg, rid):
     resp = put(client_pg, rid, "APPROVED")
     assert resp.status_code == 404 and error_code(resp) == ErrorCode.SIGNUP_REQUEST_NOT_FOUND.value
@@ -642,7 +644,8 @@ def test_decided_request_is_never_approved_again(client_pg, post, db, onboarding
     assert snapshot(db, rid) == before
 
 
-@pytest.mark.parametrize("rid", [str(uuid.uuid4()), "not-a-uuid", "1234"])
+# 수집 시점에 만든 무작위 UUID는 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
+@pytest.mark.parametrize("rid", ["7f3c2a1e-5b4d-4c8e-9a6f-1d2e3f4a5b6c", "not-a-uuid", "1234"])
 def test_approving_a_missing_or_malformed_id_is_404_and_creates_nothing(client_pg, db, onboarding, rid):
     resp = approve(client_pg, rid)
     assert resp.status_code == 404 and error_code(resp) == ErrorCode.SIGNUP_REQUEST_NOT_FOUND.value

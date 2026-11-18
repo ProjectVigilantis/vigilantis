@@ -207,7 +207,7 @@ test('상세 화면: 요청 주체 · 대상은 감사 기록에서만, 없으�
     assert.match(render(audit, closed), /종료 처리[\s\S]*closer@example\.com/);
     assert.match(ready, /관측된 출발지[\s\S]*203\.0\.113\.7/);
     // 분석 결과(서버 계산)가 AI 요약보다 앞 구역에 따로 선다.
-    assert.ok(ready.indexOf('분석 결과') < ready.indexOf('판단 근거 (AI 요약)'));
+    assert.match(ready, /분석 결과[\s\S]*인시던트 분석 요약/);
     assert.match(ready, /③ ARN 대조 거절/);
     // 세션을 아직 모르면 내려받기는 비활성 버튼이다(링크가 아니다).
     assert.doesNotMatch(ready, /evidence\/export/);

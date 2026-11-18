@@ -18,7 +18,12 @@ import {
   TENANT_NOT_ASSIGNED,
   TENANT_SUSPENDED_BLOCKED,
   USER_ADMIN_FORBIDDEN,
+  STAFF_ADMIN_FORBIDDEN,
+  STAFF_INVITE_CONFLICT,
+  STAFF_RESEND_CONFLICT,
+  STAFF_STATE_CONFLICT,
   eventSummary,
+  staffAdminErrorMessage,
   formatUserTime,
   inviteRequestFor,
   userAdminErrorMessage,
@@ -262,4 +267,26 @@ test('이력 한 줄 요약', () => {
     '- → -',
   );
   assert.equal(eventSummary(event({ action: 'ROLE_CHANGED', before_state: { role: null }, after_state: {} })), '- → -');
+});
+
+test('직원 관리 403은 중앙 관리계정만 된다고 말한다(고객사 중앙계정을 말하지 않는다)', () => {
+  for (const action of ACTIONS) {
+    assert.equal(staffAdminErrorMessage(action, 'AUTH_FORBIDDEN'), STAFF_ADMIN_FORBIDDEN, action);
+  }
+  assert.doesNotMatch(STAFF_ADMIN_FORBIDDEN, /고객사 중앙계정/);
+});
+
+test('직원 관리 409는 조치마다 뜻이 다르다: 초대에 기존 계정 연결(복구)을 안내하지 않는다', () => {
+  assert.equal(staffAdminErrorMessage('invite', 'USER_STATE_CONFLICT'), STAFF_INVITE_CONFLICT);
+  assert.equal(staffAdminErrorMessage('resend', 'USER_STATE_CONFLICT'), STAFF_RESEND_CONFLICT);
+  assert.equal(staffAdminErrorMessage('role', 'USER_STATE_CONFLICT'), STAFF_STATE_CONFLICT);
+  assert.equal(staffAdminErrorMessage('status', 'USER_STATE_CONFLICT'), STAFF_STATE_CONFLICT);
+  assert.doesNotMatch(STAFF_INVITE_CONFLICT, /복구/);
+  assert.match(STAFF_STATE_CONFLICT, /마지막 활성 중앙 관리계정/);
+});
+
+test('직원 관리의 그 밖의 실패는 사용자 관리 문구와 같다(초대 결과 불명은 메일이 나갔을 수 있다)', () => {
+  assert.equal(staffAdminErrorMessage('invite', null), INVITE_UNCERTAIN);
+  assert.equal(staffAdminErrorMessage('resend', 'INTERNAL_ERROR'), INVITE_UNCERTAIN);
+  assert.equal(staffAdminErrorMessage('role', 'USER_NOT_FOUND'), userAdminErrorMessage('role', 'USER_NOT_FOUND'));
 });

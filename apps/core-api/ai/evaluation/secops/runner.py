@@ -17,6 +17,8 @@ from ai.evaluation.common.fingerprints import input_fingerprint
 from ai.evaluation.common.paths import REPO_ROOT
 from ai.evaluation.common.reproducibility import field_agreement
 from ai.evaluation.common.usage import UsageRecordingClient
+from ai.evaluation.summary.report import REQUEST_BUCKET_PHASES
+from ai.bedrock_anthropic_client import BedrockModelClient
 from ai.model_client import AIModelClient
 from ai.openai_client import OpenAIModelClient
 
@@ -124,6 +126,12 @@ def new_run(cases: list[EvalCase], repeats: int, settings: Any, run_id: str,
     }
 
 
+def _data_source(client: AIModelClient) -> str:
+    if isinstance(client, BedrockModelClient):
+        return "bedrock_model"
+    return "real_model" if isinstance(client, OpenAIModelClient) else "test_double"
+
+
 def run_one(case: EvalCase, repeat: int, client: AIModelClient,
             variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> dict[str, Any]:
     recording = UsageRecordingClient(client)
@@ -138,7 +146,7 @@ def run_one(case: EvalCase, repeat: int, client: AIModelClient,
     failure_kind = None
     if recording.last_error_phase == "transport":
         failure_kind = "TRANSPORT_ERROR"
-    elif recording.last_error_phase == "request":
+    elif recording.last_error_phase in REQUEST_BUCKET_PHASES:
         failure_kind = "TOOL_ERROR"
     elif recording.last_error_phase == "response":
         failure_kind = "MODEL_RESPONSE_ERROR"
@@ -146,7 +154,7 @@ def run_one(case: EvalCase, repeat: int, client: AIModelClient,
         failure_kind = "OUTPUT_CONTRACT_FAILURE"
     return {
         "case_id": case.case_id, "repeat": repeat,
-        "data_source": "real_model" if isinstance(client, OpenAIModelClient) else "test_double",
+        "data_source": _data_source(client),
         "nacl_rule_number_source": "offline_fixture",
         "graph_output": graph_output.model_dump(mode="json"),
         "output": output.model_dump(mode="json"),
@@ -283,11 +291,14 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
         and run.get("prompt_sha256") == prompt_fingerprint(agent.SecOpsGraphVariant.EVIDENCE_FIRST)
         and run.get("request_sha256") == current["request_sha256"]
         and run["settings"] == default_settings
+        # Bedrock 측정은 설정이 기본 OPENAI_*로 남아 있어도 현재 서비스(OpenAI)가 아니다.
+        and not any(record["data_source"] == "bedrock_model" for record in observed.values())
     )
     fixed_case_ids = {case.case_id for case in load_cases()}
     complete_set = set(case_ids) == fixed_case_ids
     all_pass = counts["PASS"] == len(planned) and run["state"] == "COMPLETE"
-    real_measured = bool(observed) and all(record["data_source"] == "real_model" for record in observed.values())
+    real_measured = bool(observed) and all(
+        record["data_source"] in ("real_model", "bedrock_model") for record in observed.values())
     snapshots = sorted({name for record in observed.values() for name in record["model_snapshots"]})
     # 케이스 수용은 계획 전체를 분모로 하는 산술 기준이다. 평가 완료·현재 서비스·운영 성공과 별개다.
     # 계획이 현재 고정 세트 전체 × 정확히 10회일 때만 산술 판정을 낸다. 사례 수는 세트에서 읽는다.

@@ -91,6 +91,32 @@ def test_candidate_round_trip():
     assert mappers.to_candidate_data(row) == contract
 
 
+def test_candidate_recommendation_basis_round_trip_and_null():
+    from schemas.recommendations import IsolationRecommendationBasis
+
+    basis = IsolationRecommendationBasis(
+        classification="OPERATOR_JUDGEMENT_REQUIRED",
+        reason_code="RESOURCE_ROLE_UNKNOWN",
+        evaluated_at=NOW,
+    )
+    contract = RunbookCandidateData(
+        candidate_id="cand-1", incident_id="in-1", runbook_id="RUNBOOK_EC2_ISOLATE",
+        target_arn="arn:x", parameters={}, evidence_ids=["ev-1"],
+        status=CandidateStatus.PENDING_VALIDATION, recommendation_basis=basis,
+    )
+    row = mappers.new_candidate(contract)
+    assert row.recommendation_basis["classification"] == "OPERATOR_JUDGEMENT_REQUIRED"
+    precise = contract.model_copy(update={"recommendation_basis": basis.model_copy(
+        update={"evaluated_at": NOW.replace(microsecond=987654)})})
+    precise_row = mappers.new_candidate(precise)
+    assert precise_row.recommendation_basis["evaluated_at"] == "2026-08-18T12:00:00.987654Z"
+    assert mappers.to_candidate_data(precise_row).recommendation_basis.evaluated_at == (
+        NOW.replace(microsecond=987654))
+    assert mappers.to_candidate_data(row) == contract
+    assert mappers.new_candidate(contract.model_copy(update={"recommendation_basis": None})
+                                 ).recommendation_basis is None
+
+
 def test_candidate_savings_round_trip_preserves_decimal_strings():
     contract = RunbookCandidateData(
         candidate_id="cand-1", incident_id="in-1",

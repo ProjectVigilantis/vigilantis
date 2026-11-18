@@ -83,8 +83,9 @@ def test_contract_violation_returns_422_envelope(client_pg, over):
 # --- 404 · 409 -----------------------------------------------------------------
 
 
+# 수집 시점에 만든 무작위 UUID는 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
 @pytest.mark.parametrize("incident_id", [
-    str(uuid.uuid4()),   # 형식은 맞지만 없는 Incident
+    "7f3c2a1e-5b4d-4c8e-9a6f-1d2e3f4a5b6c",  # 형식은 맞지만 없는 Incident
     "not-a-uuid",        # 계약은 통과하지만 저장 컬럼(uuid) 형식이 아님
 ])
 def test_unknown_incident_returns_404_envelope(client_pg, incident_id):

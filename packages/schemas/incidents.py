@@ -3,7 +3,7 @@
 # Incident 내부 수명주기 계약입니다. (Issue #49)
 #   - AgentInvocationStatus: Incident의 AI 분석 호출 상태. PENDING→IN_PROGRESS는
 #     Workflow의 원자 Claim으로만 전이하고, Terminal 3종은 다시 Claim하지 않는다.
-#   - AgentWaitSchedule: Medium·Low의 안전한 PASS 제안 저장 후 시작되는 응답 대기.
+#   - AgentWaitSchedule: Medium·Low의 모델 출력 후보가 PASS로 저장된 뒤 시작되는 응답 대기.
 #     response_deadline_at은 항상 started_at + 60초이며, 같은 started_at을
 #     INCIDENT_UPDATED.occurred_at으로 사용해 Dashboard 카운트다운 기준과 맞춘다.
 #     타임아웃 판정 기준은 브라우저가 아니라 서버(PostgreSQL)의 이 값이다.

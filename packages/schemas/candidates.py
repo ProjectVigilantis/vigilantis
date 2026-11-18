@@ -27,6 +27,7 @@ from .runbook_parameters import (
     bind_candidate_parameters,
     build_display_parameters,
 )
+from .recommendations import IsolationRecommendationBasis
 from .runbooks import AI_RECOMMENDABLE_RUNBOOK_IDS, RunbookId
 from .savings import AISavingsEstimate, validate_candidate_savings
 
@@ -53,6 +54,8 @@ class RunbookCandidateData(BaseModel):
     display_parameters: dict[str, str] = Field(default_factory=dict)
     evidence_ids: list[str] = Field(min_length=1)
     status: CandidateStatus
+    # 서버 규칙이 생성 시점에 한 번 남긴 격리 추천 근거 — 실행·모델 입력과 무관하고 다시 계산하지 않는다
+    recommendation_basis: IsolationRecommendationBasis | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -70,6 +73,14 @@ class RunbookCandidateData(BaseModel):
             )
         if any(not e for e in self.evidence_ids):
             raise ValueError("evidence_ids에는 빈 문자열이 올 수 없습니다")
+
+        if self.recommendation_basis is not None and (
+            self.runbook_id != RunbookId.RUNBOOK_EC2_ISOLATE
+            or len(self.evidence_ids) != 1
+        ):
+            raise ValueError(
+                "recommendation_basis는 RUNBOOK_EC2_ISOLATE이고 evidence_id가 정확히 하나일 때만 둘 수 있습니다"
+            )
 
         derived = build_display_parameters(self.parameters)
         if self.display_parameters and self.display_parameters != derived:

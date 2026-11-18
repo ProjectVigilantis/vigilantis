@@ -65,6 +65,80 @@ def test_display_parameters_are_derived_from_parameters():
     }
 
 
+def make_basis(**over):
+    base = {
+        "classification": "CONDITIONALLY_RECOMMENDED",
+        "reason_code": "GUARDDUTY_SSH_BRUTE_FORCE_ACTOR",
+        "evaluated_at": "2026-11-13T01:02:03Z",
+    }
+    base.update(over)
+    return base
+
+
+def make_isolate(**over):
+    return make_data(
+        runbook_id="RUNBOOK_EC2_ISOLATE",
+        target_arn="arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0abc",
+        parameters={},
+        recommendation_basis=make_basis(),
+        **over,
+    )
+
+
+def test_recommendation_basis_defaults_to_none_and_round_trips():
+    assert RunbookCandidateData.model_validate(make_data()).recommendation_basis is None
+    d = RunbookCandidateData.model_validate(make_isolate())
+    assert d.recommendation_basis.rule_id == "PROTECTED_EC2_ISOLATION"
+    assert RunbookCandidateData.model_validate_json(d.model_dump_json()) == d
+
+
+def test_basis_timestamp_keeps_microseconds_in_utc_through_json():
+    from datetime import datetime, timedelta, timezone
+
+    kst = timezone(timedelta(hours=9))
+    at = datetime(2026, 11, 13, 10, 2, 3, 123456, tzinfo=kst)
+    d = RunbookCandidateData.model_validate(
+        make_isolate() | {"recommendation_basis": make_basis(evaluated_at=at)}
+    )
+    dumped = d.recommendation_basis.model_dump(mode="json")
+    assert dumped["evaluated_at"] == "2026-11-13T01:02:03.123456Z"
+    back = RunbookCandidateData.model_validate_json(d.model_dump_json())
+    assert back.recommendation_basis.evaluated_at == at
+    assert back == d
+
+
+def test_basis_does_not_change_execution_parameters():
+    d = RunbookCandidateData.model_validate(make_isolate())
+    assert d.parameters.model_dump() == {}
+    assert d.display_parameters == {}
+
+
+@pytest.mark.parametrize("over", [
+    {"runbook_id": "RUNBOOK_NACL_ADD_DENY",
+     "parameters": {"rule_number": 100, "cidr_block": "203.0.113.10/32", "protocol": "-1"}},
+    {"evidence_ids": ["ev-1", "ev-2"]},
+    {"recommendation_basis": make_basis(classification="OPERATOR_JUDGEMENT_REQUIRED")},
+    {"recommendation_basis": make_basis(
+        classification="OPERATOR_JUDGEMENT_REQUIRED", reason_code="GUARDDUTY_SSH_BRUTE_FORCE_ACTOR")},
+    {"recommendation_basis": make_basis(reason_code="DIRECTION_CONFLICT")},
+    {"recommendation_basis": make_basis(rule_version=2)},
+    {"recommendation_basis": make_basis(note="free text")},
+    {"recommendation_basis": {k: v for k, v in make_basis().items() if k != "evaluated_at"}},
+])
+def test_basis_contract_violations(over):
+    with pytest.raises(ValidationError):
+        RunbookCandidateData.model_validate({**make_isolate(), **over})
+
+
+def test_operator_judgement_basis_is_valid_with_any_other_reason():
+    d = RunbookCandidateData.model_validate({
+        **make_isolate(),
+        "recommendation_basis": make_basis(
+            classification="OPERATOR_JUDGEMENT_REQUIRED", reason_code="DIRECTION_CONFLICT"),
+    })
+    assert d.recommendation_basis.reason_code.value == "DIRECTION_CONFLICT"
+
+
 def test_hand_written_display_parameters_are_rejected():
     with pytest.raises(ValidationError):
         RunbookCandidateData.model_validate(

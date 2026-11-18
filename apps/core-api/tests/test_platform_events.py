@@ -49,7 +49,8 @@ A = PlatformEventAction
 OUT = PlatformEventOutcome
 #: 수집 회차 행의 details — 이 파일은 회차를 「요청 밖에서 시스템이 남기는 행」의 본보기로 쓴다
 RUN = {"region": "ap-northeast-2", "status": "SUCCESS"}
-TENANT = str(uuid.uuid4())
+# parametrize에 들어가는 값이라 무작위 UUID면 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
+TENANT = "3d6f1b2a-8c4e-4f7a-b9d1-2e5c7a9f0b3d"
 
 
 def _record(**overrides) -> PlatformEventRecord:
@@ -200,6 +201,65 @@ def test_group_change_requires_the_affected_tenant_and_permissions_normalize_enu
         details={"before": [FeaturePermission.VIEW], "after": []},
     )
     assert record.details == {"before": ["VIEW"], "after": []}
+
+
+_ESCALATION = {
+    "action": A.INCIDENT_ESCALATE,
+    "actor_kind": PlatformActorKind.SYSTEM,
+    "target_id": "inc-1",
+    "details": {"trigger_reason": "PROTECTED_TAG"},
+}
+
+
+def test_incident_escalate_records_a_system_success_on_the_incident():
+    record = PlatformEventRecord(**_ESCALATION)
+    assert record.category is PlatformEventCategory.INCIDENT
+    assert record.target_type is PlatformEventTargetType.INCIDENT
+    assert record.outcome is OUT.SUCCEEDED
+    assert record.details == {"trigger_reason": "PROTECTED_TAG"}
+    assert ACTION_SPECS[A.INCIDENT_ESCALATE].outcomes == {OUT.SUCCEEDED}
+    assert ACTION_SPECS[A.INCIDENT_ESCALATE].actors == {PlatformActorKind.SYSTEM}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"details": {}},
+        {"details": {"trigger_reason": "OTHER"}},
+        {"details": {"trigger_reason": None}},
+        {"details": {"trigger_reason": "PROTECTED_TAG", "reason_code": "PROTECTED_TAG"}},
+        {"details": {"trigger_reason": "PROTECTED_TAG", "note": "x"}},
+        {"details": {"reason_code": "PROTECTED_TAG"}},
+        {"outcome": OUT.DENIED, "details": {"trigger_reason": "PROTECTED_TAG", "reason_code": "X"}},
+        {"outcome": OUT.FAILED, "details": {"trigger_reason": "PROTECTED_TAG", "reason_code": "X"}},
+        {"actor_kind": PlatformActorKind.ANONYMOUS},
+        {
+            "actor_kind": PlatformActorKind.USER,
+            "actor_user_id": str(uuid.uuid4()),
+            "actor_account_type": AccountType.PLATFORM,
+            "actor_platform_role": PlatformRole.CENTRAL_ADMIN,
+        },
+    ],
+)
+def test_incident_escalate_rejects_wrong_details_actor_or_outcome(overrides):
+    with pytest.raises(ValidationError):
+        PlatformEventRecord(**{**_ESCALATION, **overrides})
+
+
+def test_adding_escalation_leaves_existing_actions_unchanged():
+    assert PlatformEventAction.INCIDENT_RESOLVE.value == "INCIDENT_RESOLVE"
+    assert ACTION_SPECS[A.INCIDENT_CREATE].actors == {PlatformActorKind.SYSTEM}
+    assert ACTION_SPECS[A.INCIDENT_ANALYZE].outcomes == {OUT.SUCCEEDED, OUT.FAILED}
+    assert ACTION_SPECS[A.INCIDENT_RESOLVE].actors == {PlatformActorKind.USER}
+    # 기존 행동은 trigger_reason 을 받지 않는다
+    with pytest.raises(ValidationError):
+        PlatformEventRecord(
+            action=A.INCIDENT_CREATE, actor_kind=PlatformActorKind.SYSTEM,
+            target_id="inc-1", details={"trigger_reason": "PROTECTED_TAG"},
+        )
+    assert PlatformEventRecord(
+        action=A.INCIDENT_CREATE, actor_kind=PlatformActorKind.SYSTEM, target_id="inc-1"
+    ).details == {}
 
 
 def test_category_and_target_type_come_from_the_action():

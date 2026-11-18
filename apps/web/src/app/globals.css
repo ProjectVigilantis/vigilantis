@@ -262,11 +262,6 @@
     to { transform: translateY(-50%); }
   }
 
-  /* 랜딩의 [움직임 멈춤](components/landing/motion-toggle.tsx). */
-  [data-motion="paused"] :is(.landing-pulse, .landing-ticker, .landing-float) {
-    animation-play-state: paused;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .landing-rise,
     .landing-float,

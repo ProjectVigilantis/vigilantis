@@ -170,6 +170,31 @@ export function userAdminErrorMessage(
   return action === 'invite' || action === 'resend' ? INVITE_UNCERTAIN : UNCERTAIN;
 }
 
+/* ─────────────────────────── 관리자 직원계정(/staff) ─────────────────────────── */
+
+/** 직원 관리 403. `/staff` 전 경로는 중앙 관리계정만 쓴다(#572 4번). */
+export const STAFF_ADMIN_FORBIDDEN = '중앙 관리계정만 관리자 직원계정을 관리할 수 있습니다.';
+/** 직원 초대 409. 인증 서비스에 이미 있는 이메일이다(자동 연결 없음, 기존 계정 연결은 운영 CLI만 한다). */
+export const STAFF_INVITE_CONFLICT =
+  '이미 인증 서비스에 등록된 이메일이라 초대할 수 없습니다. 목록에서 같은 이메일의 계정을 확인해 주세요.';
+/** 재발송 409. 첫 로그인을 마쳐 임시 비밀번호 상태가 아니거나, 인증 서비스의 계정이 앱 계정과 다르다. */
+export const STAFF_RESEND_CONFLICT =
+  '초대 메일을 다시 보낼 수 없는 상태입니다. 이미 첫 로그인을 마쳤거나 그 사이 상태가 바뀌었을 수 있습니다.';
+/** 등급 · 상태 409. 같은 등급이거나, 마지막 활성 중앙 관리계정을 내리거나 끄려 했다. */
+export const STAFF_STATE_CONFLICT =
+  '지금 상태에서는 처리할 수 없습니다. 마지막 활성 중앙 관리계정이거나 그 사이 상태가 바뀌었을 수 있습니다.';
+
+/** 직원 관리 조치 실패 문구. 403 · 409만 직원 관리의 뜻으로 바꾸고, 나머지는 사용자 관리 문구와 같다. */
+export function staffAdminErrorMessage(action: UserAdminAction, code: ErrorCode | null): string {
+  if (code === 'AUTH_FORBIDDEN') return STAFF_ADMIN_FORBIDDEN;
+  if (code === 'USER_STATE_CONFLICT') {
+    if (action === 'invite') return STAFF_INVITE_CONFLICT;
+    if (action === 'resend') return STAFF_RESEND_CONFLICT;
+    return STAFF_STATE_CONFLICT;
+  }
+  return userAdminErrorMessage(action, code);
+}
+
 /* ─────────────────────────── 초대 요청 ─────────────────────────── */
 
 /** 고객 ID(UUID) — 하이픈을 넣은 표준 표기 36자. 대소문자는 가리지 않는다. 최종 판정은 서버다. */

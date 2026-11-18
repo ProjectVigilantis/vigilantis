@@ -40,6 +40,11 @@ from .factcheck import FactCheckResult
 from .readback import ReadbackResult
 
 
+# 모델 호출 전에 거절된 phase. consent·credentials(Bedrock)는 요청 거절 묶음이며, 원래 phase는
+# CaseRun.error_phase에 그대로 남는다
+REQUEST_BUCKET_PHASES = ("request", "consent", "credentials")
+
+
 @dataclass(frozen=True)
 class CaseRun:
     """케이스 1건의 1회차 결과."""
@@ -189,7 +194,7 @@ def build_column_report(label: str, runs: Sequence[CaseRun]) -> ColumnReport:
             1
             for run in runs
             if run.output.invocation_status is AgentInvocationStatus.FAILED
-            and run.error_phase == "request"
+            and run.error_phase in REQUEST_BUCKET_PHASES
         ),
         fact_checked=sum(1 for run in runs if run.output.summary_lines),
         fact_failed=sum(1 for run in runs if run.output.summary_lines and not run.fact.passed),

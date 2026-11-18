@@ -67,11 +67,31 @@ export function PanelFocus() {
       if (frame === 0) frame = requestAnimationFrame(update);
     };
 
+    // 목차 링크(#how 등)는 섹션을 화면 위가 아니라 가운데로 데려온다. 그래야 그 섹션이 초점 띠에 들어와 또렷하다.
+    // 위아래 안쪽 여백까지 잘라도 화면보다 긴 섹션은 가운데로 맞추면 제목이 잘리므로 위에 맞춘다.
+    const onAnchorClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const link = (e.target as Element | null)?.closest<HTMLAnchorElement>('a[href^="#"]');
+      const hash = link?.getAttribute('href');
+      const target = hash && hash.length > 1 ? document.getElementById(hash.slice(1)) : null;
+      if (!target) return;
+      e.preventDefault();
+      const body = target.querySelector<HTMLElement>('[data-panel-body]');
+      const pad = body ? parseFloat(getComputedStyle(body).paddingTop) * 2 : 0;
+      target.scrollIntoView({
+        behavior: reduce.matches ? 'auto' : 'smooth',
+        block: target.offsetHeight - pad <= window.innerHeight ? 'center' : 'start',
+      });
+      history.pushState(null, '', hash);
+    };
+
     update();
     window.addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule);
     reduce.addEventListener('change', schedule);
+    document.addEventListener('click', onAnchorClick);
     return () => {
+      document.removeEventListener('click', onAnchorClick);
       window.removeEventListener('scroll', schedule);
       window.removeEventListener('resize', schedule);
       reduce.removeEventListener('change', schedule);
