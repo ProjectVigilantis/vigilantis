@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from notifications.dispatcher import DeliveryDispatcher
 from notifications.routing import (
-    CHANNEL_NOT_CONFIGURED,
+    CHANNEL_NOT_SELECTED,
     OWNERSHIP_CONFLICT,
     OWNERSHIP_MISSING,
     SECRET_MISSING,
@@ -179,6 +179,6 @@ def test_intentionally_absent_channel_logs_nothing_per_event(caplog, missing_cha
             dispatcher._materialize(_event(ACCOUNT_A), missing_channel, {}, tenant_accounts)
             for _ in range(3)
         ]
-    assert {row["blocked_reason"] for row in rows} == {CHANNEL_NOT_CONFIGURED}
+    assert {row["blocked_reason"] for row in rows} == {CHANNEL_NOT_SELECTED}
     assert {row["state"] for row in rows} == {"BLOCKED"}
     assert [r for r in caplog.records if r.name.startswith(ROUTE_LOGGER)] == []

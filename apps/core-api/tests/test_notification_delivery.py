@@ -36,6 +36,7 @@ from sqlalchemy import create_engine, delete, event, func, insert, select, text,
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from tests.audit_cleanup import purge_audit_events
+from tests.platform_event_cleanup import purge_platform_events
 
 TENANT_A = "11111111-1111-4111-8111-111111111111"
 TENANT_B = "22222222-2222-4222-8222-222222222222"
@@ -145,6 +146,9 @@ def _throttled():
 
 def _wipe(engine):
     with engine.begin() as connection:
+        purge_platform_events(
+            connection, target_ids=connection.scalars(select(models.NotificationEvent.event_id)),
+        )
         for model in (
             models.NotificationDelivery, models.NotificationRoute,
             models.NotificationLane, models.NotificationEvent,
@@ -477,7 +481,7 @@ def test_committed_high_intake_is_sent_once_per_configured_channel(sessions, pg_
                 assert (row.state, row.attempts, row.tenant_id) == ("SUCCEEDED", 1, TENANT_A)
                 assert row.receipt_kind == {"SLACK": "SLACK_POSTED", "SNS": "SNS_ACCEPTED"}[channel]
             else:
-                assert (row.state, row.blocked_reason) == ("BLOCKED", "CHANNEL_NOT_CONFIGURED")
+                assert (row.state, row.blocked_reason) == ("BLOCKED", "CHANNEL_NOT_SELECTED")
         assert [p["url"] for p in slack.posts] == ([WEBHOOK_A] if "SLACK" in channels else [])
         assert [p["topic"] for p in sns.publishes] == ([TOPIC_A] if "SNS" in channels else [])
         for body in [p["body"] for p in slack.posts] + [p["body"] for p in sns.publishes]:
@@ -1168,11 +1172,11 @@ def test_removed_channel_closes_pending_and_crashed_rows_without_sending(session
     assert route_row(pg_engine, ACCOUNT_A, "SNS") is None
     recovered, pending = rows(pg_engine, crashed)["SNS"], rows(pg_engine, waiting)["SNS"]
     assert (recovered.state, recovered.blocked_reason, recovered.attempts) == (
-        "BLOCKED", "CHANNEL_NOT_CONFIGURED", 1,
+        "BLOCKED", "CHANNEL_NOT_SELECTED", 1,
     )
     assert (recovered.last_category, recovered.last_error_code) == ("UNKNOWN", "lease_expired")
     assert (pending.state, pending.blocked_reason, pending.attempts) == (
-        "BLOCKED", "CHANNEL_NOT_CONFIGURED", 0,
+        "BLOCKED", "CHANNEL_NOT_SELECTED", 0,
     )
     assert sns.publishes == [] and sns.outcomes == []  # 외부 호출·새 시도 없음
     assert {(rows(pg_engine, e)["SLACK"].state, rows(pg_engine, e)["SLACK"].attempts)
@@ -1194,7 +1198,7 @@ def test_route_without_sender_blocks_pending_row_instead_of_claiming(sessions, p
     assert no_sender.process_one("SNS") is True
     assert no_sender.process_one("SNS") is False
     row = rows(pg_engine, event_id)["SNS"]
-    assert (row.state, row.blocked_reason, row.attempts) == ("BLOCKED", "CHANNEL_NOT_CONFIGURED", 0)
+    assert (row.state, row.blocked_reason, row.attempts) == ("BLOCKED", "CHANNEL_UNAVAILABLE", 0)
     assert sns.publishes == []
 
 

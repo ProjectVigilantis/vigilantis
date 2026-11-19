@@ -55,7 +55,7 @@ class NotificationRuntime:
 def warn_blocked_routes(registry) -> None:
     """선언됐지만 막힌 (계정, 채널)을 시작 시 한 번씩 경고한다. 라우팅이 이미 계산한 결과만 쓴다.
 
-    계정·채널·사유 코드만 남긴다. 채널을 일부러 뺀 계정(CHANNEL_NOT_CONFIGURED)은 막힌 항목이 아니라 경고하지 않는다.
+    계정·채널·사유 코드만 남긴다. 채널을 일부러 뺀 계정(CHANNEL_NOT_SELECTED)은 막힌 항목이 아니라 경고하지 않는다.
     """
     for (account, channel), reason in sorted(registry.blocked.items()):
         _logger.warning("notification_route_blocked", extra={

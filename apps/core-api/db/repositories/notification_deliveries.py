@@ -256,7 +256,10 @@ def insert_deliveries(db: Session, rows: list[dict]) -> int:
 
 
 def list_by_event(db: Session, event_id: str) -> list[_D]:
-    return list(db.scalars(select(_D).where(_D.event_id == event_id).order_by(_D.channel)))
+    return list(db.scalars(
+        select(_D).where(_D.event_id == event_id).order_by(_D.channel)
+        .execution_options(populate_existing=True)
+    ))
 
 
 # --- claim·회수·확정 ----------------------------------------------------------
