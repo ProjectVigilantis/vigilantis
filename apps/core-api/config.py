@@ -180,6 +180,17 @@ class Settings(BaseSettings):
     # 서버가 Retry-After로 지시한 대기의 상한. 이보다 길게 지시하면 따르지 않고
     # backoff로 간다 — 요청 경로에서 부르는 호출이라 무한정 붙잡지 않는다
     OPENAI_MAX_RETRY_AFTER_SECONDS: float = Field(default=60.0, ge=0)
+    # 신고 초안 서술 전용(#648). 키는 위 OPENAI_API_KEY를 같이 쓴다. 모델이 비어 있으면 신고
+    # 초안은 모델에 연결하지 않는다(503 REPORT_DRAFT_MODEL_UNAVAILABLE) — 기본 꺼짐이라 머지만으로
+    # 유료 호출이 생기지 않는다. R9에서 확인한 값은 gpt-6-luna · high다.
+    REPORT_DRAFT_OPENAI_MODEL: Optional[str] = None
+    REPORT_DRAFT_OPENAI_REASONING_EFFORT: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = "high"
+    # 응답 대기 제한(초)이며 재시도하지 않는다. 연결·전송·풀 대기는 따로 각 3초다
+    # (ai/report_draft.py). 신고 초안은 HTTP 요청 안에서 기다리므로 단계별 상한의 합이 CloudFront
+    # 응답 대기(60초)보다 작아야 해 50초까지만 받는다. R7–R9 high 성공 호출의 최댓값은 37.7초였다.
+    REPORT_DRAFT_OPENAI_TIMEOUT_SECONDS: float = Field(default=45.0, gt=0, le=50)
     # SecOps 그래프 선택(#583 2단계 대비책). EVIDENCE_FIRST는 근거 3줄+decision 1회 호출 뒤
     # 코드가 실행 계획을 조립하고, CANDIDATE_FIRST는 1단계 그래프(후보·요약 2회 호출)다.
     # 어느 쪽도 reviewed_risk_level을 싣지 않으므로 Workflow 검증(_contract_violation)은

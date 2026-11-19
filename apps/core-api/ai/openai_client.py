@@ -36,6 +36,7 @@ from openai import (
     OpenAI,
     OpenAIError,
     RateLimitError,
+    Timeout,
 )
 from pydantic import ValidationError
 
@@ -79,11 +80,15 @@ class OpenAIModelClient:
         temperature: Optional[float] = None,
         reasoning_effort: Optional[str] = None,
         service_tier: Optional[str] = None,
+        timeout: Any = None,
     ) -> None:
         self._client = client
         self._model = model
         self._policy = policy
         self._service_tier = service_tier
+        # SDK 호출 1회에 넘길 제한 시간. None이면 policy.timeout_seconds 하나를 연결·전송·응답
+        # 대기 단계마다 같은 값으로 쓴다(SDK 동작) — 단계별 값이 필요한 호출부만 Timeout을 넘긴다
+        self._timeout = timeout
         # 값이 없는 노브는 키 자체를 만들지 않는다 — 모델이 받지 않는 파라미터는
         # 요청 본문에 나타나지도 않아야 한다. 전 호출이 같은 dict를 쓰므로 요약·후보
         # 호출에 서로 다른 설정이 실릴 여지가 없다.
@@ -122,7 +127,7 @@ class OpenAIModelClient:
                     model=self._model,
                     messages=messages,
                     response_format=response_model,
-                    timeout=self._policy.timeout_seconds,
+                    timeout=self._timeout if self._timeout is not None else self._policy.timeout_seconds,
                     **extra_params,
                 )
             except APITimeoutError as exc:
@@ -307,19 +312,34 @@ def _token_usage(raw: Any) -> TokenUsage:
     )
 
 
-def build_openai_model_client(settings: Optional[Settings] = None) -> OpenAIModelClient:
-    """설정으로 실제 SDK 클라이언트를 만들어 경계 구현을 구성한다."""
+def build_openai_model_client(
+    settings: Optional[Settings] = None, *, setup_timeout_seconds: Optional[float] = None
+) -> OpenAIModelClient:
+    """설정으로 실제 SDK 클라이언트를 만들어 경계 구현을 구성한다.
+
+    setup_timeout_seconds를 주면 연결·요청 전송·연결 풀 대기를 그 값으로, 응답 대기만
+    OPENAI_TIMEOUT_SECONDS로 제한한다. 주지 않으면 모든 단계가 OPENAI_TIMEOUT_SECONDS다.
+    """
     settings = settings or get_settings()
     if not settings.OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY가 설정되지 않아 모델 클라이언트를 만들 수 없습니다")
+    timeout: Any = settings.OPENAI_TIMEOUT_SECONDS
+    if setup_timeout_seconds is not None:
+        timeout = Timeout(
+            connect=setup_timeout_seconds,
+            read=settings.OPENAI_TIMEOUT_SECONDS,
+            write=setup_timeout_seconds,
+            pool=setup_timeout_seconds,
+        )
     return OpenAIModelClient(
         # 재시도 소유자는 ai/model_retry.py의 엔진 하나다 — SDK 기본 재시도(2회)와
         # 중첩되면 최대 시도가 곱으로 늘어나므로 SDK 쪽은 0으로 끈다
         client=OpenAI(
             api_key=settings.OPENAI_API_KEY,
-            timeout=settings.OPENAI_TIMEOUT_SECONDS,
+            timeout=timeout,
             max_retries=0,
         ),
+        timeout=timeout if setup_timeout_seconds is not None else None,
         model=settings.OPENAI_MODEL,
         policy=RetryPolicy.from_settings(settings),
         temperature=settings.OPENAI_TEMPERATURE,
