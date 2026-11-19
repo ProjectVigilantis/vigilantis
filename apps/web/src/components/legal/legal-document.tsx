@@ -8,6 +8,7 @@ import { SiteNav } from '@/components/landing/site-nav';
 import { VigilantisLogo } from '@/components/vigilantis-logo';
 import { formatLegalDate, LEGAL_EFFECTIVE_DATE, OPERATOR_NAME, SERVICE_NAME } from '@/lib/legal';
 import { LANDING_PATH, LOGIN_PATH, PRIVACY_PATH, TERMS_PATH } from '@/lib/return-to';
+import { FOOTER_GUIDE_LINKS } from '@/lib/site-menu';
 
 export type LegalSection = { id: string; title: string; body: React.ReactNode };
 
@@ -96,6 +97,20 @@ export function LegalLinks({ className }: { className?: string }) {
   );
 }
 
+/** 랜딩 · 문서 화면의 바닥글 링크: 안내 문서와 정책 문서. 좁은 화면에서 상단 메뉴가 접혀도 안내 문서로 갈 수 있게 한다. */
+export function FooterLinks() {
+  return (
+    <span className="flex flex-wrap gap-x-5 gap-y-2">
+      {FOOTER_GUIDE_LINKS.map((item) => (
+        <Link key={item.href} href={item.href} className="hover:underline">
+          {item.label}
+        </Link>
+      ))}
+      <LegalLinks className="contents" />
+    </span>
+  );
+}
+
 function LegalFooter() {
   return (
     <footer className="border-t">
@@ -103,7 +118,7 @@ function LegalFooter() {
         <span>
           © {SERVICE_NAME} · {OPERATOR_NAME}
         </span>
-        <LegalLinks />
+        <FooterLinks />
       </div>
     </footer>
   );

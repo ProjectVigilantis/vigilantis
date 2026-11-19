@@ -21,7 +21,7 @@ import { HeroPreview } from '@/components/landing/hero-preview';
 import { LoginOverlay } from '@/components/landing/login-overlay';
 import { PanelFocus } from '@/components/landing/panel-focus';
 import { SiteNav } from '@/components/landing/site-nav';
-import { LegalLinks } from '@/components/legal/legal-document';
+import { FooterLinks } from '@/components/legal/legal-document';
 import { VigilantisLogo } from '@/components/vigilantis-logo';
 import { LOGIN_OVERLAY_HREF } from '@/lib/return-to';
 
@@ -319,7 +319,7 @@ export default function LandingPage() {
           <footer className="border-t border-white/10">
             <div className="text-muted-foreground mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-8 text-sm sm:px-6">
               <span>© Vigilantis · 딸깍 인프라</span>
-              <LegalLinks />
+              <FooterLinks />
             </div>
           </footer>
         </div>
