@@ -26,8 +26,8 @@ export function FilterChips<T extends string>({
             aria-pressed={on}
             onClick={() => onChange(option.value)}
             className={cn(
-              'focus-visible:ring-ring h-8 rounded-full border px-3 text-[13px] transition-colors focus-visible:ring-2 focus-visible:outline-none',
-              on ? 'border-primary bg-accent text-accent-foreground font-semibold' : 'text-foreground-secondary hover:bg-muted',
+              'focus-visible:ring-ring h-8 rounded-md px-2 text-[13px] transition-colors focus-visible:ring-2 focus-visible:outline-none',
+              on ? 'text-foreground font-semibold' : 'text-foreground-secondary hover:text-foreground',
             )}
           >
             {option.label} <span className="tabular-nums">{option.count}</span>

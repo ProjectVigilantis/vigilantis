@@ -78,7 +78,7 @@ export function NotificationBell() {
     <Popover.Root onOpenChange={(open) => open && !unserved && reload.current()}>
       <Popover.Trigger
         aria-label={unread > 0 ? `알림, 읽지 않은 ${unread}건` : '알림'}
-        className="focus-visible:ring-ring relative inline-flex size-9 items-center justify-center rounded-md text-white/80 hover:bg-white/8 hover:text-white focus-visible:ring-2 focus-visible:outline-none"
+        className="focus-visible:ring-ring relative inline-flex size-9 items-center justify-center rounded-md text-white/80 transition-colors hover:text-white focus-visible:ring-2 focus-visible:outline-none"
       >
         <Bell aria-hidden className="size-4.5" />
         {unread > 0 ? (
@@ -102,7 +102,7 @@ export function NotificationBell() {
               type="button"
               disabled={unread === 0}
               onClick={() => void read(null)}
-              className="text-primary inline-flex items-center gap-1 text-xs font-semibold hover:underline disabled:pointer-events-none disabled:opacity-40"
+              className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none inline-flex items-center gap-1 text-xs font-semibold disabled:pointer-events-none disabled:opacity-40"
             >
               <CheckCheck aria-hidden className="size-3.5" />
               모두 읽음
@@ -117,7 +117,7 @@ export function NotificationBell() {
             {state.kind === 'error' ? (
               <div className="flex items-center justify-between gap-3 px-4 py-6 text-sm">
                 <span className="text-muted-foreground">알림을 불러오지 못했습니다.</span>
-                <button type="button" onClick={() => reload.current()} className="text-primary font-semibold hover:underline">
+                <button type="button" onClick={() => reload.current()} className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none font-semibold">
                   다시 시도
                 </button>
               </div>
@@ -159,14 +159,14 @@ export function NotificationBell() {
             ) : null}
           </div>
 
-          <div className="flex border-t text-xs font-semibold">
+          <div className="flex text-xs font-semibold">
             <Popover.Close asChild>
-              <Link href={SIGNUP_REQUESTS_PATH} className="text-primary flex-1 px-4 py-2.5 text-center hover:underline">
+              <Link href={SIGNUP_REQUESTS_PATH} className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none flex-1 px-4 py-2.5 text-center">
                 도입 신청함
               </Link>
             </Popover.Close>
             <Popover.Close asChild>
-              <Link href={INQUIRIES_PATH} className="text-primary flex-1 border-l px-4 py-2.5 text-center hover:underline">
+              <Link href={INQUIRIES_PATH} className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none flex-1 px-4 py-2.5 text-center">
                 고객사 문의함
               </Link>
             </Popover.Close>

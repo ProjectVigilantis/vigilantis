@@ -193,35 +193,27 @@ components:
     typography: "{typography.body-sm}"
     height: "32px"
     padding: "0"
-  button-primary:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.on-primary}"
+  button:
+    backgroundColor: "transparent"
+    textColor: "{colors.on-surface-secondary}"
+    hoverTextColor: "{colors.on-surface}"
     typography: "{typography.body-md}"
     rounded: "{rounded.sm}"
-    height: "40px"
-    padding: "0 16px"
-  button-outline:
+    height: "32px"
+    padding: "0 10px"
+  button-danger:
+    backgroundColor: "transparent"
+    textColor: "{colors.danger-text}"
+    typography: "{typography.body-md}"
+    rounded: "{rounded.sm}"
+    height: "32px"
+    padding: "0 10px"
+  filter-chip-active:
     backgroundColor: "transparent"
     textColor: "{colors.on-surface}"
-    borderColor: "{colors.outline}"
-    typography: "{typography.body-md}"
     rounded: "{rounded.sm}"
-    height: "36px"
-    padding: "0 14px"
-  button-danger:
-    backgroundColor: "{colors.danger-action}"
-    textColor: "{colors.on-primary}"
-    typography: "{typography.body-md}"
-    rounded: "{rounded.sm}"
-    height: "36px"
-    padding: "0 14px"
-  filter-chip-active:
-    backgroundColor: "{colors.primary-soft}"
-    textColor: "{colors.on-primary-soft}"
-    borderColor: "{colors.primary}"
-    rounded: "{rounded.pill}"
     height: "32px"
-    padding: "0 12px"
+    padding: "0 8px"
   card-panel:
     backgroundColor: "{colors.surface-elevated}"
     textColor: "{colors.on-surface}"
@@ -269,7 +261,7 @@ components:
 
 Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이다. 운영자가 화면에서 얻어야 하는 것은 두 가지다. 지금 문제가 있는가, 그리고 그 판단의 근거가 얼마나 새것인가.
 
-화면은 두 층으로 나뉜다. 바깥은 남색 셸(상단바와 사이드바)이고, 안쪽은 차가운 회백색 작업 영역이다. 셸은 화면의 틀을 잡고, 작업 영역은 숫자와 표와 그래프를 읽는 자리다. 기본은 주간(밝은) 모드이고, 야간 근무와 관제실 벽면 화면을 위한 야간 모드를 함께 둔다.
+화면은 두 층으로 나뉜다. 바깥은 남색 셸(상단바와 사이드바)이고, 안쪽은 차가운 회백색 작업 영역이다. 셸은 화면의 틀을 잡고, 작업 영역은 숫자와 표와 그래프를 읽는 자리다. 기본은 야간(어두운) 모드이고(2026-11-19 PM 결정, 이전에는 주간이 기본이었다), 밝은 곳에서 쓸 주간 모드를 함께 둔다.
 
 이 체계는 Evreghen Command Center(아래 출처)에서 출발했다. 어두운 셸과 밝은 작업 영역의 두 층 구조, 시스템 글꼴, 4px 간격 체계는 원작에서 가져왔다. 주황 강조색, 크림색 바탕, 반투명 셸은 관제 목적에 맞지 않아 바꿨다.
 
@@ -325,7 +317,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 야간 모드는 주간 색을 뒤집은 것이 아니라, 같은 역할에 어두운 바탕용 값을 따로 고른 것이다(`dark-*` 토큰). 상태 원색 네 가지(`status-good`, `status-warning`, `status-serious`, `status-critical`)는 두 모드에서 같고, 배지 바탕과 글자, 위험 글자, 중립 회색, 히트맵 칸, 데이터 파랑은 모드마다 다르다.
 
-모드 전환은 사이드바의 설정에서 한다. 관제실 벽면 화면처럼 오래 켜 두는 화면은 야간 모드를 기본으로 띄울 수 있다.
+모드 전환은 사이드바의 설정에서 한다. 고른 모드는 그 브라우저에 남고, 고른 적이 없으면 야간으로 연다.
 
 ## 글꼴
 
@@ -359,7 +351,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 ## 모양
 
-버튼과 입력은 6px, 메뉴 항목은 8px, 카드는 12px, 배지와 필터 칩은 완전히 둥글게 한다. 그래프 막대는 값 쪽 끝만 4px 둥글게 하고 기준선 쪽은 각지게 둔다. 히트맵 칸은 3px이다.
+버튼과 입력은 6px, 메뉴 항목은 8px, 카드는 12px, 배지는 완전히 둥글게 한다. 그래프 막대는 값 쪽 끝만 4px 둥글게 하고 기준선 쪽은 각지게 둔다. 히트맵 칸은 3px이다.
 
 ## 컴포넌트
 
@@ -371,7 +363,9 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 ### 버튼
 
-주 동작은 파랑 칠 버튼(`button-primary`) 하나만 둔다. 보조 동작은 테두리 버튼(`button-outline`)이다. 되돌릴 수 없는 동작(고객 정지, 삭제)은 빨강 버튼(`button-danger`)이며, 화면 아래 "위험 작업" 카드 안에 따로 모으고 확인 대화 상자를 거친다.
+버튼은 바탕과 테두리로 감싸지 않는다(2026-11-19 PM 결정, 랜딩과 같은 모양). 평소에는 보조 글자색이고, 마우스를 올리면 기본 글자색으로 밝아진다(`button`). 이전에는 주 동작을 파랑으로 칠하고 보조 동작에 테두리를 둘렀다. 되돌릴 수 없는 동작(고객 정지, 삭제)은 위험 글자색 버튼(`button-danger`)이며, 화면 아래 "위험 작업" 카드 안에 따로 모으고 확인 대화 상자를 거친다.
+
+필터 칩과 보기 전환(관제 축 등)도 같다. 고른 것은 기본 글자색에 굵게, 나머지는 보조 글자색으로 두고 바탕을 칠하지 않는다. 사이드바 메뉴와 같은 규칙이다.
 
 ### 숫자 카드
 

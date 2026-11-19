@@ -42,8 +42,8 @@ export function NotYetServed({ what }: { what: string }) {
   );
 }
 
-const PAGE_LINK = 'text-primary rounded-md border px-3 py-1.5 text-sm font-semibold hover:bg-muted';
-const PAGE_LINK_OFF = 'text-muted-foreground rounded-md border px-3 py-1.5 text-sm opacity-50';
+const PAGE_LINK = 'text-foreground-secondary hover:text-foreground rounded-md px-2 py-1.5 text-sm font-semibold transition-colors';
+const PAGE_LINK_OFF = 'text-muted-foreground rounded-md px-2 py-1.5 text-sm font-semibold opacity-50';
 
 /**
  * 쪽 이동(#565 페이지 응답). 한 쪽뿐이면 건수만 적는다. 마지막 쪽을 넘는 주소로 들어오면 서버가 빈 목록을 주므로

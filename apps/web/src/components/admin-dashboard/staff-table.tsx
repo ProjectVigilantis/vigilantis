@@ -69,8 +69,8 @@ export function StaffTable({ rows, nowMs }: { rows: readonly StaffRow[]; nowMs: 
                 aria-pressed={on}
                 onClick={() => setCategory(value)}
                 className={cn(
-                  'focus-visible:ring-ring h-8 rounded-full border px-3 text-[13px] transition-colors focus-visible:ring-2 focus-visible:outline-none',
-                  on ? 'border-primary bg-accent text-accent-foreground font-semibold' : 'text-foreground-secondary hover:bg-muted',
+                  'focus-visible:ring-ring h-8 rounded-md px-2 text-[13px] transition-colors focus-visible:ring-2 focus-visible:outline-none',
+                  on ? 'text-foreground font-semibold' : 'text-foreground-secondary hover:text-foreground',
                 )}
               >
                 {label} <span className="tabular-nums">{rows.filter(match).length}</span>
@@ -135,7 +135,7 @@ export function StaffTable({ rows, nowMs }: { rows: readonly StaffRow[]; nowMs: 
                           aria-expanded={expanded}
                           aria-label={`${r.name} 고객사 계정 ${expanded ? '접기' : '펼치기'}`}
                           onClick={() => toggle(key)}
-                          className="hover:bg-accent focus-visible:ring-ring/50 rounded-md p-1 focus-visible:ring-2 focus-visible:outline-none"
+                          className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring/50 rounded-md p-1 transition-colors focus-visible:ring-2 focus-visible:outline-none"
                         >
                           <ChevronDown aria-hidden className={cn('size-4 transition-transform', expanded && 'rotate-180')} />
                         </button>

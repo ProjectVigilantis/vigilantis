@@ -136,10 +136,10 @@ export function TenantsView({ tenants }: { tenants: TenantListItem[] }) {
                       aria-pressed={on}
                       onClick={() => setFilter(f)}
                       className={cn(
-                        'h-8 rounded-full border px-3 text-[13px] transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
+                        'h-8 rounded-md px-2 text-[13px] transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
                         on
-                          ? 'border-primary bg-accent text-accent-foreground font-semibold'
-                          : 'text-foreground-secondary hover:bg-muted',
+                          ? 'text-foreground font-semibold'
+                          : 'text-foreground-secondary hover:text-foreground',
                       )}
                     >
                       {label} {count}
