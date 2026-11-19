@@ -34,7 +34,12 @@ from schemas.api.tenants import TenantStatus
 from schemas.candidates import CandidateStatus
 from schemas.executions import ExecutionEffect, ExecutionStepResult, ExecutionStepStatus
 from schemas.incidents import AgentInvocationStatus
-from schemas.platform_events import PlatformActorKind, PlatformEventOutcome, PlatformEventTargetType
+from schemas.platform_events import (
+    PlatformActorKind,
+    PlatformEventAction,
+    PlatformEventOutcome,
+    PlatformEventTargetType,
+)
 from schemas.precheck import PrecheckReasonCode
 from schemas.runbooks import RunbookId
 from sqlalchemy import create_engine, delete, event, func, select
@@ -927,6 +932,38 @@ def test_start_gate_refusal_records_a_block_and_a_failed_completion_once(
         _is_system(row, tenant_id)
 
 
+def test_a_failed_start_gate_block_write_leaves_the_execution_unclosed(
+    db, make_incident, make_candidate, make_execution, make_tenant, aws
+):
+    tenant_id = make_tenant()
+    incident_id, execution_id = _reserved(db, make_incident, make_candidate, make_execution, tenant_id)
+    _suspend(db, tenant_id)
+    before = _total(db)
+
+    # 확정 행(ACTION_COMPLETE)과 거절 행이 같은 commit 에 실린다 — 거절 행만 실패시킨다(도우미 머리말)
+    with failing_platform_event_write(only=PlatformEventAction.ACTION_BLOCK) as failed:
+        report = cycle(db)
+
+    assert failed.count == 1
+    assert report.errored == 1
+    assert aws.calls == []
+    # 거절 행을 못 쓰면 확정도 없다 — 확정만 남으면 실행은 실패로 끝났는데 왜 막혔는지가 활동 로그에 없다
+    assert executions_repo.get_execution(db, execution_id).status is ExecutionStatus.IN_PROGRESS
+    assert incidents_repo.get_incident(db, incident_id).status is IncidentStatus.ACTION_IN_PROGRESS
+    assert _total(db) == before
+
+    cycle(db)  # 다음 주기 — 같은 거절이 한 번 남는다
+    after = _total(db)
+    cycle(db)
+
+    assert _total(db) == after
+    assert executions_repo.get_execution(db, execution_id).status is ExecutionStatus.FAILED
+    assert _facts(db, execution_id, incident_id) == [
+        ("ACTION_BLOCK", "DENIED", incident_id, "TENANT_SUSPENDED"),
+        ("ACTION_COMPLETE", "FAILED", execution_id, "TENANT_SUSPENDED"),
+    ]
+
+
 # ==============================================================================
 # 자동 원복 — 발동 · 가드레일 거절 · 시작 불가 (SYSTEM)
 # ==============================================================================
@@ -958,6 +995,44 @@ def test_rollback_guardrail_rejection_is_a_block_and_a_failed_rollback(db, rolle
     cycle(db)
 
     child_id = only_child(db, origin_id).execution_id
+    assert _facts(db, origin_id, child_id, incident_id) == [
+        ("ACTION_AUTO_TRIGGER", "SUCCEEDED", child_id, None),
+        ("ACTION_BLOCK", "DENIED", incident_id, "ARN_TARGET_NOT_MANAGED"),
+        ("ACTION_ROLLBACK", "FAILED", child_id, "ROLLBACK_FAILED"),
+    ]
+
+
+def _verdicts(session, execution_id) -> int:
+    """그 실행에 저장된 가드레일 판정 수."""
+    session.expire_all()
+    return session.scalar(
+        select(func.count())
+        .select_from(models.GuardrailEvaluation)
+        .where(models.GuardrailEvaluation.execution_id == execution_id)
+    )
+
+
+def test_a_failed_rollback_guardrail_block_write_leaves_no_verdict_behind(db, rolled_back_origin, aws):
+    incident_id, origin_id = rolled_back_origin(collected=False)  # ③ ARN Match 가 거절한다
+    cycle(db)  # 자식 접수
+    child = only_child(db, origin_id)
+    child_id, accepted = child.execution_id, child.status
+    before = _total(db)
+
+    with failing_platform_event_write(only=PlatformEventAction.ACTION_BLOCK) as failed:
+        report = cycle(db)  # 자식 실행 → 가드레일 확정 거절 → 거절 행을 못 쓴다
+
+    assert failed.count == 1
+    assert report.errored == 1
+    # 거절 행을 못 쓰면 판정 저장도 없다 — 판정만 남으면 원복은 거절로 끝났는데 활동 로그에는 그 거절이 없다
+    assert _verdicts(db, child_id) == 0
+    assert executions_repo.get_execution(db, child_id).status is accepted
+    assert _total(db) == before
+
+    cycle(db)  # 다음 시도 — 같은 거절이 한 번 남는다
+    cycle(db)
+
+    assert _verdicts(db, child_id) == 1
     assert _facts(db, origin_id, child_id, incident_id) == [
         ("ACTION_AUTO_TRIGGER", "SUCCEEDED", child_id, None),
         ("ACTION_BLOCK", "DENIED", incident_id, "ARN_TARGET_NOT_MANAGED"),
