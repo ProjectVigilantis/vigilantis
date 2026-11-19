@@ -434,7 +434,31 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
         "Action": {"Allow": {}},
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                              "MetricName": f"{PREFIX}-allow"},
-    }]
+    }, *(_managed_rule(name, priority, group, overrides)
+         for priority, (name, group, overrides) in enumerate(MANAGED_RULE_GROUPS, start=4))]
+
+
+# AWS 관리형 규칙(ADR-0010 6차 개정) — 허용 IP(우선순위 3) 뒤라 허용 목록(NAT 포함)은 거치지 않는다.
+# 웹의 서버 측 API 호출이 NAT IP로 오므로, 본문 검사 규칙이 앱 자신의 요청을 막지 않게 하려는 배치다.
+# 본문 크기(8KB) 규칙은 Count — 앱이 본문 상한을 직접 건다(신청 접수 등). 관측 뒤 다시 정한다
+MANAGED_RULE_GROUPS = (
+    ("aws-ip-reputation", "AWSManagedRulesAmazonIpReputationList", ()),
+    ("aws-common", "AWSManagedRulesCommonRuleSet", ("SizeRestrictions_BODY",)),
+)
+
+
+def _managed_rule(name: str, priority: int, group: str, count_rules: tuple[str, ...]) -> dict:
+    statement: dict = {"VendorName": "AWS", "Name": group}
+    if count_rules:
+        statement["RuleActionOverrides"] = [{"Name": rule, "ActionToUse": {"Count": {}}} for rule in count_rules]
+    return {
+        "Name": name,
+        "Priority": priority,
+        "Statement": {"ManagedRuleGroupStatement": statement},
+        "OverrideAction": {"None": {}},  # 그룹 안 규칙의 동작(Block)을 그대로 쓴다
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": f"{PREFIX}-{name}"},
+    }
 
 
 # ---- 외부 알림 배포(#493 PR3) — 기본은 꺼짐. --notification-config로 명시해야 켜진다

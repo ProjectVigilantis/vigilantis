@@ -301,7 +301,9 @@ def test_down_removes_only_alias_records_that_point_at_this_distribution():
 
 
 # ④ ---------------------------------------------------------------------------
-RULE_NAMES = ["rate-login-per-ip", "rate-signup-per-ip", "rate-per-ip", "allow-listed-ips"]
+RULE_NAMES = ["rate-login-per-ip", "rate-signup-per-ip", "rate-per-ip", "allow-listed-ips",
+              "aws-ip-reputation", "aws-common"]
+PRIORITIES = list(range(len(RULE_NAMES)))
 
 
 def _rules():
@@ -314,13 +316,33 @@ def test_waf_allows_only_the_ip_set():
     assert allow["Action"] == {"Allow": {}}
 
 
+def test_managed_rules_come_after_the_allow_rule_and_keep_their_own_actions():
+    # 허용 목록(NAT 포함) 뒤 — 웹의 서버 측 API 호출이 본문 검사에 막히지 않는다
+    rules = _rules()
+    allow = rules["allow-listed-ips"]["Priority"]
+    for name, group in (("aws-ip-reputation", "AWSManagedRulesAmazonIpReputationList"),
+                        ("aws-common", "AWSManagedRulesCommonRuleSet")):
+        rule = rules[name]
+        assert rule["Priority"] > allow
+        assert rule["Statement"]["ManagedRuleGroupStatement"]["Name"] == group
+        assert rule["Statement"]["ManagedRuleGroupStatement"]["VendorName"] == "AWS"
+        assert rule["OverrideAction"] == {"None": {}} and "Action" not in rule
+    assert "RuleActionOverrides" not in rules["aws-ip-reputation"]["Statement"]["ManagedRuleGroupStatement"]
+
+
+def test_common_rule_set_only_counts_the_body_size_rule():
+    # 앱이 본문 상한을 직접 건다 — 8KB 규칙이 정상 요청을 막지 않게 세기만 한다
+    overrides = _rules()["aws-common"]["Statement"]["ManagedRuleGroupStatement"]["RuleActionOverrides"]
+    assert overrides == [{"Name": "SizeRestrictions_BODY", "ActionToUse": {"Count": {}}}]
+
+
 # ⑦ 속도 제한 (#484) ------------------------------------------------------------
 def test_rate_limits_are_evaluated_before_the_allow_rule():
     # 허용이 먼저 맞으면 WAF가 거기서 끝낸다 — 속도 규칙은 우선순위가 더 앞이어야 평가된다.
     # 경로 규칙 둘이 전 경로 규칙보다 앞 — Block 이 되면 더 낮은 한도가 먼저 끊는다(#522 Q5 · D)
     rules = platform.waf_rules("arn:ipset", "arn:nat")
     assert [rule["Name"] for rule in rules] == RULE_NAMES
-    assert [rule["Priority"] for rule in rules] == [0, 1, 2, 3]
+    assert [rule["Priority"] for rule in rules] == PRIORITIES
 
 
 def test_rate_limit_counts_per_ip_but_never_the_nat_ip():
@@ -574,7 +596,7 @@ def test_existing_acl_without_the_login_rule_gets_it_in_front():
                   acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2, 3]))
+    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, PRIORITIES))
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == []
@@ -588,7 +610,7 @@ def test_existing_acl_without_the_signup_rule_gets_it_before_the_generic_limit()
                   acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2, 3]))
+    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, PRIORITIES))
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == []  # 다시 돌리면 변경 0
@@ -628,7 +650,7 @@ def test_switching_the_generic_rule_action_is_applied_on_rerun(monkeypatch):
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
+    actions = {rule["Name"]: rule.get("Action") for rule in waf.acl_rules}
     assert actions["rate-per-ip"] == {"Count": {}}
     assert actions["rate-login-per-ip"] == {"Block": {}}  # 규칙마다 전환은 따로다
     assert actions["rate-signup-per-ip"] == {"Block": {}}
@@ -641,7 +663,7 @@ def test_switching_only_the_signup_rule_action_is_applied_on_rerun(monkeypatch):
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
+    actions = {rule["Name"]: rule.get("Action") for rule in waf.acl_rules}
     assert actions["rate-signup-per-ip"] == {"Count": {}}
     assert (actions["rate-login-per-ip"], actions["rate-per-ip"]) == ({"Block": {}}, {"Block": {}})
 
