@@ -9,8 +9,15 @@ import pytest
 from db import models
 from db.repositories import notification_events as events_repo
 from db.repositories import platform_events as activity_repo
+from notifications import dispatcher as dispatcher_module
+from notifications import routing
 from notifications.contracts import SendResult
-from schemas.platform_events import PlatformEventAction
+from schemas.platform_events import (
+    PlatformActorKind,
+    PlatformEventAction,
+    PlatformEventOutcome,
+    PlatformEventRecord,
+)
 from schemas.runbooks import TriggerSource
 from sqlalchemy import Text, cast, func, select, update
 from sqlalchemy import event as sql_event
@@ -46,6 +53,51 @@ def _accepted(channel):
         receipt_kind={"SLACK": "SLACK_POSTED", "SNS": "SNS_ACCEPTED"}[channel],
         receipt_ref="provider-receipt",
     )
+
+
+@pytest.mark.parametrize("channel", ["SLACK", "SNS"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"state": "BLOCKED", "blocked_reason": reason}
+        for reason in (
+            routing.ACCOUNT_MISSING,
+            routing.ACCOUNT_INVALID,
+            routing.TARGET_ARN_INVALID,
+            routing.ARN_ACCOUNT_MISMATCH,
+            routing.OWNERSHIP_MISSING,
+            routing.OWNERSHIP_CONFLICT,
+            routing.CHANNEL_UNAVAILABLE,
+            routing.SECRET_MISSING,
+            routing.DESTINATION_INVALID,
+            routing.DESTINATION_CONFLICT,
+            routing.DESTINATION_SHARED,
+            dispatcher_module.ROUTE_CHANGED,
+            dispatcher_module.TENANT_NOT_FOUND,
+            dispatcher_module.TENANT_ACCOUNT_MISMATCH,
+        )
+    ] + [
+        {"state": "FAILED", "final_reason": reason, "last_category": category}
+        for reason in ("PERMANENT", "EXHAUSTED")
+        for category in ("TRANSIENT", "PERMANENT", "UNKNOWN")
+    ],
+)
+def test_aggregated_failure_reasons_satisfy_activity_record_contract(channel, failure):
+    deliveries = [
+        models.NotificationDelivery(channel=channel, **failure),
+        models.NotificationDelivery(
+            channel="SNS" if channel == "SLACK" else "SLACK", state="SUCCEEDED",
+        ),
+    ]
+    outcome, details = dispatcher_module._event_outcome(deliveries)
+    record = PlatformEventRecord(
+        action=PlatformEventAction.NOTIFICATION_SEND,
+        actor_kind=PlatformActorKind.SYSTEM,
+        outcome=outcome,
+        target_id=str(uuid.uuid4()),
+        details=details,
+    )
+    assert record.outcome is PlatformEventOutcome.FAILED
 
 
 def test_success_is_one_system_event_linked_back_to_the_incident(sessions, pg_engine):
@@ -315,9 +367,11 @@ def test_same_channel_discoverers_do_not_duplicate_activity(sessions, pg_engine)
     assert workers[0].discover("SLACK") == 1
     assert _activities(pg_engine, event_id) == []
     barrier = threading.Barrier(2, timeout=10)
+    hook_hits = []
 
     def after_select(_connection, _cursor, statement, _parameters, _context, _many):
         if "FROM notification_events" in statement and "EXISTS" in statement:
+            hook_hits.append(_connection)
             # INSERT 전 두 조회를 끝내야 늦은 발견자도 같은 사건을 고른다.
             barrier.wait()
 
@@ -331,6 +385,7 @@ def test_same_channel_discoverers_do_not_duplicate_activity(sessions, pg_engine)
                 barrier.abort()
     finally:
         sql_event.remove(pg_engine, "after_cursor_execute", after_select)
+    assert len(hook_hits) == 2
     assert sorted(created) == [0, 1]
     assert len(_activities(pg_engine, event_id)) == 1
 

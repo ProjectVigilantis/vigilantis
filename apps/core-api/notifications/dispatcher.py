@@ -36,6 +36,7 @@ UNKNOWN으로 회수해 재시도하고, max_attempts에 이르면 FAILED(EXHAUS
 채널은 제외한다. 옛 CHANNEL_NOT_CONFIGURED는 미선택과 설정 실패를 가를 수 없어 해당 사건은 기록하지
 않으며 이미 끝난 사건도 소급하지 않는다. FAILED는 전체 공급자 접수를 확인하지 못했다는 뜻이지
 미전달 증명이 아니다. 채널별 사실은 notification_deliveries에 남고 reason_code는 대표 사유 하나다.
+활동 로그 쓰기가 실패하면 공급자가 접수한 알림도 종결 상태 롤백과 임대 회수 뒤 재발송될 수 있다.
 
 Slack: 모든 처리 프로세스가 notification_lanes의 Slack 관문 1행을 공유한다. 간격 관문(available_at)은
 호출 중 임대 길이만큼 닫히고 보유자가 결과 확정 뒤 1초 간격으로 연다. 429 Retry-After는 cooldown_until에
