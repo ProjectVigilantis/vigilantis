@@ -47,6 +47,8 @@ from starlette.requests import Request
 
 A = PlatformEventAction
 OUT = PlatformEventOutcome
+#: 수집 회차 행의 details — 이 파일은 회차를 「요청 밖에서 시스템이 남기는 행」의 본보기로 쓴다
+RUN = {"region": "ap-northeast-2", "status": "SUCCESS"}
 # parametrize에 들어가는 값이라 무작위 UUID면 xdist 워커마다 테스트 ID가 달라져 병렬 실행이 멈춘다. 고정값을 쓴다.
 TENANT = "3d6f1b2a-8c4e-4f7a-b9d1-2e5c7a9f0b3d"
 
@@ -285,7 +287,7 @@ def test_unknown_action_is_rejected():
         {
             "action": A.COLLECTION_RUN,
             "actor_kind": PlatformActorKind.ANONYMOUS,
-            "details": {},
+            "details": RUN,
         },
         {
             "action": A.AUTH_LOGIN,
@@ -407,6 +409,43 @@ def test_verify_result_follows_the_outcome(action, outcome, details):
         details={"result": "READ_DENIED", "reason_code": "UnauthorizedOperation"},
     )
     assert (ok.details, failed.details["result"]) == ({"result": "OK"}, "READ_DENIED")
+
+
+_RUN_ROW = {"action": A.COLLECTION_RUN, "actor_kind": PlatformActorKind.SYSTEM, "tenant_id": None, "target_id": "run-0"}
+_SEOUL = "ap-northeast-2"
+
+
+@pytest.mark.parametrize("status", ["SUCCESS", "PARTIAL"])
+def test_collection_run_that_finished_is_a_success_whatever_it_missed(status):
+    # 일부 조회를 못 본 회차(PARTIAL)도 끝까지 돈 회차다 — 결과는 성공이고 상태가 그 차이를 싣는다
+    record = _record(**_RUN_ROW, details={"region": _SEOUL, "status": status})
+    assert record.details == {"region": _SEOUL, "status": status}
+    failed = _record(
+        **_RUN_ROW, outcome=OUT.FAILED,
+        details={"region": _SEOUL, "status": "FAILED", "reason_code": "AccessDenied"},
+    )
+    assert failed.details == {"reason_code": "AccessDenied", "region": _SEOUL, "status": "FAILED"}
+
+
+@pytest.mark.parametrize(
+    "outcome, details",
+    [
+        (OUT.SUCCEEDED, {}),  # 어느 리전의 어떤 회차인지 없이
+        (OUT.SUCCEEDED, {"region": _SEOUL}),
+        (OUT.SUCCEEDED, {"status": "SUCCESS"}),
+        (OUT.SUCCEEDED, {"region": _SEOUL, "status": "FAILED"}),  # 실패한 회차를 성공으로
+        (OUT.FAILED, {"region": _SEOUL, "status": "PARTIAL", "reason_code": "X"}),  # 끝까지 돈 회차를 실패로
+        (OUT.FAILED, {"region": _SEOUL, "status": "SUCCESS", "reason_code": "X"}),
+        (OUT.SUCCEEDED, {"region": _SEOUL, "status": "IN_PROGRESS"}),  # 끝나지 않은 회차
+        (OUT.SUCCEEDED, {"region": _SEOUL, "status": "DONE"}),  # 회차 상태 목록 밖
+        (OUT.SUCCEEDED, {"region": "Seoul Region", "status": "SUCCESS"}),
+        (OUT.SUCCEEDED, {"region": _SEOUL, "status": "SUCCESS", "account_id": "123456789012"}),  # 계정은 싣지 않는다
+        (OUT.SUCCEEDED, {"region": _SEOUL, "status": "PARTIAL", "error_summary": "{}"}),  # 실패 사유 지도도
+    ],
+)
+def test_collection_run_details_follow_the_run(outcome, details):
+    with pytest.raises(ValidationError):
+        _record(**_RUN_ROW, outcome=outcome, details=details)
 
 
 @pytest.mark.parametrize(
@@ -573,6 +612,7 @@ def test_outside_a_request_the_origin_columns_are_empty(db):
         A.COLLECTION_RUN,
         repo.SYSTEM,
         target_id=str(uuid.uuid4()),
+        details=RUN,
     )
     [stored] = _rows(db, row.event_id)
     assert (stored.request_id, stored.source_ip, stored.user_agent) == (
@@ -580,20 +620,20 @@ def test_outside_a_request_the_origin_columns_are_empty(db):
         None,
         None,
     )
-    assert stored.details == {}
+    assert stored.details == RUN
 
 
 def test_contract_violation_writes_nothing(db):
     before = db.scalar(text("SELECT count(*) FROM platform_events"))
     with pytest.raises(ValidationError):
-        repo.record_platform_event(db, A.COLLECTION_RUN, repo.ANONYMOUS)
+        repo.record_platform_event(db, A.COLLECTION_RUN, repo.ANONYMOUS, details=RUN)
     assert db.scalar(text("SELECT count(*) FROM platform_events")) == before
 
 
 def test_same_transaction_record_rolls_back_with_the_change(db):
     savepoint = db.begin_nested()
     row = repo.record_platform_event(
-        db, A.COLLECTION_RUN, repo.SYSTEM, target_id="run-1"
+        db, A.COLLECTION_RUN, repo.SYSTEM, target_id="run-1", details=RUN
     )
     event_id = row.event_id
     savepoint.rollback()
@@ -602,7 +642,7 @@ def test_same_transaction_record_rolls_back_with_the_change(db):
 
 def test_update_and_delete_are_rejected(db):
     row = repo.record_platform_event(
-        db, A.COLLECTION_RUN, repo.SYSTEM, target_id="run-2"
+        db, A.COLLECTION_RUN, repo.SYSTEM, target_id="run-2", details=RUN
     )
     for statement in (
         "UPDATE platform_events SET action = 'X' WHERE event_id = :id",
@@ -773,7 +813,7 @@ def test_detached_contract_violation_is_raised_and_writes_nothing(pg_engine, cap
 def test_occurred_at_can_follow_the_source_row(db):
     at = datetime(2026, 11, 6, 5, 0, tzinfo=UTC)
     row = repo.record_platform_event(
-        db, A.COLLECTION_RUN, repo.SYSTEM, target_id="run-4", occurred_at=at
+        db, A.COLLECTION_RUN, repo.SYSTEM, target_id="run-4", occurred_at=at, details=RUN
     )
     [stored] = _rows(db, row.event_id)
     assert stored.occurred_at == at

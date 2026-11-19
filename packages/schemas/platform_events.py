@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_valid
 
 from .api.auth import AccountType, FeaturePermission, PlatformRole
 from .api.tenants import TenantVerificationResult
+from .collections import CollectionRunStatus
 
 #: action 칸 길이(varchar). 행동 이름이 이보다 길면 계약 테스트가 깨진다.
 ACTION_MAX_LENGTH = 64
@@ -40,6 +41,8 @@ PATH_MAX_LENGTH = 512
 _REASON_PATTERN = r"^[A-Za-z0-9_.:-]{1,128}$"
 #: 상태 · 역할 · 등급 같은 짧은 enum 값.
 _STATE_PATTERN = r"^[A-Za-z0-9_]{1,64}$"
+#: AWS 리전 이름(collection_runs.region 칸 길이와 같다).
+_REGION_PATTERN = r"^[a-z0-9-]{1,32}$"
 
 
 @unique
@@ -248,6 +251,27 @@ class TenantVerifyDetails(PlatformEventDetails):
             raise ValueError("연결 확인은 결과가 OK 일 때만 성공입니다")
 
 
+class CollectionRunDetails(PlatformEventDetails):
+    """수집 회차 하나가 어떻게 끝났나 — 어느 리전의 회차였고 회차 상태가 무엇인가.
+
+    회차 상태는 결과보다 잘다. 일부 조회를 보지 못한 회차(PARTIAL)도 끝까지 돌아 적재한 회차라 결과는
+    성공이고, 무엇을 왜 못 봤는지는 collection_runs.error_summary 에 있다(여기 옮기지 않는다). 리전 전체를
+    수집하지 못한 회차(FAILED)만 실패이고 그때 reason_code 는 AWS 오류 코드나 예외 클래스명이다.
+    계정 ID 는 싣지 않는다 — 회차 행(collection_runs)에 있다.
+    """
+
+    region: str = Field(pattern=_REGION_PATTERN)
+    status: CollectionRunStatus
+
+    def check_outcome(self, outcome: "PlatformEventOutcome") -> None:
+        if self.status is CollectionRunStatus.IN_PROGRESS:
+            raise ValueError("끝난 수집 회차만 남깁니다")
+        if (outcome is PlatformEventOutcome.FAILED) != (
+            self.status is CollectionRunStatus.FAILED
+        ):
+            raise ValueError("수집 회차는 상태가 FAILED 일 때만 실패입니다")
+
+
 class AccessDetails(PlatformEventDetails):
     """권한 거절이 일어난 요청. 경로만 싣는다 — 질의 문자열 · 본문은 싣지 않는다."""
 
@@ -382,7 +406,9 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
         _C.SUPPORT, {_S}, {_USER}, _T.INQUIRY, TransitionDetails
     ),
     _A.INQUIRY_NOTE_ADD: _spec(_C.SUPPORT, {_S}, {_USER}, _T.INQUIRY),
-    _A.COLLECTION_RUN: _spec(_C.COLLECTION, {_S, _F}, {_SYSTEM}, _T.COLLECTION_RUN),
+    _A.COLLECTION_RUN: _spec(
+        _C.COLLECTION, {_S, _F}, {_SYSTEM}, _T.COLLECTION_RUN, CollectionRunDetails
+    ),
     _A.NOTIFICATION_SEND: _spec(_C.NOTIFICATION, {_S, _F}, {_SYSTEM}, _T.NOTIFICATION),
 }
 

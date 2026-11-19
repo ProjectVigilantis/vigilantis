@@ -130,6 +130,31 @@ def finish_collection_run(
     return result.rowcount == 1
 
 
+def previous_finished_run_status(
+    db: Session, *, region: str, tenant_id: Optional[str], exclude_run_id: str
+) -> Optional[CollectionRunStatus]:
+    """같은 (소유, 리전)에서 이 회차를 뺀, 끝난 회차 가운데 가장 최근 것의 상태. 없으면 ``None``.
+
+    수집 회차의 활동 로그(#589 B)가 「상태가 직전과 달라졌는가」를 볼 때 쓴다. 끝나지 않은
+    (``IN_PROGRESS``) 회차는 기준이 아니다 — 도중에 죽어 그대로 남은 회차가 기준이 되면 그 뒤의 전환을
+    읽을 수 없다. 소유는 ``_owned_by`` 그대로다(``None`` 은 소속 없는 legacy 회차끼리만 견준다).
+    「가장 최근」은 리전별 최신 회차와 같은 순서(시작 시각 · ID)라 같은 인덱스를 탄다.
+    """
+    stmt = (
+        select(models.CollectionRun.status)
+        .where(
+            models.CollectionRun.region == region,
+            models.CollectionRun.collection_run_id != exclude_run_id,
+            models.CollectionRun.status != CollectionRunStatus.IN_PROGRESS,
+        )
+        .order_by(
+            models.CollectionRun.started_at.desc(), models.CollectionRun.collection_run_id.desc()
+        )
+        .limit(1)
+    )
+    return db.execute(_owned_by(stmt, models.CollectionRun.tenant_id, tenant_id)).scalar_one_or_none()
+
+
 def latest_collection_run_per_region(
     db: Session,
     regions: Optional[Sequence[str] | MonitoredRegions] = None,
