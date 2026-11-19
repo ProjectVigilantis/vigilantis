@@ -191,16 +191,17 @@ def test_excluded_and_historical_notifications_are_not_logged(sessions, pg_engin
 
 
 @pytest.mark.parametrize(
-    "delivery_tenant,expected",
+    "incident_tenant,delivery_tenant,expected",
     [
-        (d.TENANT_A, d.TENANT_A),
-        (uuid.UUID(d.TENANT_A).hex, d.TENANT_A),
-        (d.TENANT_B, None),
-        ("legacy-tenant", None),
+        (d.TENANT_A, d.TENANT_A, d.TENANT_A),
+        (d.TENANT_A, uuid.UUID(d.TENANT_A).hex, d.TENANT_A),
+        (d.TENANT_A, d.TENANT_B, None),
+        (d.TENANT_A, "legacy-tenant", None),
+        (None, d.TENANT_A, None),
     ],
 )
 def test_tenant_conflicts_are_central_only_but_unbound_channels_are_not_conflicts(
-    sessions, pg_engine, delivery_tenant, expected,
+    sessions, pg_engine, incident_tenant, delivery_tenant, expected,
 ):
     dispatcher = d.make_dispatcher(
         sessions, d.registry(d.entry(d.TENANT_A, d.ACCOUNT_A, slack="SLACK_A")), slack=d.SlackWire(),
@@ -209,6 +210,12 @@ def test_tenant_conflicts_are_central_only_but_unbound_channels_are_not_conflict
     incident_id, *intake_rows = d._seeded_high_intake(sessions, d.ACCOUNT_A)
     try:
         with sessions() as db:
+            db.execute(
+                update(models.Incident)
+                .where(models.Incident.incident_id == incident_id)
+                .values(tenant_id=incident_tenant)
+            )
+            db.commit()
             [event] = events_repo.list_by_incident(db, incident_id)
         dispatcher.discover()
         claim = dispatcher._claim("SLACK")
@@ -298,6 +305,34 @@ def test_activity_insert_failure_rolls_back_the_terminal_transition(
         dispatcher._finish(claim, _accepted("SNS"))
         assert len(_activities(pg_engine, event_id)) == 1
         assert d.rows(pg_engine, event_id)["SNS"].state == "FAILED"
+
+
+def test_same_channel_discoverers_do_not_duplicate_activity(sessions, pg_engine):
+    routes = d.registry(d.entry(d.TENANT_A, d.ACCOUNT_A, slack="SLACK_A", sns=d.TOPIC_A))
+    workers = [d.make_dispatcher(sessions, routes) for _ in range(2)]
+    d.activate(workers[0], pg_engine)
+    event_id = d.commit_event(sessions)
+    assert workers[0].discover("SLACK") == 1
+    assert _activities(pg_engine, event_id) == []
+    barrier = threading.Barrier(2, timeout=10)
+
+    def after_select(_connection, _cursor, statement, _parameters, _context, _many):
+        if "FROM notification_events" in statement and "EXISTS" in statement:
+            # INSERT 전 두 조회를 끝내야 늦은 발견자도 같은 사건을 고른다.
+            barrier.wait()
+
+    sql_event.listen(pg_engine, "after_cursor_execute", after_select)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(worker.discover, "SNS") for worker in workers]
+            try:
+                created = [future.result(timeout=20) for future in futures]
+            finally:
+                barrier.abort()
+    finally:
+        sql_event.remove(pg_engine, "after_cursor_execute", after_select)
+    assert sorted(created) == [0, 1]
+    assert len(_activities(pg_engine, event_id)) == 1
 
 
 @pytest.mark.parametrize("terminal_path", ["discover", "finish", "recover_batch"])
