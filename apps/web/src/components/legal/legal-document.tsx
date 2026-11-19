@@ -34,7 +34,7 @@ export function LegalDocument({
           </Link>
           <Link
             href={LOGIN_PATH}
-            className="bg-primary inline-flex h-10 items-center rounded-md px-4 text-sm font-semibold text-white hover:bg-primary/90"
+            className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground focus-visible:ring-ring rounded-md transition-colors focus-visible:ring-2 focus-visible:outline-none inline-flex h-10 items-center px-3 text-sm font-semibold"
           >
             로그인
           </Link>
@@ -56,7 +56,7 @@ export function LegalDocument({
           <ol className="gap-x-6 text-sm sm:columns-2">
             {sections.map((s) => (
               <li key={s.id} className="mb-1.5 break-inside-avoid">
-                <a href={`#${s.id}`} className="text-primary hover:underline">
+                <a href={`#${s.id}`} className="text-link hover:underline">
                   {s.title}
                 </a>
               </li>

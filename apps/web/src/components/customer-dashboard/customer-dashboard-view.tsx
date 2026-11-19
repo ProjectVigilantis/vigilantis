@@ -139,7 +139,7 @@ export function CustomerDashboardView({
               </TipBox>
             </span>
             {queue !== null && queue.length > 0 ? (
-              <Link href={bannerHref} className="text-primary inline-flex shrink-0 items-center gap-0.5 font-semibold hover:underline">
+              <Link href={bannerHref} className="text-link inline-flex shrink-0 items-center gap-0.5 font-semibold hover:underline">
                 보기
                 <ArrowRight aria-hidden className="size-3.5" />
               </Link>
@@ -189,7 +189,7 @@ export function CustomerDashboardView({
                 {aiLinks.map((l, n) => (
                   <span key={l.axis}>
                     {n > 0 ? ' · ' : null}
-                    <Link href={l.href} className="text-primary font-semibold hover:underline">
+                    <Link href={l.href} className="text-link font-semibold hover:underline">
                       {l.axis === 'security' ? '보안' : '자산'} {l.count}건
                     </Link>
                   </span>

@@ -35,7 +35,7 @@ const AXES: readonly { value: MonitoringAxis; label: string }[] = [
 
 function AxisSwitch({ axis, onChange }: { axis: MonitoringAxis; onChange: (next: MonitoringAxis) => void }) {
   return (
-    <div role="group" aria-label="관제 축" className="inline-flex rounded-lg border p-0.5">
+    <div role="group" aria-label="관제 축" className="inline-flex gap-1">
       {AXES.map(({ value, label }) => (
         <button
           key={value}
@@ -43,8 +43,8 @@ function AxisSwitch({ axis, onChange }: { axis: MonitoringAxis; onChange: (next:
           aria-pressed={axis === value}
           onClick={() => onChange(value)}
           className={cn(
-            'focus-visible:ring-ring/50 h-8 rounded-md px-4 text-sm font-semibold transition-colors focus-visible:ring-2 focus-visible:outline-none',
-            axis === value ? 'bg-primary text-white' : 'text-muted-foreground hover:text-foreground',
+            'focus-visible:ring-ring/50 h-8 rounded-md px-2 text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none',
+            axis === value ? 'text-foreground font-semibold' : 'text-foreground-secondary hover:text-foreground',
           )}
         >
           {label}

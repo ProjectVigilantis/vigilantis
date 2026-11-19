@@ -44,6 +44,7 @@
   --color-card: var(--card);
   /* DESIGN.md 확장 토큰 */
   --color-foreground-secondary: var(--foreground-secondary);
+  --color-link: var(--link);
   --color-shell: var(--shell);
   --color-shell-nav: var(--shell-nav);
   --color-gridline: var(--gridline);
@@ -88,6 +89,8 @@
   --popover-foreground: #0f1b2d;
   --primary: #1d5bd8;
   --primary-foreground: #ffffff;
+  /* 문장 안 링크 글자(text-link). DESIGN.md link */
+  --link: #1d5bd8;
   --secondary: #eef1f5;
   --secondary-foreground: #0f1b2d;
   --muted: #eef1f5;
@@ -170,6 +173,8 @@
   --popover-foreground: #e6ebf2;
   --primary: #2563eb;
   --primary-foreground: #ffffff;
+  /* 야간 primary(#2563eb)는 카드 위 3.3:1이라 글자에 쓰지 못한다. 링크는 밝은 파랑 */
+  --link: #7cb0ff;
   --secondary: #17233a;
   --secondary-foreground: #e6ebf2;
   --muted: #17233a;

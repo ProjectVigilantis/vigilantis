@@ -14,6 +14,7 @@ colors:
   gridline: "#e8ecf1"
   axis: "#c5cdd8"
   primary: "#1d5bd8"
+  link: "#1d5bd8"
   primary-soft: "#e7effd"
   on-primary: "#ffffff"
   on-primary-soft: "#1747a6"
@@ -60,6 +61,7 @@ colors:
   dark-gridline: "#1d2a40"
   dark-axis: "#33415a"
   dark-primary: "#2563eb"
+  dark-link: "#7cb0ff"
   dark-primary-soft: "#15274a"
   dark-on-primary-soft: "#7cb0ff"
   dark-shell-base: "#060c17"
@@ -101,6 +103,11 @@ typography:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif"
     fontSize: "0.875rem"
     fontWeight: 400
+    lineHeight: "1.25rem"
+  button:
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif"
+    fontSize: "0.875rem"
+    fontWeight: 600
     lineHeight: "1.25rem"
   body-sm:
     fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif"
@@ -193,35 +200,29 @@ components:
     typography: "{typography.body-sm}"
     height: "32px"
     padding: "0"
-  button-primary:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.on-primary}"
-    typography: "{typography.body-md}"
-    rounded: "{rounded.sm}"
-    height: "40px"
-    padding: "0 16px"
-  button-outline:
+  button:
+    backgroundColor: "transparent"
+    textColor: "{colors.on-surface-secondary}"
+    hoverTextColor: "{colors.on-surface}"
+    typography: "{typography.button}"
+    rounded: "{rounded.md}"
+    height: "32px"
+    padding: "0 10px"
+  button-danger:
+    backgroundColor: "transparent"
+    textColor: "{colors.danger-text}"
+    textOpacity: 0.8
+    hoverTextColor: "{colors.danger-text}"
+    typography: "{typography.button}"
+    rounded: "{rounded.md}"
+    height: "32px"
+    padding: "0 10px"
+  filter-chip-active:
     backgroundColor: "transparent"
     textColor: "{colors.on-surface}"
-    borderColor: "{colors.outline}"
-    typography: "{typography.body-md}"
     rounded: "{rounded.sm}"
-    height: "36px"
-    padding: "0 14px"
-  button-danger:
-    backgroundColor: "{colors.danger-action}"
-    textColor: "{colors.on-primary}"
-    typography: "{typography.body-md}"
-    rounded: "{rounded.sm}"
-    height: "36px"
-    padding: "0 14px"
-  filter-chip-active:
-    backgroundColor: "{colors.primary-soft}"
-    textColor: "{colors.on-primary-soft}"
-    borderColor: "{colors.primary}"
-    rounded: "{rounded.pill}"
     height: "32px"
-    padding: "0 12px"
+    padding: "0 8px"
   card-panel:
     backgroundColor: "{colors.surface-elevated}"
     textColor: "{colors.on-surface}"
@@ -269,7 +270,7 @@ components:
 
 Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이다. 운영자가 화면에서 얻어야 하는 것은 두 가지다. 지금 문제가 있는가, 그리고 그 판단의 근거가 얼마나 새것인가.
 
-화면은 두 층으로 나뉜다. 바깥은 남색 셸(상단바와 사이드바)이고, 안쪽은 차가운 회백색 작업 영역이다. 셸은 화면의 틀을 잡고, 작업 영역은 숫자와 표와 그래프를 읽는 자리다. 기본은 주간(밝은) 모드이고, 야간 근무와 관제실 벽면 화면을 위한 야간 모드를 함께 둔다.
+화면은 두 층으로 나뉜다. 바깥은 남색 셸(상단바와 사이드바)이고, 안쪽은 차가운 회백색 작업 영역이다. 셸은 화면의 틀을 잡고, 작업 영역은 숫자와 표와 그래프를 읽는 자리다. 기본은 야간(어두운) 모드이고(2026-11-19 PM 결정, 이전에는 주간이 기본이었다), 밝은 곳에서 쓸 주간 모드를 함께 둔다.
 
 이 체계는 Evreghen Command Center(아래 출처)에서 출발했다. 어두운 셸과 밝은 작업 영역의 두 층 구조, 시스템 글꼴, 4px 간격 체계는 원작에서 가져왔다. 주황 강조색, 크림색 바탕, 반투명 셸은 관제 목적에 맞지 않아 바꿨다.
 
@@ -280,7 +281,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 | 가족 | 쓰는 곳 | 쓰지 않는 곳 |
 | --- | --- | --- |
 | 바탕(차가운 회색과 남색 글자) | 페이지, 카드, 표, 글자, 선 | 상태 표시 |
-| 파랑(`primary`, `data`) | 버튼, 선택된 필터, 링크, 포커스, 그래프의 선과 막대 | 상태 표시 |
+| 파랑(`primary`, `link`, `data`) | 문장 안 링크, 포커스, 체크박스, 읽지 않음 점, 그래프의 선과 막대 | 버튼, 탭, 필터 칩(글자색과 굵기로만 구분한다), 상태 표시 |
 | 상태 색(`status-*`) | 상태 배지, 상태 점, 히트맵 칸, 경고 배너 | 버튼, 메뉴, 장식 |
 
 주황과 빨강을 강조색으로 쓰지 않는 이유는 관제 화면에서 그 색이 이미 경고를 뜻하기 때문이다. 버튼과 메뉴가 주황이면 진짜 경고가 화면에 묻힌다. 상태 색이 상태 표시에만 남아 있어야, 화면에 빨강이 보일 때 그것이 실제 문제라는 뜻이 된다.
@@ -316,8 +317,14 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 | `danger-text` `#b42323` / `surface-elevated` | 6.55:1 |
 | `dark-danger-text` `#f48a8a` / `dark-surface-elevated` | 7.27:1 |
 | 흰 글자 / `danger-action` `#b42323`(두 모드 같음) | 6.55:1 |
+| `link` `#1d5bd8` / `background` | 5.53:1 |
+| `dark-link` `#7cb0ff` / `dark-surface-elevated` | 7.82:1 |
+| 위험 버튼 평소(`danger-text` 80%) / `surface-elevated` | 4.61:1 |
+| 위험 버튼 평소(`dark-danger-text` 80%) / `dark-surface-elevated` | 5.09:1 |
 
 위험 경고 · 오류 글자(`danger-text`)와 위험 버튼 칠(`danger-action`)은 따로 둔다. 버튼 칠은 흰 글자가 읽히도록 어두워야 하고, 야간 글자는 어두운 카드 위에서 읽히도록 밝아야 한다. 야간에 버튼 칠 값을 글자에 쓰면 `dark-surface-elevated`와 2.63:1이다.
+
+링크 글자(`link`)도 `primary`와 따로 둔다. 야간 `dark-primary` `#2563eb`는 카드 위에서 3.3:1이라 글자로 읽히지 않는다.
 
 색을 새로 고를 때도 대비를 측정한 뒤 넣는다. 눈으로 판단하지 않는다.
 
@@ -325,7 +332,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 야간 모드는 주간 색을 뒤집은 것이 아니라, 같은 역할에 어두운 바탕용 값을 따로 고른 것이다(`dark-*` 토큰). 상태 원색 네 가지(`status-good`, `status-warning`, `status-serious`, `status-critical`)는 두 모드에서 같고, 배지 바탕과 글자, 위험 글자, 중립 회색, 히트맵 칸, 데이터 파랑은 모드마다 다르다.
 
-모드 전환은 사이드바의 설정에서 한다. 관제실 벽면 화면처럼 오래 켜 두는 화면은 야간 모드를 기본으로 띄울 수 있다.
+모드 전환은 사이드바의 설정에서 한다. 고른 모드는 그 브라우저에 남고, 고른 적이 없으면 야간으로 연다.
 
 ## 글꼴
 
@@ -359,7 +366,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 ## 모양
 
-버튼과 입력은 6px, 메뉴 항목은 8px, 카드는 12px, 배지와 필터 칩은 완전히 둥글게 한다. 그래프 막대는 값 쪽 끝만 4px 둥글게 하고 기준선 쪽은 각지게 둔다. 히트맵 칸은 3px이다.
+입력은 6px, 버튼과 메뉴 항목은 8px(버튼은 바탕이 없어 포커스 링에서만 보인다), 카드는 12px, 배지는 완전히 둥글게 한다. 그래프 막대는 값 쪽 끝만 4px 둥글게 하고 기준선 쪽은 각지게 둔다. 히트맵 칸은 3px이다.
 
 ## 컴포넌트
 
@@ -371,7 +378,11 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 ### 버튼
 
-주 동작은 파랑 칠 버튼(`button-primary`) 하나만 둔다. 보조 동작은 테두리 버튼(`button-outline`)이다. 되돌릴 수 없는 동작(고객 정지, 삭제)은 빨강 버튼(`button-danger`)이며, 화면 아래 "위험 작업" 카드 안에 따로 모으고 확인 대화 상자를 거친다.
+버튼은 바탕과 테두리로 감싸지 않는다(2026-11-19 PM 결정, 랜딩과 같은 모양). 평소에는 보조 글자색이고, 마우스를 올리면 기본 글자색으로 밝아진다(`button`). 이전에는 주 동작을 파랑으로 칠하고 보조 동작에 테두리를 둘렀다. 되돌릴 수 없는 동작(고객 정지, 삭제)은 위험 글자색 버튼(`button-danger`)이며, 평소에는 위험 글자색을 80%로 흐리게 두었다가 마우스를 올리면 100%로 밝힌다. 이 버튼은 화면 아래 "위험 작업" 카드 안에 따로 모으고 확인 대화 상자를 거친다.
+
+탭, 필터 칩, 보기 전환(관제 축, 기간, 인시던트 프리셋), 체크박스 필터의 글자도 같다. 고른 것은 기본 글자색에 굵게, 나머지는 보조 글자색으로 두고 바탕과 테두리를 칠하지 않는다. 사이드바 메뉴와 같은 규칙이다. 글자색만 바뀌므로 키보드 포커스는 반드시 포커스 링(`focus`)으로 보여 준다.
+
+문장 안의 링크(약관의 다른 문서, 고객사 이름 등)는 버튼이 아니므로 파랑 글자(`link`)로 두고 마우스를 올리면 밑줄을 긋는다. 문장 밖에 따로 선 조작(더 보기 등)은 버튼과 같은 글자 모양이다.
 
 ### 숫자 카드
 
@@ -415,7 +426,7 @@ Vigilantis는 고객 AWS 계정을 하루 24시간 지켜보는 관제 화면이
 
 지킬 것
 
-- 파랑은 조작과 데이터에, 상태 색은 상태에만 쓴다.
+- 파랑은 링크, 포커스, 데이터에, 상태 색은 상태에만 쓴다. 버튼과 필터는 글자색으로 구분한다.
 - 상태는 색과 글자를 함께 보여 준다.
 - 화면의 숫자가 언제 것인지(갱신 시각, 마지막 확인 시각)를 늘 함께 보여 준다.
 - 새 색은 대비를 측정한 뒤 넣고, 주간과 야간 값을 둘 다 정한다.

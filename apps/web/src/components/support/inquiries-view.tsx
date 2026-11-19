@@ -91,7 +91,7 @@ export function InquiriesView({ items, focusId }: { items: InquiryItem[]; focusI
                       <dd>
                         <Link
                           href={`${TENANTS_PATH}/${encodeURIComponent(item.tenant_id)}`}
-                          className="text-primary font-semibold hover:underline"
+                          className="text-link font-semibold hover:underline"
                         >
                           {item.tenant_name}
                         </Link>

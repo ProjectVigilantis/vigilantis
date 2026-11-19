@@ -59,7 +59,7 @@ export function GuardDutyGuidance({ tenant }: { tenant: TenantDetail }) {
           href={GUARDDUTY_GUIDE_PATH}
           target="_blank"
           rel="noreferrer"
-          className="text-primary text-[13px] hover:underline"
+          className="text-link text-[13px] hover:underline"
         >
           켜는 방법 안내 페이지
         </Link>
