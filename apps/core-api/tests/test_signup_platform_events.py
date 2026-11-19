@@ -40,10 +40,10 @@ DECIDE = PlatformEventAction.SIGNUP_REQUEST_DECIDE
 
 @pytest.fixture()
 def post(client_pg_anon, allowed_origin):
-    def _post(key=None):
+    def _post(key=None, email=None):
         return client_pg_anon.post(
             BASE,
-            json=BODY,
+            json=BODY if email is None else {**BODY, "email": email},
             headers={"Origin": allowed_origin, "Idempotency-Key": key or str(uuid.uuid4())},
         )
 
@@ -71,7 +71,8 @@ def event_count(db, action) -> int:
 
 
 def seed(post) -> str:
-    return post().json()["request_id"]
+    # 같은 이메일의 미결 신청은 새로 만들지 않는다. 시드마다 다른 신청자로 낸다
+    return post(email=f"kim-{uuid.uuid4().hex[:8]}@example.com").json()["request_id"]
 
 
 def put(client, rid, status, reason=None):

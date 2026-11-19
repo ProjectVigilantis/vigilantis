@@ -34,6 +34,28 @@ def get_by_key(db: Session, idempotency_key: str) -> models.SignupRequest | None
     ).one_or_none()
 
 
+# 같은 이메일로 새 신청을 받지 않는 상태 — 반려된 신청만 다시 낼 수 있다
+_OPEN_STATUSES = (SignupRequestStatus.NEW, SignupRequestStatus.IN_REVIEW, SignupRequestStatus.APPROVED)
+
+
+def lock_email(db: Session, email: str) -> None:
+    """같은 이메일(대소문자 무시)의 접수를 트랜잭션 끝까지 한 줄로 세운다. 행이 없어도 잠근다."""
+    db.execute(select(func.pg_advisory_xact_lock(func.hashtext(func.lower(email)))))
+
+
+def find_open_by_email(db: Session, email: str) -> models.SignupRequest | None:
+    """같은 이메일(대소문자 무시)로 처리 중이거나 승인된 신청 중 가장 이른 것."""
+    return db.scalars(
+        select(models.SignupRequest)
+        .where(
+            func.lower(models.SignupRequest.email) == email.lower(),
+            models.SignupRequest.status.in_(_OPEN_STATUSES),
+        )
+        .order_by(models.SignupRequest.created_at, models.SignupRequest.request_id)
+        .limit(1)
+    ).one_or_none()
+
+
 def insert(
     db: Session,
     *,

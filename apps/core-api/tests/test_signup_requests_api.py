@@ -129,8 +129,38 @@ def test_same_key_different_payload_is_409_and_changes_nothing(post, db, change)
     assert count(db, models.OperatorNotification) == notifications
 
 
-def test_different_keys_create_separate_requests_even_for_same_email(post, db):
-    ids = {post().json()["request_id"] for _ in range(2)}
+def test_same_email_with_a_new_key_returns_the_open_request_without_new_row_or_notification(post, db):
+    # 공개 접수 도배 방지 — 대소문자만 다른 이메일도 같은 신청자로 본다. 응답은 처음 접수와 같은 202 다
+    first = post()
+    notifications = count(db, models.OperatorNotification)
+    again = post({**BODY, "email": "kim@example.COM", "company_name": "Other"})
+    assert again.status_code == 202 and again.json() == first.json()
+    assert count(db, models.SignupRequest) == 1
+    assert count(db, models.OperatorNotification) == notifications
+
+
+@pytest.mark.parametrize("status", [SignupRequestStatus.IN_REVIEW, SignupRequestStatus.APPROVED])
+def test_in_review_or_approved_email_is_not_taken_again(post, db, status):
+    first = post()
+    row = db.get(models.SignupRequest, first.json()["request_id"])
+    row.status = status
+    db.commit()
+    assert post().json() == first.json()
+    assert count(db, models.SignupRequest) == 1
+
+
+def test_rejected_email_can_apply_again(post, db):
+    first = post()
+    row = db.get(models.SignupRequest, first.json()["request_id"])
+    row.status, row.rejected_reason = SignupRequestStatus.REJECTED, "정보 부족"
+    db.commit()
+    again = post()
+    assert again.status_code == 202 and again.json() != first.json()
+    assert count(db, models.SignupRequest) == 2
+
+
+def test_different_emails_create_separate_requests(post, db):
+    ids = {post({**BODY, "email": f"kim{n}@example.com"}).json()["request_id"] for n in range(2)}
     assert len(ids) == 2
 
 
@@ -216,7 +246,9 @@ def test_database_error_is_not_classified_or_revealed(db, monkeypatch):
 
 
 def seed(post, **overrides) -> str:
-    return post({**BODY, **overrides}).json()["request_id"]
+    # 같은 이메일의 미결 신청은 새로 만들지 않는다. 시드마다 다른 신청자로 낸다
+    email = f"kim-{uuid.uuid4().hex[:8]}@example.com"
+    return post({**BODY, "email": email, **overrides}).json()["request_id"]
 
 
 def test_list_is_newest_first_with_full_item(client_pg, post, db):
@@ -424,8 +456,8 @@ def test_decision_preserves_actor_email_and_is_private(
     assert (stored.actor_user_id, stored.actor_email, stored.outcome.value) == (
         platform_session.user_id, email, outcome,
     )
-    key = db.get(models.SignupRequest, rid).idempotency_key
-    assert post(key=key).json() == {"request_id": rid}
+    row = db.get(models.SignupRequest, rid)
+    assert post({**BODY, "email": row.email}, key=row.idempotency_key).json() == {"request_id": rid}
     actor.email = "changed-after-decision@example.com"
     db.get(models.SignupRequest, rid).company_name = "Renamed after decision"
     db.commit()

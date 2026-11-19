@@ -72,12 +72,23 @@ def _same_submission(row: models.SignupRequest, body: SignupRequestCreate) -> bo
 
 
 def create(db: Session, idempotency_key: UUID, body: SignupRequestCreate) -> SignupRequestAccepted:
-    """익명 접수. 키는 UUIDv4 이며 정본 문자열로 저장한다. 신규와 재시도 모두 같은 응답이다."""
+    """익명 접수. 키는 UUIDv4 이며 정본 문자열로 저장한다. 신규와 재시도 모두 같은 응답이다.
+
+    같은 이메일(대소문자 무시)로 처리 중이거나 승인된 신청이 있으면 새로 만들지 않고 그 신청의 202 를 돌려준다.
+    공개 접수 도배를 막기 위해서다. 응답을 바꾸지 않아 어떤 이메일이 신청했는지 밖에서 가릴 수 없다.
+    반려된 신청만 있으면 다시 받는다. 같은 키의 재시도는 이 검사를 건너뛰고 아래 재시도 판정(409 포함)을 따른다.
+    """
     now = datetime.now(UTC)
+    key = str(idempotency_key)
     try:
+        repo.lock_email(db, body.email)
+        open_request = repo.find_open_by_email(db, body.email)
+        if open_request is not None and open_request.idempotency_key != key and repo.get_by_key(db, key) is None:
+            db.rollback()  # 잠금을 바로 푼다
+            return SignupRequestAccepted(request_id=open_request.request_id)
         row, created = repo.insert(
             db,
-            idempotency_key=str(idempotency_key),
+            idempotency_key=key,
             company_name=body.company_name,
             contact_name=body.contact_name,
             email=body.email,

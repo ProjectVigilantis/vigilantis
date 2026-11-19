@@ -116,6 +116,33 @@ def test_same_key_different_payload_race_has_one_winner(sessions):
     ] * (WORKERS - 1)
 
 
+def test_different_keys_same_email_race_creates_one_request(sessions):
+    # 이메일 잠금이 관문이다 — 키가 모두 달라 재시도 키 유일 제약은 막지 못한다
+    factory, keys = sessions
+    run_keys = [uuid.uuid4() for _ in range(WORKERS)]
+    keys.extend(str(k) for k in run_keys)
+    email = f"race-{uuid.uuid4().hex[:8]}@example.com"
+    barrier = threading.Barrier(WORKERS)
+    results: list = [None] * WORKERS
+
+    def run(i):
+        with factory() as session:
+            barrier.wait()
+            results[i] = service.create(session, run_keys[i], body(email=email.upper() if i % 2 else email)).request_id
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(WORKERS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    with factory() as session:
+        rows = session.scalars(
+            select(models.SignupRequest).where(func.lower(models.SignupRequest.email) == email)
+        ).all()
+    assert len(rows) == 1
+    assert set(results) == {rows[0].request_id}
+
+
 @pytest.fixture()
 def admin_db(pg_engine):
     """관리자 세션 · 사용자 행은 지울 수 없는 이력과 얽혀 있어 이 테스트 전용 DB 를 만들고 그 DB 만 지운다."""
