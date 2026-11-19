@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from enum import Enum
 from ipaddress import ip_address, ip_network
 from uuid import UUID
@@ -16,18 +16,32 @@ from db import models
 from db.repositories import audit as audit_repo
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import report_drafts as drafts_repo
+from db.repositories import report_notifications
 from evidence_export import (
-    ExportFile, ExportFormat, MEDIA_TYPES, build_document, code_span, json_fence,
+    MEDIA_TYPES,
+    ExportFile,
+    ExportFormat,
+    build_document,
+    code_span,
+    json_fence,
 )
 from exceptions import ApiError
+from pydantic import ValidationError
 from schemas.api.audit import AuditEventAction
 from schemas.api.errors import ErrorCode
 from schemas.api.incidents import IncidentStatus, ResolutionJudgement
 from schemas.api.report_draft import (
-    ReportDraftDocument, ReportEvidenceFlags, ReportFact, ReportFacts,
+    ReportDraftDocument,
+    ReportEvidenceFlags,
+    ReportFact,
+    ReportFacts,
     ReportHumanField,
 )
+from schemas.guardduty import GuardDutyFactStatus
+from schemas.platform_events import PlatformEventDetails, PlatformEventOutcome
 from schemas.runbooks import TriggerSource
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 REPORT_FILE_MAX_BYTES = 2 * 1024 * 1024
@@ -38,6 +52,8 @@ NOTICE = (
     "실행 예약·완료 시각과 조치 결과, 조치 결과·관제 종료와 사고 처리·신고 완료는 각각 구분합니다. "
     "탐지·관측 기록과 피해 확정, 관측 시각과 사람의 사고 인지 시점도 구분합니다. "
     "신원·자유문은 입력에서 제외했고 IP·ARN·계정 ID는 포함될 수 있습니다. "
+    "알림 발송 집계는 공급자 접수 확인 결과이며 수신자의 열람·기관 신고 접수와 다릅니다. "
+    "플랫폼 생성본은 인시던트별 최신 1회만 생성 후 7일 보관하며 고객 수정본·제출본은 보관하지 않습니다. "
     "신고 의무·기한·수신처 판단, 제출, 개인정보 유출 신고·통지는 하지 않습니다."
 )
 
@@ -71,6 +87,12 @@ _EXECUTION_MEANINGS = {
 _RESOLUTION_MEANINGS = {
     ResolutionJudgement.JUSTIFIED: "대응 정당성에 대한 관제 종료 판단 기록",
     ResolutionJudgement.NO_FURTHER_ACTION: "추가 조치 없이 관제 종료한 판단 기록",
+}
+_GUARDDUTY_FACT_REASONS = {
+    GuardDutyFactStatus.RECORDED: None,
+    GuardDutyFactStatus.ABSENT: "not_recorded",
+    GuardDutyFactStatus.UNRECOGNIZED: "unrecognized_value",
+    GuardDutyFactStatus.INVALID: "invalid_value",
 }
 
 
@@ -117,6 +139,8 @@ def collect_facts(
     audits: list[models.AuditEvent],
     executions: list[models.ActionExecution],
     as_of: datetime,
+    *,
+    notifications: list[models.PlatformEvent] | None = None,
 ) -> ReportFacts:
     """#616 문서를 입력 계약으로만 재사용한다. 자유문 원문을 결과에 다시 첨부하지 않는다."""
     eligible = [row for row in evidence if row.occurred_at <= as_of and row.collected_at <= as_of]
@@ -163,13 +187,13 @@ def collect_facts(
     add("incident", incident.incident_id, "/incident/title", incident.updated_at,
         "제목", None, reason="free_text_omitted")
 
-    def selected(item, index, path, label, *, meaning=None, identifier=None):
+    def selected(item, index, path, label, *, reason=None, meaning=None, identifier=None):
         value = item
         for key in path.split("/"):
             value = value.get(key) if isinstance(value, dict) else None
         add("evidence", item["evidence_id"], f"/evidence/{index}/{path}",
             datetime.fromisoformat(item["collected_at"].replace("Z", "+00:00")),
-            label, value, meaning=meaning, flags=item["flags"], identifier=identifier)
+            label, value, reason=reason, meaning=meaning, flags=item["flags"], identifier=identifier)
 
     for index, item in enumerate(exported["evidence"]):
         selected(item, index, "evidence_type", "근거 종류")
@@ -207,6 +231,22 @@ def collect_facts(
                 selected(item, index, "content/event/payload/first_seen_at", "GuardDuty 최초 관측 시각")
                 selected(item, index, "content/event/payload/last_seen_at", "GuardDuty 최근 관측 시각",
                          meaning="최초 저장 사본에 기록된 관측 시각")
+                activity = event["payload"].get("activity")
+                for field, label, identifier in (
+                    ("resource_role", "GuardDuty 자원의 역할", _guardduty_code),
+                    ("action_type", "GuardDuty 활동 종류", _guardduty_code),
+                    ("connection_direction", "GuardDuty 연결 방향", _guardduty_code),
+                    ("remote_ip", "GuardDuty 상대 IP", ip_address),
+                    ("blocked", "GuardDuty 네트워크 활동의 차단 관측", None),
+                ):
+                    reason = (
+                        _GUARDDUTY_FACT_REASONS[activity[field]["status"]]
+                        if activity is not None else "not_collected"
+                    )
+                    selected(
+                        item, index, f"content/event/payload/activity/{field}/value",
+                        label, reason=reason, identifier=identifier,
+                    )
             selected(item, index, "content/context/target_status", "대상 수집 상태")
             context = item["content"].get("context")
             target = context.get("target") if context else None
@@ -270,6 +310,31 @@ def collect_facts(
     if not eligible:
         add("evidence", incident.incident_id, "/evidence", as_of,
             "저장 근거", None, reason="not_collected")
+    for row in notifications or ():
+        add("platform_event", row.event_id, "/target_id", row.occurred_at,
+            "발송 집계의 알림 이벤트 ID", row.target_id, identifier=UUID)
+        add(
+            "platform_event", row.event_id, "/outcome", row.occurred_at,
+            "알림 이벤트 발송 집계 결과", row.outcome,
+            meaning=(
+                "발송 대상 채널 전체의 공급자 접수 기록"
+                if row.outcome is PlatformEventOutcome.SUCCEEDED
+                else "발송 대상 채널 전체의 공급자 접수 미확인 기록이며 미전달을 뜻하지 않음"
+            ),
+        )
+        if row.outcome is PlatformEventOutcome.FAILED:
+            try:
+                reason_code = PlatformEventDetails(
+                    reason_code=row.details.get("reason_code"),
+                ).reason_code
+                reason = None
+            except ValidationError:
+                reason_code, reason = None, "invalid_value"
+            add("platform_event", row.event_id, "/details/reason_code", row.occurred_at,
+                "알림 발송 집계의 대표 실패 사유", reason_code, reason=reason)
+    if not notifications:
+        add("platform_event", incident.incident_id, "/notification_send_events", as_of,
+            "외부 알림 발송 이력", None, reason="not_recorded")
     return ReportFacts(
         facts=facts,
         evidence_flags=[
@@ -329,18 +394,57 @@ def generate_report_draft(
     audits = audit_repo.list_by_incident(db, incident.incident_id)
     executions = executions_repo.list_by_incident(db, incident.incident_id)
     as_of = datetime.now(timezone.utc)
-    facts = collect_facts(incident, evidence, audits, executions, as_of)
+    notifications = report_notifications.list_send_events(
+        db, incident_id=incident.incident_id, tenant_id=incident.tenant_id, as_of=as_of,
+    )
+    facts = collect_facts(incident, evidence, audits, executions, as_of, notifications=notifications)
     incident_id = incident.incident_id
+    tenant_id = incident.tenant_id
     request = narrative_request(facts)
     # 모든 ORM 값을 복사한 뒤 종료한다. rollback 뒤 행에 접근하면 새 트랜잭션이 열린다.
     db.rollback()
     narrative = generate_narrative(client, request)
+    generated_at = datetime.now(timezone.utc)
     document = ReportDraftDocument(
-        incident_id=incident_id, as_of=as_of, generated_at=datetime.now(timezone.utc),
+        incident_id=incident_id, as_of=as_of, generated_at=generated_at,
         notice=NOTICE, server_facts=facts, ai_narrative=narrative, human_input=human_fields(),
     )
     document = ReportDraftDocument.model_validate(mask_outbound(document.model_dump(mode="json")))
+    markdown, json_body = render_draft(document, ExportFormat.MD), render_draft(document, ExportFormat.JSON)
+    try:
+        current = db.get(models.Incident, incident_id)
+        if current is None or current.tenant_id != tenant_id:
+            db.rollback()
+            raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
+        saved = drafts_repo.save_latest(
+            db, incident_id=incident_id, tenant_id=tenant_id, as_of=as_of,
+            generated_at=generated_at, markdown=markdown, json_body=json_body,
+        )
+        if not saved:
+            db.rollback()
+            raise ApiError(ErrorCode.REPORT_DRAFT_SUPERSEDED)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        # SQL 예외의 파라미터에는 최종 산출물이 들어갈 수 있다. 공통 예외 로그에 넘기지 않는다.
+        raise ApiError(ErrorCode.INTERNAL_ERROR) from None
     return ExportFile(
         media_type=MEDIA_TYPES[fmt], filename=f"incident-{incident_id}-report-draft.{fmt.value}",
-        body=render_draft(document, fmt),
+        body=markdown if fmt is ExportFormat.MD else json_body,
+    )
+
+
+def load_saved_report_draft(
+    db: Session, incident: models.Incident, fmt: ExportFormat,
+) -> ExportFile:
+    row = drafts_repo.get_latest(
+        db, incident_id=incident.incident_id, tenant_id=incident.tenant_id,
+        now=datetime.now(UTC),
+    )
+    if row is None:
+        raise ApiError(ErrorCode.REPORT_DRAFT_NOT_FOUND)
+    return ExportFile(
+        media_type=MEDIA_TYPES[fmt],
+        filename=f"incident-{incident.incident_id}-report-draft.{fmt.value}",
+        body=row.markdown if fmt is ExportFormat.MD else row.json_body,
     )

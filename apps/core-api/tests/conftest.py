@@ -72,6 +72,9 @@ os.environ.setdefault(
 os.environ.setdefault("DISPATCH_ENABLED", "false")
 # 수집→판정 스캔 파이프라인도 테스트에서 끈다 — 앱 기동 시 실제 스캔이 돌지 않게 한다
 os.environ.setdefault("SCAN_ENABLED", "false")
+# 보고서 보관본 정리 잡(#623)은 기본 켜짐이고 기동 즉시 DB 를 지운다 — 테스트 앱이 개발 DB 에 닿지 않게 강제로 끈다.
+# 정리 검증은 해당 테스트가 잡 함수를 격리 DB 로 직접 부르거나 명시적으로 켠다.
+os.environ["REPORT_DRAFT_CLEANUP_ENABLED"] = "false"
 # 구독 만기 처리 잡(T-16 · #528)은 스캔 · 디스패치 스위치와 독립이고 기본 켜짐이다 — .env 가 켜 두었어도
 # 테스트 앱이 lru_cache 된 세션 팩토리로 개발 DB 구독을 바꾸지 않게 강제로 끈다. 기동 검증은 해당 테스트가 켠다.
 os.environ["SUBSCRIPTION_SCHEDULER_ENABLED"] = "false"

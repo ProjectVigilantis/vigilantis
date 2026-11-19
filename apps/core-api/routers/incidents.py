@@ -70,7 +70,7 @@ from exceptions import ApiError, OutOfScopeError
 from evidence_export import ExportFormat, export_incident_evidence
 from ai.model_client import AIModelClient
 from ai.report_draft import get_report_model_client
-from report_draft import generate_report_draft
+from report_draft import generate_report_draft, load_saved_report_draft
 from identifiers import canonical_id
 from incident_analysis import load_analysis_results
 from realtime import incident_event
@@ -317,6 +317,22 @@ def export_evidence(
     return Response(
         content=file.body,
         media_type=file.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},
+    )
+
+
+@router.get("/incidents/{incident_id}/report-draft", response_class=Response)
+def download_report_draft(
+    incident_id: str,
+    format: ExportFormat,
+    user: CurrentUser = Depends(require_export_evidence),  # noqa: B008 — FastAPI의 요청별 권한 의존성 선언.
+    scope: TenantScope = Depends(require_tenant_scope),  # noqa: B008 — FastAPI의 요청별 고객사 범위 의존성 선언.
+    db: Session = Depends(get_db),  # noqa: B008 — FastAPI의 요청별 DB 세션 의존성 선언.
+) -> Response:
+    row = _load_incident(db, incident_id, scope)
+    file = load_saved_report_draft(db, row, format)
+    return Response(
+        content=file.body, media_type=file.media_type,
         headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},
     )
 
