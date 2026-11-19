@@ -141,6 +141,7 @@ def to_candidate_data(row: models.RunbookCandidate) -> RunbookCandidateData:
             "ai_savings_estimate": row.ai_savings_estimate,
             "evidence_ids": row.evidence_ids,
             "status": row.status,
+            "recommendation_basis": row.recommendation_basis,
         }
     )
 
@@ -159,6 +160,10 @@ def new_candidate(contract: RunbookCandidateData) -> models.RunbookCandidate:
             if contract.ai_savings_estimate is not None else None
         ),
         evidence_ids=list(contract.evidence_ids),
+        recommendation_basis=(
+            contract.recommendation_basis.model_dump(mode="json")
+            if contract.recommendation_basis is not None else None
+        ),
         status=contract.status,
     )
 

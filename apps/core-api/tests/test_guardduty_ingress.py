@@ -403,13 +403,15 @@ def test_the_locked_gate_refuses_by_threat_type(world):
     assert reason is workflows.AutoIsolationSkipReason.THREAT_TYPE_NOT_ELIGIBLE
 
 
-def test_the_screen_shows_no_pending_automatic_block(world):
+def test_the_screen_reports_the_automatic_threat_exclusion(world):
     w = world
     incident = _guardduty_incident(w, 8.0)
     tenant = w.db.get(models.Tenant, w.tenant_id)
     tenant.auto_action_enabled = False  # 다른 유형이면 「자동 조치 꺼짐으로 막힘」이 보인다
     w.db.flush()
-    assert workflows.pending_automatic_block(w.db, incident) is None  # 걸릴 자동 발동 자체가 없다
+    assert workflows.pending_automatic_block(
+        w.db, incident,
+    ) is workflows.AutoIsolationSkipReason.THREAT_TYPE_NOT_ELIGIBLE
 
 
 def test_expired_medium_guardduty_wait_is_not_scanned(world):
@@ -450,4 +452,4 @@ def test_threat_events_and_incident_detail_carry_the_finding(world, client_pg, m
     detail = client_pg.get(f"/api/v1/incidents/{incident.incident_id}")
     assert detail.status_code == 200, detail.text
     assert detail.json()["threat_context"] is None  # GuardDuty 탐지에는 출발지 · 노출 대역 칸이 없다
-    assert detail.json()["auto_isolation_block"] is None
+    assert detail.json()["auto_isolation_block"] == "THREAT_TYPE_NOT_ELIGIBLE"

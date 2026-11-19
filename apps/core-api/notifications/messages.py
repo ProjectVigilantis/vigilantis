@@ -45,6 +45,8 @@ def _title(event: EventSnapshot) -> str:
     kind, phase, outcome = event.kind, event.phase, event.outcome
     if kind == "HIGH_INCIDENT_CREATED" and phase == "CREATED":
         return "High 위험 인시던트 생성"
+    if kind == "PROTECTED_TARGET_ESCALATION" and phase == "CREATED":
+        return "보호 자산 대응 승인 필요"
     label = _ACTION_LABELS.get(kind)
     if label is not None and phase == "REQUESTED":
         return f"{label} 요청"
@@ -90,6 +92,13 @@ def build_lines(
         for label, value, limit in fields
         if value is not None
     ]
+    if (
+        event.kind == "PROTECTED_TARGET_ESCALATION"
+        and event.phase == "CREATED"
+        and event.reason_code == "PROTECTED_TAG"
+    ):
+        # 원본 사유 문자열은 노출하지 않고 서버가 정한 보호 사유만 설명한다.
+        lines.append("판정 사유: 보호 태그(PROTECTED_TAG) — 자동 격리를 생략하고 관제자 승인을 기다립니다.")
     if len(event.incident_id) <= _ID_MAX:  # 비정상적으로 긴 ID로 잘못된 링크를 만들지 않는다
         lines.append(f"상세: {incident_url(public_base_url, event.incident_id)}")
     return _title(event), lines

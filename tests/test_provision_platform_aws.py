@@ -823,7 +823,9 @@ def test_api_gets_login_and_onboarding_settings():
 def test_api_reads_the_client_address_only_from_the_header_cloudfront_adds():
     """활동 로그의 접속지(#589 D) — 소켓 주소는 ALB 주소라 쓰지 않는다. 설정값은 앱이 받는 값이어야 하고,
     그 헤더(CloudFront-Viewer-Address)는 지금 쓰는 오리진 요청 정책이 오리진으로 넘긴다(AWS 관리형
-    AllViewerExceptHostHeader 는 viewer location 헤더를 함께 싣는다). 정책을 바꾸면 접속지 칸이 빈다."""
+    AllViewerExceptHostHeader 는 viewer location 헤더를 함께 싣는다). 정책이 이 헤더를 더하는 동안은 클라이언트가
+    같은 이름으로 보낸 값을 CloudFront 가 덮어쓴다. 더하지 않는 정책으로 바꾸면 칸이 비는 것이 아니라 클라이언트가
+    보낸 값이 그대로 남을 수 있다 — 그래서 정책 ID 를 여기서 붙잡는다."""
     from typing import get_args
 
     env = {e["name"]: e["value"] for e in _api()["environment"]}

@@ -8,7 +8,7 @@
 // 반투명 막은 지구가 비치면서도 글이 읽히게 하려는 것이다. 배경 흐림(backdrop-filter)은 쓰지 않는다(panel-focus.tsx).
 // 격자 · 첫 화면 등장 · 떠다니기는 antislop 감사(2026-10-29)에서 뺐다가 PM 지시로 되살렸다(R-07 · R-19 예외).
 // 스크롤 등장은 박스가 스크롤보다 늦게 따라 올라와 밀리는 느낌을 줘서 다시 뺐다(globals.css).
-// 반복 움직임은 [움직임 멈춤]으로 멈추고, 모든 움직임이 모션 줄이기 설정에서 멈춘다.
+// 모든 움직임이 모션 줄이기 설정에서 멈춘다. [움직임 멈춤] 버튼은 PM 지시로 뺐다(2026-11-18).
 
 import { ArrowRight, Eye, KeyRound, Shield, ShieldCheck, Unplug, Wallet, type LucideIcon } from 'lucide-react';
 import type { Metadata } from 'next';
@@ -130,9 +130,7 @@ export default function LandingPage() {
         <div data-panel-body className="flex flex-1 flex-col">
           <header className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
             <Link href="/landing" className="flex items-center gap-2.5">
-              <span className="bg-primary flex size-8 items-center justify-center rounded-md">
-                <Shield aria-hidden className="size-4.5 text-white" />
-              </span>
+              <Shield aria-hidden className="size-6 text-white" />
               <span className="text-lg font-bold tracking-tight">Vigilantis</span>
             </Link>
             <nav aria-label="랜딩 목차" className="text-foreground-secondary hidden items-center gap-7 text-sm md:flex">
@@ -173,12 +171,6 @@ export default function LandingPage() {
                   로그인하고 시작하기
                   <ArrowRight aria-hidden className="size-4" />
                 </Link>
-                <a
-                  href="#how"
-                  className="inline-flex h-12 items-center rounded-md border border-white/20 px-6 text-base font-semibold hover:bg-white/8"
-                >
-                  동작 방식 보기
-                </a>
               </div>
             </div>
             <div className="landing-rise" style={{ '--rise-delay': '240ms' } as React.CSSProperties}>

@@ -466,8 +466,58 @@ def user_approval_recorded(db: Session, incident_id: str) -> bool:
     ).first() is not None
 
 
+def _created_notification_exists(kind: str | None):
+    return (
+        select(models.NotificationEvent.event_id)
+        .where(
+            models.NotificationEvent.incident_id == models.Incident.incident_id,
+            models.NotificationEvent.kind == kind,
+            models.NotificationEvent.execution_id.is_(None),
+            models.NotificationEvent.phase == "CREATED",
+        )
+        .exists()
+    )
+
+
+def list_protected_isolation_offer_pending(
+    db: Session, *, notification_kind: str, incident_statuses: Collection[IncidentStatus],
+) -> list[str]:
+    """보호 생략 뒤 격리 후보·실행이 없는 건. 정지 고객과 이미 거절된 후보는 다시 검사하지 않는다."""
+    offered = (
+        select(models.RunbookCandidate.candidate_id)
+        .where(
+            models.RunbookCandidate.incident_id == models.Incident.incident_id,
+            models.RunbookCandidate.runbook_id == RunbookId.RUNBOOK_EC2_ISOLATE,
+        )
+        .exists()
+    )
+    executed = (
+        select(models.ActionExecution.execution_id)
+        .where(
+            models.ActionExecution.incident_id == models.Incident.incident_id,
+            models.ActionExecution.runbook_id == RunbookId.RUNBOOK_EC2_ISOLATE,
+        )
+        .exists()
+    )
+    return list(db.scalars(
+        select(models.Incident.incident_id)
+        .outerjoin(models.Tenant, models.Tenant.tenant_id == models.Incident.tenant_id)
+        .where(
+            models.Incident.status.in_(incident_statuses),
+            or_(
+                models.Incident.tenant_id.is_(None),
+                models.Tenant.status != TenantStatus.SUSPENDED,
+            ),
+            _created_notification_exists(notification_kind),
+            ~offered, ~executed,
+        )
+        .order_by(models.Incident.created_at, models.Incident.incident_id)
+    ))
+
+
 def list_expired_agent_waits(
     db: Session, *, now: datetime, exclude_event_types: Collection[ThreatEventType] = (),
+    exclude_notification_kind: str | None = None,
 ) -> list[str]:
     """응답 기한이 지난 Medium 승인 대기의 Incident 식별자 — 타임아웃 감시 1회의 대상.
 
@@ -489,6 +539,8 @@ def list_expired_agent_waits(
         없음(NULL)은 지금 그대로다.
       - 자동 발동에서 빼는 위협 유형(exclude_event_types · #588 Q2 GuardDuty 탐지)은 뺀다. 판정의 원천은
         workflows.AUTO_ISOLATION_EXCLUDED_EVENT_TYPES 이고 호출부가 넘긴다 — 같은 이유로 잡혀도 건너뛰기만 반복한다.
+      - 보호 태그로 이미 에스컬레이션한 건은 호출부가 알림 종류를 지정해 뺀다. 승인 대기·기한은
+        그대로 보존하되 매 감시 주기마다 같은 생략을 다시 접수하지 않는다.
     """
     tenant = models.Tenant
     excluded = (
@@ -499,6 +551,7 @@ def list_expired_agent_waits(
         )
         .exists()
     )
+    escalated = _created_notification_exists(exclude_notification_kind)
     return list(
         db.execute(
             select(models.Incident.incident_id)
@@ -511,6 +564,7 @@ def list_expired_agent_waits(
                 models.Incident.subject_arn.like(_EC2_INSTANCE_ARN_LIKE),
                 ~_user_approval_recorded(),
                 ~excluded,
+                ~escalated,
                 or_(
                     models.Incident.tenant_id.is_(None),
                     and_(

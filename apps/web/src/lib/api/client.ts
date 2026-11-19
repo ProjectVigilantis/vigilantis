@@ -33,6 +33,7 @@ import type {
   SignupRequestApproveRequest,
   SignupRequestApproveResponse,
   SignupRequestCreate,
+  PlatformRole,
   SignupRequestItem,
   SignupRequestsResponse,
   SignupRequestStatus,
@@ -41,6 +42,7 @@ import type {
   StaffGroupsResponse,
   StaffInviteRequest,
   StaffItem,
+  StaffRoleRequest,
   StaffResponse,
   SubscriptionPurchasePlan,
   TenantCreateRequest,
@@ -603,6 +605,12 @@ export function inviteStaff(body: StaffInviteRequest): Promise<StaffItem> {
  */
 export async function resendStaffInvite(userId: string): Promise<void> {
   await postJson<null>(staffPath(userId, '/invite/resend'));
+}
+
+/** 등급 변경(204). 자기 자신 403, 같은 등급 · 마지막 활성 중앙 관리계정의 강등 409. 저장된 담당 그룹은 비워진다. */
+export async function changeStaffRole(userId: string, platformRole: PlatformRole): Promise<void> {
+  const body: StaffRoleRequest = { platform_role: platformRole };
+  await sendJson<null>('PUT', staffPath(userId, '/role'), body);
 }
 
 export async function changeStaffStatus(userId: string, status: UserStatus): Promise<void> {

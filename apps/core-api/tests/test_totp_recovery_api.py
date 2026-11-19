@@ -15,13 +15,13 @@ import pytest
 from auth import sessions
 from auth.cognito import SoftwareTokenDeletion as D
 from db import models
-from db.session import get_db
+from db.session import get_db, get_session_factory
 from fastapi.testclient import TestClient
 from routers import users as users_router
 from schemas.api.auth import AccountType, PlatformRole, UserRole
 from schemas.api.tenants import TenantStatus
 from sqlalchemy import delete, or_, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from tests.group_scope import assign_tenants
 
 ISSUER = "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_test"  # conftest TEST_AUTH_ISSUER
@@ -139,6 +139,11 @@ def env(pg_engine, committed_auth, allowed_origin):
         return build
 
     app.dependency_overrides[get_db] = _get_db
+    # 권한 거절 기록(access_denial_log)은 get_session_factory 로 따로 쓴다. 재정의하지 않으면 lru_cache 된 팩토리가
+    # 같은 프로세스에서 먼저 돈 테스트의 DB 를 가리킬 수 있다(xdist 에서 파일 순서가 바뀌면 드러난다)
+    app.dependency_overrides[get_session_factory] = lambda: sessionmaker(
+        bind=pg_engine, autoflush=False, expire_on_commit=False
+    )
     app.dependency_overrides[users_router.get_recovery_engine] = lambda: pg_engine
     app.dependency_overrides[users_router.get_recovery_adapter_factory] = _factory
     with TestClient(app) as client:

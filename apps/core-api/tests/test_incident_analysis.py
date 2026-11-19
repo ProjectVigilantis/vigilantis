@@ -56,10 +56,7 @@ def test_original_analysis_survives_consumption_of_proposals(
     incident = make_incident(db)
     incident.agent_invocation_status = AgentInvocationStatus.SUCCEEDED
     passed = make_candidate(db, incident)
-    rejected = make_candidate(
-        db, incident, runbook_id=RunbookId.RUNBOOK_EC2_ISOLATE,
-        parameters={}, status=CandidateStatus.REJECTED,
-    )
+    rejected = make_candidate(db, incident, status=CandidateStatus.REJECTED)
     _evaluate(db, passed, passed=True)
     _evaluate(db, rejected, passed=False)
     db.flush()

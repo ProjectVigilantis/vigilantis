@@ -61,7 +61,7 @@ import {
   isUnassignedManager,
   type PlatformSubject,
 } from '@/lib/roles';
-import type { CurrentUserResponse, UserEventItem, UserEventsResponse, UserListItem, UserRole } from '@/types/api';
+import type { CurrentUserResponse, ErrorCode, UserEventItem, UserEventsResponse, UserListItem, UserRole } from '@/types/api';
 
 const ROLES: readonly UserRole[] = ['ADMIN', 'OPERATOR', 'VIEWER'];
 
@@ -125,7 +125,7 @@ export function UsersView({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-col gap-1">
           <h1 className="text-lg font-semibold">계정 관리</h1>
-          {/* 관리자 직원계정은 서버가 운영 CLI로만 만든다(auth/README.md · routers/staff.py에 생성 경로 없음). 이 화면에서 만드는 것은 고객사 계정뿐이다. */}
+          {/* 관리자 직원계정은 중앙 관리계정의 계정 관리 화면(staff-view.tsx)에서 초대한다. 이 화면에서 만드는 것은 고객사 계정뿐이다. */}
         </div>
         {/* 초대 칸(고객사 ID 입력 여부)이 계정 종류로 갈리므로 계정을 확인한 뒤에 연다. 담당 고객이 없으면 그리지 않는다. */}
         {unassigned ? null : (
@@ -312,6 +312,7 @@ export function ActionDialog({
   disabled = false,
   children,
   validate,
+  errorMessage,
   run,
   onClose,
   onDone,
@@ -327,6 +328,8 @@ export function ActionDialog({
   children?: ReactNode;
   /** 보내기 전 입력 검사. 문구를 돌려주면 요청하지 않고 그 문구를 보인다(결과 불명 문구와 섞이지 않게). */
   validate?: (form: FormData) => string | null;
+  /** 실패 문구를 바꿀 때만 준다(관리자 직원계정 화면). 없으면 사용자 관리 문구(lib/user-admin.ts)다. */
+  errorMessage?: (code: ErrorCode | null) => string;
   run: (form: FormData) => Promise<unknown>;
   onClose: () => void;
   onDone: () => void;
@@ -353,7 +356,7 @@ export function ActionDialog({
       await run(form);
     } catch (caught) {
       const code = caught instanceof ApiError ? caught.code : null;
-      setError(userAdminErrorMessage(action, code, actor));
+      setError(errorMessage ? errorMessage(code) : userAdminErrorMessage(action, code, actor));
       if (code === 'USER_NOT_FOUND' || code === 'USER_STATE_CONFLICT') router.refresh();
       // 403은 화면의 등급 · 배정 스냅샷이 낡았다는 뜻일 수 있다 — `/me`와 목록을 다시 읽어 지금 권한에 맞춘다.
       if (code === 'AUTH_FORBIDDEN') {

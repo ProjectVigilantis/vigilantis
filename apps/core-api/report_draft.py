@@ -20,11 +20,14 @@ from evidence_export import (
     ExportFile, ExportFormat, MEDIA_TYPES, build_document, code_span, json_fence,
 )
 from exceptions import ApiError
+from schemas.api.audit import AuditEventAction
 from schemas.api.errors import ErrorCode
+from schemas.api.incidents import IncidentStatus, ResolutionJudgement
 from schemas.api.report_draft import (
     ReportDraftDocument, ReportEvidenceFlags, ReportFact, ReportFacts,
     ReportHumanField,
 )
+from schemas.runbooks import TriggerSource
 from sqlalchemy.orm import Session
 
 REPORT_FILE_MAX_BYTES = 2 * 1024 * 1024
@@ -32,6 +35,8 @@ NOTICE = (
     "침해사고 신고 작성 보조 초안 — 제출 전 사람이 확인·수정해야 합니다. "
     "인용 검사는 이 요청의 사실 범위만 확인하며 서술의 진실성을 보장하지 않습니다. "
     "기준 시각까지 읽은 저장 기록이며 원천별 조회 시점은 다를 수 있습니다. "
+    "실행 예약·완료 시각과 조치 결과, 조치 결과·관제 종료와 사고 처리·신고 완료는 각각 구분합니다. "
+    "탐지·관측 기록과 피해 확정, 관측 시각과 사람의 사고 인지 시점도 구분합니다. "
     "신원·자유문은 입력에서 제외했고 IP·ARN·계정 ID는 포함될 수 있습니다. "
     "신고 의무·기한·수신처 판단, 제출, 개인정보 유출 신고·통지는 하지 않습니다."
 )
@@ -55,13 +60,17 @@ _HUMAN_FIELDS = (
     ("reporter_email", "신고자 이메일"),
 )
 _EXECUTION_MEANINGS = {
-    "IN_PROGRESS": "실행 진행 상태 — AWS 실행 시작·성공을 확정하지 않음",
-    "SUCCESS": "기록된 조치 성공 — 사고 처리·신고 완료를 뜻하지 않음",
-    "FAILED": "기록된 조치 실패",
-    "ROLLBACK_INITIATED": "원복 진행 상태",
-    "ROLLED_BACK": "기록된 원복 완료 — 사고 처리·신고 완료를 뜻하지 않음",
-    "ROLLBACK_FAILED": "기록된 원복 실패",
+    "IN_PROGRESS": "기록된 실행 상태: 진행 중",
+    "SUCCESS": "조치 성공 기록",
+    "FAILED": "조치 실패 기록",
+    "ROLLBACK_INITIATED": "기록된 원복 상태: 진행 중",
+    "ROLLED_BACK": "원복 완료 기록",
+    "ROLLBACK_FAILED": "원복 실패 기록",
     "UNVERIFIED": "결과 확인 불가",
+}
+_RESOLUTION_MEANINGS = {
+    ResolutionJudgement.JUSTIFIED: "대응 정당성에 대한 관제 종료 판단 기록",
+    ResolutionJudgement.NO_FURTHER_ACTION: "추가 조치 없이 관제 종료한 판단 기록",
 }
 
 
@@ -80,6 +89,18 @@ def _guardduty_code(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_:/!&.-]*", value):
         raise ValueError("invalid GuardDuty code")
     return value
+
+
+def _trigger_meaning(trigger_source: TriggerSource | None) -> str | None:
+    if trigger_source is None:
+        return None
+    return {
+        TriggerSource.USER_APPROVAL: "사용자 승인",
+        TriggerSource.PRE_MITIGATION_0_5S: "고위험 탐지에 따른 자동 선차단",
+        TriggerSource.TIMEOUT_ISOLATION_1M: "1분 미응답에 따른 자동 격리",
+        TriggerSource.AUTO_ON_FAILURE: "주 조치 실패에 따른 자동 복구",
+        TriggerSource.NACL_DENY_EXPIRED_24H: "차단 24시간 만료에 따른 자동 해제",
+    }[trigger_source]
 
 
 def human_fields() -> list[ReportHumanField]:
@@ -124,16 +145,17 @@ def collect_facts(
             fact_id=f"{incident.incident_id}:F{len(facts) + 1}",
             source_kind=kind, record_id=record_id, json_path=path, recorded_at=at,
             label=label, value=value, status="unknown" if reason else "known",
-            reason=reason, interpretation=meaning, flags=flags,
+            reason=reason, interpretation=None if reason else meaning, flags=flags,
         ))
 
     head = exported["incident"]
     for field, label, meaning in (
         ("category", "분류", None),
-        ("status", "관제 상태", "RESOLVED는 관제 종료이며 사고 처리·신고 완료가 아님"),
-        ("created_at", "인시던트 생성 시각", "사고발생시간 후보 — 사고인지시점이 아님"),
+        ("status", "관제 상태",
+         "기록된 관제 상태: 종료" if incident.status == IncidentStatus.RESOLVED else None),
+        ("created_at", "인시던트 생성 시각", None),
         ("updated_at", "인시던트 갱신 시각", None),
-        ("subject_arn", "탐지 대상", "피해·침입 확정이 아님"),
+        ("subject_arn", "탐지 대상", None),
     ):
         add("incident", incident.incident_id, f"/incident/{field}",
             incident.updated_at, label, head[field], meaning=meaning,
@@ -151,21 +173,19 @@ def collect_facts(
 
     for index, item in enumerate(exported["evidence"]):
         selected(item, index, "evidence_type", "근거 종류")
-        selected(item, index, "occurred_at", "이벤트 발생 시각",
-                 meaning="사고발생시간 후보 — 사고인지시점이 아님")
+        selected(item, index, "occurred_at", "이벤트 발생 시각")
         selected(item, index, "collected_at", "근거 수집 시각")
         if item["evidence_type"] == "THREAT":
-            selected(item, index, "content/event/event_type", "탐지 유형",
-                     meaning="원인·피해 또는 실제 침입을 확정하지 않음")
+            selected(item, index, "content/event/event_type", "탐지 유형")
             event = item["content"]["event"]
             selected(item, index, "content/event/target_arn", "탐지 대상 ARN", identifier=_arn,
                      meaning=(
-                         "EC2가 식별되면 인스턴스 ARN, 그 밖은 자원 ARN이 아닌 finding ARN — 피해 확정이 아님"
+                         "EC2 식별 시 인스턴스 ARN, 그 외에는 finding ARN"
                          if event["event_type"] == "GUARDDUTY_FINDING" else None
                      ))
             if event["event_type"] == "SSH_BRUTE_FORCE":
                 selected(item, index, "content/event/payload/source_ip", "공격 출발지 IP",
-                         meaning="피해 IP가 아님", identifier=ip_address)
+                         identifier=ip_address)
                 selected(item, index, "content/event/payload/failed_attempt_count", "관측 실패 횟수")
                 selected(item, index, "content/event/payload/window_seconds", "관측 구간(초)")
             elif event["event_type"] == "OPEN_IP":
@@ -183,19 +203,17 @@ def collect_facts(
                 ):
                     selected(item, index, f"content/event/payload/{field}", label,
                              identifier=_guardduty_code)
-                selected(item, index, "content/event/payload/severity", "GuardDuty 기록 심각도",
-                         meaning="탐지 심각도이며 원인·피해 규모를 확정하지 않음")
-                selected(item, index, "content/event/payload/first_seen_at", "GuardDuty 최초 관측 시각",
-                         meaning="사고발생시간 후보 — 사고인지시점이 아님")
+                selected(item, index, "content/event/payload/severity", "GuardDuty 기록 심각도")
+                selected(item, index, "content/event/payload/first_seen_at", "GuardDuty 최초 관측 시각")
                 selected(item, index, "content/event/payload/last_seen_at", "GuardDuty 최근 관측 시각",
-                         meaning="최초 저장 사본에 기록된 시각 — 현재 최신 탐지 상태를 보장하지 않음")
+                         meaning="최초 저장 사본에 기록된 관측 시각")
             selected(item, index, "content/context/target_status", "대상 수집 상태")
             context = item["content"].get("context")
             target = context.get("target") if context else None
             asset = target["asset"] if target else None
             if asset and asset["asset_type"] == "EC2":
                 selected(item, index, "content/context/target/asset/spec/private_ip", "피해 IP 후보",
-                         meaning="저장된 EC2 사설 IP 후보 — 피해 여부는 사람이 확인", identifier=ip_address)
+                         meaning="저장된 EC2 사설 IP 후보", identifier=ip_address)
             else:
                 add("evidence", item["evidence_id"], f"/evidence/{index}/content/context/target",
                     as_of, "피해 IP 후보", None, reason="not_collected", flags=item["flags"])
@@ -209,20 +227,21 @@ def collect_facts(
             selected(item, index, "content/asset/arn", "자산 ARN", identifier=_arn)
             if item["content"]["asset"]["asset_type"] == "EC2":
                 selected(item, index, "content/asset/spec/private_ip", "피해 IP 후보",
-                         meaning="저장된 EC2 사설 IP 후보 — 피해 여부는 사람이 확인", identifier=ip_address)
+                         meaning="저장된 EC2 사설 IP 후보", identifier=ip_address)
         add("evidence", item["evidence_id"], f"/evidence/{index}/content", as_of,
-            "선택하지 않은 근거 내용", None, reason="free_text_omitted", flags=item["flags"],
-            meaning="신원 보호를 위해 자유문·로그 본문·태그 등은 모델과 초안에서 제외")
+            "선택하지 않은 근거 내용", None, reason="free_text_omitted", flags=item["flags"])
 
     for row in audits:
         if row.occurred_at > as_of:
             continue
         for field, label, meaning in (
-            ("action", "감사 동작", "ACTION_EXECUTION_STARTED는 실행 예약 — AWS 시작·성공이 아님"),
-            ("actor_kind", "행위자 종류", "SYSTEM은 사람의 승인이 아님"),
-            ("trigger_source", "발동 원천", "시스템 발동은 사람의 승인이 아님"),
+            ("action", "감사 동작",
+             "조치 실행 예약 기록" if row.action == AuditEventAction.ACTION_EXECUTION_STARTED
+             else "관제 종료 기록" if row.action == AuditEventAction.INCIDENT_RESOLVED else None),
+            ("actor_kind", "행위자 종류", None),
+            ("trigger_source", "발동 원천", _trigger_meaning(row.trigger_source)),
             ("execution_id", "연결 실행 ID", None),
-            ("resolution", "관제 종료 판단", "사고 처리·신고 완료가 아님"),
+            ("resolution", "관제 종료 판단", _RESOLUTION_MEANINGS.get(row.resolution)),
         ):
             add("audit_event", row.event_id, f"/{field}", row.occurred_at,
                 label, getattr(row, field), meaning=meaning)
@@ -235,19 +254,19 @@ def collect_facts(
             ("runbook_id", "조치 종류", None),
             ("target_arn", "조치 대상", None),
             ("status", "기록된 실행 상태", _EXECUTION_MEANINGS[row.status.value]),
-            ("trigger_source", "발동 원천", "시스템 발동은 사람의 승인이 아님"),
-            ("created_at", "실행 예약 시각", "AWS 실행 시작·성공을 뜻하지 않음"),
-            ("finished_at", "기록된 완료 시각", "시각이 있어도 결과를 증명하지 않음"),
+            ("trigger_source", "발동 원천", _trigger_meaning(row.trigger_source)),
+            ("created_at", "실행 예약 시각", None),
+            ("finished_at", "기록된 완료 시각", None),
         ):
             add("action_execution", row.execution_id, f"/{field}", row.updated_at,
                 label, getattr(row, field), meaning=meaning,
                 identifier=_arn if field == "target_arn" else None)
     if not executions:
         add("action_execution", incident.incident_id, "/action_executions", as_of,
-            "대응 이력", None, reason="no_history", meaning="조치가 없었다는 뜻이 아님")
+            "대응 이력", None, reason="no_history")
     if not audits:
         add("audit_event", incident.incident_id, "/audit_events", as_of,
-            "감사 이력", None, reason="no_history", meaning="승인·거절·종료가 없었다는 뜻이 아님")
+            "감사 이력", None, reason="no_history")
     if not eligible:
         add("evidence", incident.incident_id, "/evidence", as_of,
             "저장 근거", None, reason="not_collected")

@@ -1,10 +1,8 @@
 // 랜딩 첫 화면의 제품 미리보기: 고객사 대시보드(components/customer-dashboard)를 줄여 그린 그림이다.
-// 값은 예시이고 카드에 그렇게 적는다. 구성은 실제 화면을 따른다: 전반 지표 3개(숫자 카드 이름 그대로) →
+// 값은 예시이고 카드 제목 아래에 예시 데이터라고 적는다. 구성은 실제 화면을 따른다: 전반 지표 3개(숫자 카드 이름 그대로) →
 // 실시간 지표(최근 24시간 위협 이벤트, 1시간 단위 막대) → 분류(보안 · 최적화)를 붙인 이벤트 줄.
 // 움직임은 CSS만 쓴다(globals.css의 landing-*): 실시간 점의 맥박, 막대 올라오기, 이벤트 줄 흐름.
-// 반복 움직임은 아래 [움직임 멈춤]으로 멈출 수 있다.
 
-import { MotionToggle } from '@/components/landing/motion-toggle';
 import { EnumBadge } from '@/components/status-badge';
 import { CATEGORY_LABELS } from '@/lib/enum-labels';
 import type { IncidentCategory } from '@/types/api';
@@ -32,7 +30,6 @@ const EVENTS: { time: string; category: IncidentCategory; text: string }[] = [
 export function HeroPreview() {
   return (
     // 카드는 그림 한 장으로 읽힌다. 이벤트 줄은 끊김 없이 흐르려고 두 번 그리므로 낭독기에는 감춘다.
-    // 멈춤 버튼은 그림 밖에 둔다(role="img" 안의 버튼은 낭독기가 찾지 못한다).
     <div className="relative">
       <div
         role="img"
@@ -41,7 +38,10 @@ export function HeroPreview() {
       >
         <div aria-hidden>
           <div className="flex items-center justify-between border-b px-5 py-3">
-            <span className="text-sm font-bold">고객사 대시보드</span>
+            <span className="flex flex-col">
+              <span className="text-sm font-bold">고객사 대시보드</span>
+              <span className="text-muted-foreground text-[11px]">예시 데이터로 구성한 화면입니다</span>
+            </span>
             <span className="text-foreground-secondary inline-flex items-center gap-2 text-xs">
               <span className="landing-pulse size-2 rounded-full bg-[#22c55e]" />
               실시간 관제 중
@@ -87,7 +87,7 @@ export function HeroPreview() {
           {/* 위아래 가장자리는 마스크로 완전히 투명하게 지운다. 반투명 덮개만 두면 흐르는 줄이 구분선에 반쯤 걸린 채 비친다.
               마스크는 테두리까지 지우므로 구분선은 바깥 상자에 둔다. */}
           <div className="border-t">
-            <div className="h-40 overflow-hidden [mask-image:linear-gradient(to_bottom,transparent_0,transparent_24px,black_46px,black_calc(100%-40px),transparent_calc(100%-14px))]">
+            <div className="h-49 overflow-hidden [mask-image:linear-gradient(to_bottom,transparent_0,transparent_24px,black_46px,black_calc(100%-40px),transparent_calc(100%-14px))]">
               <ul className="landing-ticker flex flex-col">
                 {[...EVENTS, ...EVENTS].map((e, i) => (
                   <li key={i} className="flex h-9 shrink-0 items-center gap-3 px-5 text-[13px]">
@@ -100,10 +100,6 @@ export function HeroPreview() {
             </div>
           </div>
         </div>
-      </div>
-      <div className="mt-2 flex items-center justify-center gap-3">
-        <p className="text-muted-foreground text-xs">화면 예시 · 값은 시연용입니다</p>
-        <MotionToggle />
       </div>
     </div>
   );

@@ -23,9 +23,9 @@ def candidate_evaluations_by_incident(
 ) -> dict[str, list[tuple[models.RunbookCandidate, models.GuardrailEvaluation | None]]]:
     """현재 후보 상태에 무관한 원래 분석 평가. 목록 전체를 한 쿼리로 읽는다.
 
-    현재 SecOps AI는 NACL_ADD_DENY만 제안하고, NACL_RESTORE는 차단 뒤 서버가
-    만든 해제 제안이다. 둘이 AI_CANDIDATE 문맥을 공유하므로 런북 종류로 구분한다.
-    이는 생성 주체를 기록한 구분이 아니다. AI의 해제 제안을 허용할 때는 검증 문맥이나
+    현재 SecOps AI는 NACL_ADD_DENY만 제안한다. NACL_RESTORE와 EC2_ISOLATE는 서버가
+    만든 해제·보호 자산 격리 제안이다. AI_CANDIDATE 문맥을 공유하므로 런북 종류로 구분한다.
+    이는 생성 주체를 기록한 구분이 아니다. AI의 해제·격리 제안을 허용할 때는 검증 문맥이나
     생성 주체를 분리해야 최초 분석 평가에서 AI 후보까지 제외되는 일을 막을 수 있다.
     """
     if not incident_ids:
@@ -40,7 +40,9 @@ def candidate_evaluations_by_incident(
         ))
         .where(
             models.RunbookCandidate.incident_id.in_(incident_ids),
-            models.RunbookCandidate.runbook_id != RunbookId.RUNBOOK_NACL_RESTORE,
+            models.RunbookCandidate.runbook_id.not_in((
+                RunbookId.RUNBOOK_NACL_RESTORE, RunbookId.RUNBOOK_EC2_ISOLATE,
+            )),
         )
         .order_by(
             models.RunbookCandidate.created_at,

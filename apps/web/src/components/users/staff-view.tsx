@@ -5,22 +5,45 @@
 //
 // 개인정보 보호를 위해 처음에는 아무 계정도 보이지 않고, 이메일로 검색한 결과만 보인다.
 // 중앙 관리계정 자신은 목록에서 뺀다. 최종 결정자라 스스로를 관리할 일이 없고, 서버도 자기 변경을 거절한다.
+//
+// 직원 초대(`POST /staff`, #572 1번)는 담당 그룹 없는 관리자 직원계정만 만든다. 중앙 관리계정은 초대한 뒤
+// 등급 변경(`PUT /staff/{id}/role`)으로 지정한다. 초대가 끝나면 그 이메일로 검색해 새 계정 행을 바로 보인다.
 
+import { ChevronDown } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
+import { HangulWarnedInput } from '@/components/auth/hangul-warned-input';
 import { useSession } from '@/components/auth/session-provider';
-import { INPUT_CLASS } from '@/components/form-classes';
+import { INPUT_CLASS, LABEL_CLASS } from '@/components/form-classes';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ActionDialog, HistorySheet } from '@/components/users/users-view';
-import { changeStaffStatus, getStaffEvents, getStaffGroups, listGroups, replaceStaffGroups } from '@/lib/api/client';
+import {
+  changeStaffRole,
+  changeStaffStatus,
+  getStaffEvents,
+  getStaffGroups,
+  inviteStaff,
+  listGroups,
+  replaceStaffGroups,
+  resendStaffInvite,
+} from '@/lib/api/client';
 import { ACCOUNT_KIND_LABELS } from '@/lib/roles';
-import { STATUS_LABELS, formatUserTime } from '@/lib/user-admin';
-import type { GroupItem, StaffItem, TenantListItem } from '@/types/api';
+import { STATUS_LABELS, formatUserTime, staffAdminErrorMessage } from '@/lib/user-admin';
+import type { GroupItem, PlatformRole, StaffItem, TenantListItem } from '@/types/api';
 
-type Panel = { kind: 'status' | 'history' | 'groups'; user: StaffItem };
+const PLATFORM_ROLES: readonly PlatformRole[] = ['TENANT_MANAGER', 'CENTRAL_ADMIN'];
+
+type Panel = { kind: 'invite' } | { kind: 'status' | 'history' | 'groups' | 'role' | 'resend'; user: StaffItem };
 
 export function StaffView({
   staff,
@@ -48,10 +71,21 @@ export function StaffView({
     setQuery(draft);
   }
 
+  function open(next: Panel) {
+    setDone(null);
+    setPanel(next);
+  }
+
   function finished(message: string) {
     setPanel(null);
     setDone(message);
     router.refresh();
+  }
+
+  function invited(email: string) {
+    setDraft(email);
+    setQuery(email);
+    finished(`${email}을(를) 관리자 직원계정으로 초대했습니다.`);
   }
 
   const close = () => setPanel(null);
@@ -59,8 +93,11 @@ export function StaffView({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold">계정 관리</h1>
+        <Button type="button" onClick={() => open({ kind: 'invite' })}>
+          직원 초대
+        </Button>
       </div>
 
       <form role="search" className="flex max-w-md gap-2" onSubmit={search}>
@@ -99,11 +136,11 @@ export function StaffView({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>이메일</TableHead>
-                <TableHead>계정 종류</TableHead>
-                <TableHead>상태</TableHead>
+                <TableHead className="w-[34%]">이메일</TableHead>
+                <TableHead className="w-[18%]">계정 종류</TableHead>
+                <TableHead className="w-[12%]">상태</TableHead>
                 <TableHead>마지막 로그인</TableHead>
-                <TableHead>
+                <TableHead className="w-px">
                   <span className="sr-only">관리</span>
                 </TableHead>
               </TableRow>
@@ -117,21 +154,35 @@ export function StaffView({
                   <TableCell>
                     {user.last_login_at === null ? '로그인 기록 없음' : formatUserTime(user.last_login_at)}
                   </TableCell>
-                  <TableCell>
-                    <div className="flex gap-1">
-                      {/* 담당 배정은 관리자 직원계정만 받는다. 중앙 관리계정은 전체 고객사를 본다(서버도 409로 거절). */}
-                      {user.platform_role === 'TENANT_MANAGER' ? (
-                        <Button type="button" size="sm" variant="outline" onClick={() => setPanel({ kind: 'groups', user })}>
-                          담당 그룹
+                  <TableCell className="text-right">
+                    {/* 메뉴는 비모달이다. 항목을 고르면 메뉴가 닫히고 확인 모달이 열린다(users-view와 같다). */}
+                    <DropdownMenu modal={false}>
+                      <DropdownMenuTrigger asChild>
+                        <Button type="button" size="sm" variant="outline" aria-label={`${user.email} 관리`}>
+                          관리
+                          <ChevronDown aria-hidden />
                         </Button>
-                      ) : null}
-                      <Button type="button" size="sm" variant="outline" onClick={() => setPanel({ kind: 'status', user })}>
-                        {user.status === 'ACTIVE' ? '비활성화' : '활성화'}
-                      </Button>
-                      <Button type="button" size="sm" variant="ghost" onClick={() => setPanel({ kind: 'history', user })}>
-                        이력
-                      </Button>
-                    </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent>
+                        {/* 담당 배정은 관리자 직원계정만 받는다. 중앙 관리계정은 전체 고객사를 본다(서버도 409로 거절). */}
+                        {user.platform_role === 'TENANT_MANAGER' ? (
+                          <DropdownMenuItem onSelect={() => open({ kind: 'groups', user })}>담당 그룹</DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuItem onSelect={() => open({ kind: 'role', user })}>등급 변경</DropdownMenuItem>
+                        <DropdownMenuItem
+                          destructive={user.status === 'ACTIVE'}
+                          onSelect={() => open({ kind: 'status', user })}
+                        >
+                          {user.status === 'ACTIVE' ? '비활성화' : '활성화'}
+                        </DropdownMenuItem>
+                        {/* 아직 로그인한 적이 없는 직원만. 재발송 가능 여부의 최종 판정은 서버다(409). */}
+                        {user.last_login_at === null ? (
+                          <DropdownMenuItem onSelect={() => open({ kind: 'resend', user })}>초대 재발송</DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => open({ kind: 'history', user })}>이력</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               ))}
@@ -139,6 +190,29 @@ export function StaffView({
           </Table>
         </>
       )}
+
+      {panel?.kind === 'invite' ? <StaffInviteDialog onClose={close} onDone={invited} /> : null}
+
+      {panel?.kind === 'role' ? (
+        <StaffRoleDialog
+          user={panel.user}
+          onClose={close}
+          onDone={() => finished(`${panel.user.email}의 등급을 바꿨습니다.`)}
+        />
+      ) : null}
+
+      {panel?.kind === 'resend' ? (
+        <ActionDialog
+          action="resend"
+          title="초대 메일 재발송"
+          description={`${panel.user.email}(으)로 초대 메일을 다시 보냅니다.`}
+          confirmLabel="재발송"
+          errorMessage={(code) => staffAdminErrorMessage('resend', code)}
+          run={() => resendStaffInvite(panel.user.user_id)}
+          onClose={close}
+          onDone={() => finished('초대 메일을 다시 보냈습니다.')}
+        />
+      ) : null}
 
       {panel?.kind === 'status' ? (
         <ActionDialog
@@ -151,6 +225,7 @@ export function StaffView({
           }
           confirmLabel={panel.user.status === 'ACTIVE' ? '비활성화' : '활성화'}
           destructive={panel.user.status === 'ACTIVE'}
+          errorMessage={(code) => staffAdminErrorMessage('status', code)}
           run={() => changeStaffStatus(panel.user.user_id, panel.user.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE')}
           onClose={close}
           onDone={() => finished('계정 상태를 바꿨습니다.')}
@@ -169,6 +244,88 @@ export function StaffView({
         <HistorySheet user={panel.user} emailOf={emailOf} onClose={close} load={getStaffEvents} />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * 직원 초대 창(#572 1번). 이메일만 받는다. 서버가 담당 그룹 없는 관리자 직원계정으로 만들고 Cognito가 임시 비밀번호
+ * 메일을 보낸다. 이메일은 다듬지 않고 입력 그대로 보낸다(서버가 형식을 판정한다).
+ */
+function StaffInviteDialog({ onClose, onDone }: { onClose: () => void; onDone: (email: string) => void }) {
+  const sent = useRef('');
+
+  return (
+    <ActionDialog
+      action="invite"
+      title="직원 초대"
+      description="입력한 이메일로 임시 비밀번호가 담긴 초대 메일을 보냅니다. 계정은 담당 그룹이 없는 관리자 직원계정으로 만들어집니다."
+      confirmLabel="초대"
+      errorMessage={(code) => staffAdminErrorMessage('invite', code)}
+      run={async (form) => {
+        const created = await inviteStaff({ email: String(form.get('email') ?? '') });
+        sent.current = created.email;
+      }}
+      onClose={onClose}
+      onDone={() => onDone(sent.current)}
+    >
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="staff-invite-email" className={LABEL_CLASS}>
+          이메일
+        </label>
+        <HangulWarnedInput
+          id="staff-invite-email"
+          name="email"
+          type="email"
+          required
+          autoFocus
+          className={INPUT_CLASS}
+        />
+      </div>
+    </ActionDialog>
+  );
+}
+
+/** 등급 변경 창. 서버는 등급이 바뀌면 저장된 담당 그룹을 비운다. 그 결과를 저장 전에 경고로 보인다. */
+function StaffRoleDialog({ user, onClose, onDone }: { user: StaffItem; onClose: () => void; onDone: () => void }) {
+  const [role, setRole] = useState<PlatformRole>(user.platform_role);
+
+  return (
+    <ActionDialog
+      action="role"
+      title="등급 변경"
+      description={`${user.email} 계정의 등급을 바꿉니다.`}
+      confirmLabel="변경"
+      disabled={role === user.platform_role}
+      errorMessage={(code) => staffAdminErrorMessage('role', code)}
+      run={() => changeStaffRole(user.user_id, role)}
+      onClose={onClose}
+      onDone={onDone}
+    >
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="staff-role-select" className={LABEL_CLASS}>
+          등급 (현재: {ACCOUNT_KIND_LABELS[user.platform_role]})
+        </label>
+        <select
+          id="staff-role-select"
+          value={role}
+          onChange={(event) => setRole(event.target.value as PlatformRole)}
+          className={INPUT_CLASS}
+        >
+          {PLATFORM_ROLES.map((value) => (
+            <option key={value} value={value}>
+              {ACCOUNT_KIND_LABELS[value]}
+            </option>
+          ))}
+        </select>
+      </div>
+      {role === user.platform_role ? null : (
+        <p className="text-xs text-destructive">
+          {role === 'CENTRAL_ADMIN'
+            ? '모든 고객사와 관리자 직원계정을 관리할 수 있게 됩니다. 저장된 담당 그룹은 비워집니다.'
+            : '담당 그룹이 없는 관리자 직원계정이 됩니다. 담당 그룹을 배정하기 전에는 어떤 고객사도 볼 수 없습니다.'}
+        </p>
+      )}
+    </ActionDialog>
   );
 }
 

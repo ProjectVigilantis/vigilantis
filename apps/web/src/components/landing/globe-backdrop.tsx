@@ -4,7 +4,7 @@
 // 지구는 화면 오른쪽 아래에 걸쳐 왼쪽 위 사분면만 보이게 둔다. 경선 · 위선 그물은 배경 격자와 같은 결이고,
 // 대륙은 해안선 외곽선으로 긋는다(globe-data.ts). AWS 상용 리전마다 점과 퍼져 나가는 파동을 두고, 파동은
 // 리전마다 시작 시점을 엇갈려 한꺼번에 깜빡이지 않게 한다. Vigilantis가 관제하는 서울 리전만 초록으로 크게 표시한다.
-// 움직임은 [움직임 멈춤](motion-toggle.tsx)과 모션 줄이기 설정을 따른다.
+// 움직임은 모션 줄이기 설정을 따른다.
 
 import { useEffect, useRef } from 'react';
 
@@ -178,7 +178,7 @@ export function GlobeBackdrop({ className }: { className?: string }) {
     if (!canvas || !ctx) return;
 
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const stopped = () => reduce.matches || document.documentElement.dataset.motion === 'paused';
+    const stopped = () => reduce.matches;
     let w = 0;
     let h = 0;
     let elapsed = 0;
