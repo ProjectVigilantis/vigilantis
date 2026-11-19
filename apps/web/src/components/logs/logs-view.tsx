@@ -220,7 +220,7 @@ export function LogsView({
             <button
               type="button"
               onClick={() => setShown((n) => n + PAGE_ROWS)}
-              className="text-primary mt-3 text-sm font-semibold hover:underline"
+              className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring mt-3 rounded-sm text-sm font-semibold transition-colors focus-visible:ring-2 focus-visible:outline-none"
             >
               {visible.length - shown}건 더 보기
             </button>

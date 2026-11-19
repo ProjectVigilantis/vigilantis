@@ -79,7 +79,7 @@ export function IncidentCard({
           버튼은 아래에서 `z-10`으로 이 오버레이 위에 올린다(PR #171 리뷰). */}
       <Link
         href={`/incidents/${encodeURIComponent(incident.incident_id)}`}
-        className="hover:text-primary min-w-0 font-medium underline-offset-4 after:absolute after:inset-0 hover:underline"
+        className="hover:text-link min-w-0 font-medium underline-offset-4 after:absolute after:inset-0 hover:underline"
       >
         <span className="line-clamp-2">{incidentTitle(incident)}</span>
       </Link>

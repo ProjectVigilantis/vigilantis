@@ -141,10 +141,10 @@ export function UsersView({
           <span>
             고객사 <span className="font-semibold">{tenantFilter.name ?? tenantFilter.id}</span>의 직원만 보는 중
           </span>
-          <Link href={`/tenants/${encodeURIComponent(tenantFilter.id)}`} className="text-primary hover:underline">
+          <Link href={`/tenants/${encodeURIComponent(tenantFilter.id)}`} className="text-link hover:underline">
             고객사 상세로
           </Link>
-          <Link href="/users" className="text-primary hover:underline">
+          <Link href="/users" className="text-link hover:underline">
             전체 계정 보기
           </Link>
         </div>

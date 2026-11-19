@@ -64,7 +64,7 @@ export function SupportPager({
     return (
       <p role="status" className="text-muted-foreground text-sm">
         {page}쪽에는 건이 없습니다.{' '}
-        <Link href={supportPageHref(path, totalPages)} className="text-primary font-semibold hover:underline">
+        <Link href={supportPageHref(path, totalPages)} className="text-link font-semibold hover:underline">
           마지막 쪽({totalPages}쪽)으로
         </Link>
       </p>

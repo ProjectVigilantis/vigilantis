@@ -102,7 +102,7 @@ export function NotificationBell() {
               type="button"
               disabled={unread === 0}
               onClick={() => void read(null)}
-              className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none inline-flex items-center gap-1 text-xs font-semibold disabled:pointer-events-none disabled:opacity-40"
+              className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring rounded-sm transition-colors focus-visible:ring-2 focus-visible:outline-none inline-flex items-center gap-1 text-xs font-semibold disabled:pointer-events-none disabled:opacity-40"
             >
               <CheckCheck aria-hidden className="size-3.5" />
               모두 읽음
@@ -117,7 +117,7 @@ export function NotificationBell() {
             {state.kind === 'error' ? (
               <div className="flex items-center justify-between gap-3 px-4 py-6 text-sm">
                 <span className="text-muted-foreground">알림을 불러오지 못했습니다.</span>
-                <button type="button" onClick={() => reload.current()} className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none font-semibold">
+                <button type="button" onClick={() => reload.current()} className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring rounded-sm font-semibold transition-colors focus-visible:ring-2 focus-visible:outline-none">
                   다시 시도
                 </button>
               </div>
@@ -161,12 +161,12 @@ export function NotificationBell() {
 
           <div className="flex text-xs font-semibold">
             <Popover.Close asChild>
-              <Link href={SIGNUP_REQUESTS_PATH} className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none flex-1 px-4 py-2.5 text-center">
+              <Link href={SIGNUP_REQUESTS_PATH} className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring transition-colors focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset flex-1 px-4 py-2.5 text-center">
                 도입 신청함
               </Link>
             </Popover.Close>
             <Popover.Close asChild>
-              <Link href={INQUIRIES_PATH} className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground transition-colors focus-visible:outline-none flex-1 px-4 py-2.5 text-center">
+              <Link href={INQUIRIES_PATH} className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring transition-colors focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset flex-1 px-4 py-2.5 text-center">
                 고객사 문의함
               </Link>
             </Popover.Close>

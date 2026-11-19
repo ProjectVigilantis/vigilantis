@@ -892,7 +892,7 @@ export function IncidentDetail({
             {subject ? (
               <Link
                 href={`/monitoring?asset=${encodeURIComponent(subject.arn)}`}
-                className="hover:text-primary font-medium underline-offset-4 hover:underline"
+                className="hover:text-link font-medium underline-offset-4 hover:underline"
               >
                 {subject.name ?? subject.resource_id}
               </Link>

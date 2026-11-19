@@ -56,7 +56,7 @@ export function LegalDocument({
           <ol className="gap-x-6 text-sm sm:columns-2">
             {sections.map((s) => (
               <li key={s.id} className="mb-1.5 break-inside-avoid">
-                <a href={`#${s.id}`} className="text-primary hover:underline">
+                <a href={`#${s.id}`} className="text-link hover:underline">
                   {s.title}
                 </a>
               </li>

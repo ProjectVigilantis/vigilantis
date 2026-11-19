@@ -156,7 +156,7 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                             AWS 연결이 확인되면 {item.email}을 고객사 중앙계정으로 초대하세요.{' '}
                             <Link
                               href={`${TENANTS_PATH}/${encodeURIComponent(item.tenant_id)}`}
-                              className="text-primary font-semibold hover:underline"
+                              className="text-link font-semibold hover:underline"
                             >
                               만든 고객사로
                             </Link>
@@ -164,7 +164,7 @@ export function SignupRequestsView({ items, focusId }: { items: SignupRequestIte
                         ) : (
                           <>
                             이어진 고객사가 없는 승인입니다.{' '}
-                            <Link href={TENANTS_PATH} className="text-primary font-semibold hover:underline">
+                            <Link href={TENANTS_PATH} className="text-link font-semibold hover:underline">
                               고객사 화면으로
                             </Link>
                           </>

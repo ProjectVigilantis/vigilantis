@@ -315,7 +315,7 @@ export function LoginFlow({
               계정이 없으신가요?{' '}
               <button
                 type="button"
-                className="text-primary font-semibold hover:underline disabled:opacity-50"
+                className="text-link font-semibold hover:underline disabled:opacity-50"
                 disabled={pending}
                 onClick={onSignup}
               >
