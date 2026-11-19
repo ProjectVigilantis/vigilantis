@@ -1639,7 +1639,8 @@ export interface PlatformEventItem {
    *  TENANT_UPDATE 의 changed_fields 는 값이 바뀐 칸 이름(name · regions · collect_vpc_ids · subscription)이고,
    *  TENANT_AUTO_ACTION_CHANGE 의 before · after 는 ENABLED · DISABLED 다.
    *  COLLECTION_RUN 은 region 과 status(SUCCESS · PARTIAL · FAILED)를 싣는다 — 일부 조회를 못 본 회차(PARTIAL)는
-   *  끝까지 돈 회차라 outcome 이 SUCCEEDED 이고, FAILED 일 때만 outcome 이 FAILED 다. */
+   *  끝까지 돈 회차라 outcome 이 SUCCEEDED 이고, FAILED 일 때만 outcome 이 FAILED 다. 회차마다가 아니라 그
+   *  고객사 · 리전의 회차 상태가 직전과 달라질 때만 한 행이 남는다(「이때부터 이 상태」로 읽는다). */
   details: Record<string, unknown>;
   session_id: string | null;
   /** 클라이언트가 X-Request-ID 로 정할 수 있다 — 같은 값이라고 같은 요청이라는 증거가 아니다. */

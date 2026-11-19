@@ -27,6 +27,7 @@ from typing import NamedTuple
 
 from botocore.exceptions import BotoCoreError, ClientError
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from config import get_collector_settings
@@ -108,7 +109,13 @@ def _record_run_event(
     status: CollectionRunStatus,
     failure: BaseException | None = None,
 ) -> None:
-    """끝난 수집 회차 하나를 플랫폼 활동 로그에 남긴다(#589 B · COLLECTION_RUN).
+    """끝난 수집 회차를 플랫폼 활동 로그에 남긴다(#589 B · COLLECTION_RUN) — **상태가 직전과 달라졌을 때만.**
+
+    수집은 5분마다 고객사 · 리전별로 돈다. 회차마다 남기면 활동 로그가 수집 행으로 덮이므로, 같은
+    (소유, 리전)의 직전 끝난 회차와 상태(SUCCESS · PARTIAL · FAILED)가 다를 때만 한 행을 남긴다(PR 리뷰).
+    그 리전의 첫 회차는 견줄 것이 없어 남긴다. 그래서 행은 「수집이 이때부터 이 상태다」로 읽는다 — 모든
+    회차의 기록은 collection_runs 에 그대로 있다. 직전 회차를 고르는 기준은
+    assets_repo.previous_finished_run_status 다.
 
     회차를 끝내는 쓰기와 **같은 트랜잭션**이다 — commit 은 호출부가 한다. 회차 단위로만 남긴다(자산 하나하나는
     남기지 않는다). 행위자는 SYSTEM, 대상은 그 회차, 소속은 회차의 고객사다(레거시 단일 계정 회차는 없다).
@@ -116,11 +123,18 @@ def _record_run_event(
     회차라 성공으로 남기고 상태를 details 에 싣는다.
 
     기록 계약에 맞지 않는 값(ValueError)은 수집을 막지 않고 앱 로그에만 남긴다 — 활동 로그의 형식 문제로
-    자산 적재가 멈추면 안 된다. DB 쓰기 오류는 같은 트랜잭션이라 그대로 올라간다.
+    자산 적재가 멈추면 안 된다. DB 오류(직전 회차 조회 · 쓰기)는 같은 트랜잭션이라 그대로 올라간다 — 실패
+    기록 경로(_record_failed_region)만 그것을 받아 회차 행을 지킨다.
     """
+    from db.repositories import assets as assets_repo
     from db.repositories import platform_events as platform_events_repo
     from schemas.platform_events import PlatformEventAction, PlatformEventOutcome
 
+    previous = assets_repo.previous_finished_run_status(
+        db, region=region, tenant_id=tenant_id, exclude_run_id=str(collection_run_id)
+    )
+    if previous is status:
+        return  # 직전 회차와 같은 상태 — 새로 알릴 것이 없다
     failed = status is CollectionRunStatus.FAILED
     details = {"region": region, "status": status.value}
     if failed:
@@ -1485,14 +1499,21 @@ def _record_failed_region(
             # error_summary 키 축을 PARTIAL(서비스 라벨)과 통일 — 실패 단계 라벨. 리전은 run.region 이 담는다.
             error_summary=_failures_summary({REGION_FAILURE_LABEL: _failure_reason(exc)}),
         )
-        _record_run_event(
-            db,
-            collection_run_id=run.collection_run_id,
-            tenant_id=tenant_id,
-            region=region,
-            status=CollectionRunStatus.FAILED,
-            failure=exc,
-        )
+        # 활동 로그는 savepoint 안에서 쓴다 — 그 쓰기가 DB 오류로 실패해도 FAILED 회차는 남긴다(PR 리뷰).
+        # 여기는 수집이 실패했다는 유일한 흔적이다. 활동 로그 장애로 이 행까지 되돌려지면 화면에는 마지막으로
+        # 성공한 옛 회차가 계속 보여, 수집이 멈췄다는 신호가 가려진다.
+        try:
+            with db.begin_nested():
+                _record_run_event(
+                    db,
+                    collection_run_id=run.collection_run_id,
+                    tenant_id=tenant_id,
+                    region=region,
+                    status=CollectionRunStatus.FAILED,
+                    failure=exc,
+                )
+        except SQLAlchemyError:
+            _log.exception("리전 %s 실패 회차의 활동 로그 기록 실패 — 회차 행은 남긴다", region)
         db.commit()
     except Exception:
         db.rollback()
