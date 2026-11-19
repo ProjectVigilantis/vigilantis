@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   description: `${SERVICE_NAME} 도입 신청부터 AWS 계정 연결, 관리자 계정 발급까지의 순서와 연결 역할이 받는 권한을 안내합니다.`,
 };
 
-const LINK = 'text-primary hover:underline';
+const LINK = 'text-link hover:underline';
 
 // 템플릿이 주는 동작을 빠짐없이 적는다. 고객사는 이 표를 보고 역할 생성을 정하므로, 삭제 · 생성 권한을 줄여 적으면 안 된다.
 const PERMISSIONS: [string, string][] = [

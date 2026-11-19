@@ -20,7 +20,7 @@ export const metadata: Metadata = {
   description: `${SERVICE_NAME} 이용 질문과 도입 중 오류를 받는 고객센터 연락처와 운영 시간을 안내합니다.`,
 };
 
-const LINK = 'text-primary hover:underline';
+const LINK = 'text-link hover:underline';
 const OUTAGE_KINDS = [INQUIRY_CATEGORY_LABELS.OUTAGE.label, INQUIRY_CATEGORY_LABELS.BUG.label].join(' · ');
 
 const SECTIONS: LegalSection[] = [
