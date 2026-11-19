@@ -57,8 +57,8 @@ function Preset({
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        'flex cursor-pointer items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors',
-        active ? 'bg-muted text-foreground font-medium' : 'text-muted-foreground hover:text-foreground',
+        'focus-visible:ring-ring flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors focus-visible:ring-2 focus-visible:outline-none',
+        active ? 'text-foreground font-semibold' : 'text-foreground-secondary hover:text-foreground',
       )}
     >
       {children}

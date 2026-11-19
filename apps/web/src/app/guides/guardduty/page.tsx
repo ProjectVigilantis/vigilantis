@@ -101,7 +101,7 @@ const SECTIONS: LegalSection[] = [
         <p>
           {SERVICE_NAME} 이용 요금과는 별개이며 AWS 청구서에 나옵니다. 무료 체험이 며칠 남았는지와 예상 비용은 GuardDuty
           콘솔의 사용량 화면에서 볼 수 있습니다. 요금 기준은{' '}
-          <a href={GUARDDUTY_PRICING_URL} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+          <a href={GUARDDUTY_PRICING_URL} target="_blank" rel="noreferrer" className="text-link hover:underline">
             AWS의 GuardDuty 요금 안내
           </a>
           를 따릅니다.

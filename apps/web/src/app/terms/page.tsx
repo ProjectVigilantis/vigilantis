@@ -175,7 +175,7 @@ const SECTIONS: LegalSection[] = [
         items={[
           '회사는 서비스를 계속적이고 안정적으로 제공하도록 노력합니다.',
           <>
-            회사는 이용자의 개인정보를 <Link href={PRIVACY_PATH} className="text-primary hover:underline">개인정보처리방침</Link>에
+            회사는 이용자의 개인정보를 <Link href={PRIVACY_PATH} className="text-link hover:underline">개인정보처리방침</Link>에
             따라 보호합니다.
           </>,
           '회사는 고객사 AWS 계정에서 얻은 정보를 서비스 제공 밖의 목적으로 쓰지 않습니다.',

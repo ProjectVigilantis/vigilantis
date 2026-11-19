@@ -56,7 +56,7 @@ export function LoginOverlay() {
               <VigilantisLogo className="size-[33px] text-white" />
               <span className="text-[23px] font-bold tracking-tight">Vigilantis</span>
             </span>
-            <DialogPrimitive.Close className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring inline-flex h-10 items-center gap-1.5 rounded-md px-3 text-sm font-semibold hover:bg-white/8 focus-visible:ring-2 focus-visible:outline-none">
+            <DialogPrimitive.Close className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring inline-flex h-10 items-center gap-1.5 rounded-md px-3 text-sm font-semibold transition-colors focus-visible:ring-2 focus-visible:outline-none">
               <X aria-hidden className="size-4" />
               닫기
             </DialogPrimitive.Close>

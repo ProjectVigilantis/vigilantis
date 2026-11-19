@@ -118,7 +118,7 @@ export function ShellHeader() {
 
 const NAV_ITEM =
   'flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 whitespace-nowrap transition-colors focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none';
-const NAV_IDLE = 'text-[13px] font-medium text-white/70 hover:bg-white/8 hover:text-white';
+const NAV_IDLE = 'text-[13px] font-medium text-white/70 transition-colors hover:text-white';
 // 선택된 메뉴는 칠하지 않고 글자만 키우고 굵게 한다(DESIGN.md `nav-item-active`, 2026-11-16).
 const NAV_ACTIVE = 'text-sm font-extrabold text-white';
 

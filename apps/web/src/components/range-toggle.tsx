@@ -14,7 +14,7 @@ export function RangeToggle<T extends number>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div role="group" aria-label="기간" className="bg-muted flex rounded-md p-0.5">
+    <div role="group" aria-label="기간" className="flex gap-1">
       {options.map((o) => (
         <button
           key={o.value}
@@ -22,8 +22,8 @@ export function RangeToggle<T extends number>({
           aria-pressed={value === o.value}
           onClick={() => onChange(o.value)}
           className={cn(
-            'focus-visible:ring-ring h-7 rounded px-2.5 text-xs font-semibold whitespace-nowrap transition-colors focus-visible:ring-2 focus-visible:outline-none',
-            value === o.value ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+            'focus-visible:ring-ring h-7 rounded px-2 text-xs whitespace-nowrap transition-colors focus-visible:ring-2 focus-visible:outline-none',
+            value === o.value ? 'text-foreground font-semibold' : 'text-foreground-secondary hover:text-foreground',
           )}
         >
           {o.label}

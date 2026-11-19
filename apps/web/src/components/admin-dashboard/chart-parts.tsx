@@ -108,7 +108,7 @@ export function ShareBar({ parts }: { parts: readonly SharePart[] }) {
 
 export function MoreLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
-    <Link href={href} className="text-primary mt-auto inline-flex w-fit items-center gap-0.5 pt-2 text-sm font-semibold hover:underline">
+    <Link href={href} className="text-link mt-auto inline-flex w-fit items-center gap-0.5 pt-2 text-sm font-semibold hover:underline">
       {children}
       <ChevronRight aria-hidden className="size-4" />
     </Link>

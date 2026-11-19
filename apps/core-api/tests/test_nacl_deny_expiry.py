@@ -34,7 +34,9 @@ from schemas.candidates import CandidateStatus  # noqa: E402
 from schemas.runbooks import RunbookId, TriggerSource  # noqa: E402
 from services.aws import executor as ex  # noqa: E402
 from audit_cleanup import purge_audit_events  # noqa: E402
+from platform_event_faults import failing_platform_event_write  # noqa: E402
 from sqlalchemy import delete, func, select, text, update  # noqa: E402
+from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from test_nacl_release_offer import (  # noqa: E402,F401  (fixtures + helpers)
@@ -437,6 +439,33 @@ def test_expiry_records_a_system_trigger_and_a_completion_not_a_rollback(db, bar
         ("ACTION_AUTO_TRIGGER", "SUCCEEDED", "SYSTEM", restore.execution_id),
         ("ACTION_COMPLETE", "SUCCEEDED", "SYSTEM", restore.execution_id),
     ]
+
+
+def test_a_failed_platform_event_write_leaves_the_expiry_unreserved(db, blocked, aws):
+    """활동 로그 행(ACTION_AUTO_TRIGGER)을 못 쓰면 해제 예약 · 후보 무효화 · 상태 전이 · 감사 기록이 함께 되돌아간다.
+    만료 스캔은 그 차단을 다음 주기에 다시 집는다(#589 — 상태 변경은 같은 트랜잭션)."""
+    incident_id, block_id = blocked()
+    status_before = incident_status(db, incident_id)
+    audit_before = len(audit_repo.list_by_incident(db, incident_id))
+    before = platform_event_count(db)
+
+    with failing_platform_event_write() as failed, pytest.raises(IntegrityError):
+        workflows.reserve_nacl_deny_expiry(db, block_id)
+    db.rollback()
+
+    assert failed.count == 1
+    assert restores(db, incident_id) == []
+    [offer] = release_candidates(db, incident_id)
+    assert offer.status is CandidateStatus.EXECUTABLE
+    assert incident_status(db, incident_id) is status_before
+    assert len(audit_repo.list_by_incident(db, incident_id)) == audit_before
+    assert platform_event_count(db) == before
+    assert deletes(aws) == 0
+
+    dispatcher.dispatch_pending(db)  # 다음 주기 — 그대로 만료 해제된다
+    [restore] = restores(db, incident_id)
+    assert restore.status is ExecutionStatus.SUCCESS
+    assert deletes(aws) == 1
 
 
 def test_a_stale_dedup_lookup_hits_the_real_constraint_and_keeps_the_first_reservation(

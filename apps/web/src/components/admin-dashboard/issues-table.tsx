@@ -42,8 +42,8 @@ export function IssuesTable({ rows, nowMs }: { rows: readonly IssueRow[]; nowMs:
               aria-pressed={on}
               onClick={() => setFilter(value)}
               className={cn(
-                'focus-visible:ring-ring h-8 rounded-full border px-3 text-[13px] transition-colors focus-visible:ring-2 focus-visible:outline-none',
-                on ? 'border-primary bg-accent text-accent-foreground font-semibold' : 'text-foreground-secondary hover:bg-muted',
+                'focus-visible:ring-ring h-8 rounded-md px-2 text-[13px] transition-colors focus-visible:ring-2 focus-visible:outline-none',
+                on ? 'text-foreground font-semibold' : 'text-foreground-secondary hover:text-foreground',
               )}
             >
               {label} <span className="tabular-nums">{count(value)}</span>

@@ -231,7 +231,7 @@ const SECTIONS: LegalSection[] = [
             ['직책', PRIVACY_OFFICER.position],
             [
               '이메일',
-              <a key="e" href={`mailto:${PRIVACY_OFFICER.email}`} className="text-primary hover:underline">
+              <a key="e" href={`mailto:${PRIVACY_OFFICER.email}`} className="text-link hover:underline">
                 {PRIVACY_OFFICER.email}
               </a>,
             ],
@@ -256,7 +256,7 @@ const SECTIONS: LegalSection[] = [
     body: (
       <p>
         이 처리방침을 바꾸면 시행 7일 전부터 서비스 화면에 알립니다. 이용자 권리에 중요한 변경은 시행 30일 전에 알립니다.
-        서비스 이용 조건은 <Link href={TERMS_PATH} className="text-primary hover:underline">이용약관</Link>을 따릅니다.
+        서비스 이용 조건은 <Link href={TERMS_PATH} className="text-link hover:underline">이용약관</Link>을 따릅니다.
       </p>
     ),
   },

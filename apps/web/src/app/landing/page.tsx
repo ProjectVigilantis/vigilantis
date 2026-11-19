@@ -139,7 +139,7 @@ export default function LandingPage() {
             <Link
               href={LOGIN_OVERLAY_HREF}
               scroll={false}
-              className="bg-primary inline-flex h-10 items-center rounded-md px-4 text-sm font-semibold text-white hover:bg-primary/90"
+              className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground focus-visible:ring-ring rounded-md transition-colors focus-visible:ring-2 focus-visible:outline-none inline-flex h-10 items-center px-3 text-sm font-semibold"
             >
               로그인
             </Link>
@@ -164,7 +164,7 @@ export default function LandingPage() {
                 <Link
                   href={LOGIN_OVERLAY_HREF}
                   scroll={false}
-                  className="bg-primary inline-flex h-12 items-center gap-2 rounded-md px-6 text-base font-semibold text-white hover:bg-primary/90"
+                  className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground focus-visible:ring-ring rounded-md transition-colors focus-visible:ring-2 focus-visible:outline-none inline-flex h-12 items-center gap-2 text-base font-semibold"
                 >
                   로그인하고 시작하기
                   <ArrowRight aria-hidden className="size-4" />
@@ -309,7 +309,7 @@ export default function LandingPage() {
               <Link
                 href={LOGIN_OVERLAY_HREF}
                 scroll={false}
-                className="bg-primary inline-flex h-12 shrink-0 items-center gap-2 rounded-md px-6 text-base font-semibold text-white hover:bg-primary/90"
+                className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground focus-visible:ring-ring rounded-md transition-colors focus-visible:ring-2 focus-visible:outline-none inline-flex h-12 shrink-0 items-center gap-2 text-base font-semibold"
               >
                 <Eye aria-hidden className="size-4.5" />
                 로그인하고 대시보드 보기
