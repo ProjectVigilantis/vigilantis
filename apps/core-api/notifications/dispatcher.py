@@ -14,7 +14,7 @@ discover    채널 행이 없는 사건을 created_at 순으로 batch_size만큼
             설정을 고치거나 더해도 BLOCKED를 되살리거나 과거 사건을 보내지 않는다.
 process_one 만료 임대 회수 → PENDING 1건 정리 또는 claim → 전송 → 결과 확정. claim 전에
             현재 max_attempts에 이른 행은 보내지 않고 FAILED(EXHAUSTED)로 닫고(마지막 범주 유지,
-            없으면 UNKNOWN), 발신기가 없는 채널의 행은 기한과 무관하게 BLOCKED(CHANNEL_NOT_CONFIGURED)로
+            없으면 UNKNOWN), 선택된 채널의 발신기가 없으면 기한과 무관하게 BLOCKED(CHANNEL_UNAVAILABLE)로
             닫는다. 보내기 직전에 행의 바인딩 스냅숏, DB 현재 바인딩(epoch), 설정 해석, 사건 계정이
             모두 같아야 한다. 하나라도 다르면 BLOCKED(ROUTE_CHANGED)이며 다른 수신처로 옮겨 보내지 않는다.
             발견·claim 시 tenants의 현재 계정도 대조한다. DB 조회 오류는 종결하지 않고 회차를 재시도한다.
@@ -32,6 +32,12 @@ UNKNOWN으로 회수해 재시도하고, max_attempts에 이르면 FAILED(EXHAUS
 늦은 결과는 막힌다(그 사건은 다시 보낼 수 있다). 종결(SUCCEEDED·FAILED·BLOCKED)은 되돌리지 않는다.
 재전송 기능은 없다.
 
+활동 로그(#589): 두 채널이 종결되면 사건 event_id당 한 행을 같은 트랜잭션에 남긴다. 미선택·활성화 전
+채널은 제외한다. 옛 CHANNEL_NOT_CONFIGURED는 미선택과 설정 실패를 가를 수 없어 해당 사건은 기록하지
+않으며 이미 끝난 사건도 소급하지 않는다. FAILED는 전체 공급자 접수를 확인하지 못했다는 뜻이지
+미전달 증명이 아니다. 채널별 사실은 notification_deliveries에 남고 reason_code는 대표 사유 하나다.
+활동 로그 쓰기가 실패하면 공급자가 접수한 알림도 종결 상태 롤백과 임대 회수 뒤 재발송될 수 있다.
+
 Slack: 모든 처리 프로세스가 notification_lanes의 Slack 관문 1행을 공유한다. 간격 관문(available_at)은
 호출 중 임대 길이만큼 닫히고 보유자가 결과 확정 뒤 1초 간격으로 연다. 429 Retry-After는 cooldown_until에
 따로 남아 최댓값으로만 늘며(임대를 잃은 늦은 결과 포함), 보유자 해제·재기동으로 줄지 않는다.
@@ -43,14 +49,27 @@ import asyncio
 import logging
 import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
+from db import models
 from db.repositories import notification_deliveries as deliveries_repo
 from db.repositories import notification_events as events_repo
-from notifications.contracts import CHANNELS, Channel, EventSnapshot, Route, SendResult
-from notifications.routing import CHANNEL_NOT_CONFIGURED, OWNERSHIP_MISSING
+from db.repositories import platform_events as activity_repo
+from schemas.platform_events import (
+    PlatformEventAction,
+    PlatformEventOutcome,
+    PlatformEventTargetType,
+)
 from sqlalchemy.orm import Session
+
+from notifications.contracts import CHANNELS, Channel, EventSnapshot, Route, SendResult
+from notifications.routing import (
+    CHANNEL_NOT_CONFIGURED,
+    CHANNEL_NOT_SELECTED,
+    CHANNEL_UNAVAILABLE,
+    OWNERSHIP_MISSING,
+)
 
 logger = logging.getLogger("vigilantis.notifications.dispatcher")
 
@@ -77,6 +96,51 @@ class _Claim:
 
 
 _CLOSED = object()  # 보내지 않고 종결(BLOCKED·EXHAUSTED)한 claim 결과
+
+
+def _event_outcome(
+    deliveries: list[models.NotificationDelivery],
+) -> tuple[PlatformEventOutcome, dict[str, str]] | None:
+    by_channel = {row.channel: row for row in deliveries}
+    if any(
+        channel not in by_channel
+        or by_channel[channel].state not in ("SUCCEEDED", "FAILED", "BLOCKED")
+        for channel in CHANNELS
+    ):
+        return None
+    if any(row.blocked_reason == CHANNEL_NOT_CONFIGURED for row in deliveries):
+        return None
+    targets = [
+        by_channel[channel] for channel in CHANNELS
+        if by_channel[channel].blocked_reason not in (CHANNEL_NOT_SELECTED, NOT_ACTIVATED)
+    ]
+    if not targets:
+        return None
+    for row in targets:
+        if row.state == "BLOCKED":
+            return PlatformEventOutcome.FAILED, {"reason_code": f"{row.channel}:{row.blocked_reason}"}
+        if row.state == "FAILED":
+            return PlatformEventOutcome.FAILED, {
+                "reason_code": f"{row.channel}:{row.final_reason}:{row.last_category}",
+            }
+    return PlatformEventOutcome.SUCCEEDED, {}
+
+
+def _activity_tenant(
+    incident_tenant: str | None, deliveries: list[models.NotificationDelivery],
+) -> str | None:
+    if incident_tenant is None:
+        return None
+    try:
+        tenant = uuid.UUID(incident_tenant)
+        if any(
+            row.tenant_id is not None and uuid.UUID(row.tenant_id) != tenant
+            for row in deliveries
+        ):
+            return None
+    except ValueError:
+        return None
+    return str(tenant)
 
 
 def _log_failure(name: str, channel: str | None, exc: BaseException) -> None:
@@ -257,8 +321,27 @@ class DeliveryDispatcher:
                     for event in events
                 ]
                 created += deliveries_repo.insert_deliveries(db, rows)
+                self._record_events(db, (event.event_id for event in events))
                 db.commit()
         return created
+
+    def _record_events(self, db: Session, event_ids: Iterable[str]) -> None:
+        for event, incident_tenant in events_repo.lock_for_activity(db, event_ids):
+            if activity_repo.exists_for_target(
+                db, action=PlatformEventAction.NOTIFICATION_SEND,
+                target_type=PlatformEventTargetType.NOTIFICATION, target_id=event.event_id,
+            ):
+                continue
+            deliveries = deliveries_repo.list_by_event(db, event.event_id)
+            result = _event_outcome(deliveries)
+            if result is None:
+                continue
+            outcome, details = result
+            activity_repo.record_platform_event(
+                db, PlatformEventAction.NOTIFICATION_SEND, activity_repo.SYSTEM,
+                outcome=outcome, target_id=event.event_id, details=details,
+                tenant_id=_activity_tenant(incident_tenant, deliveries),
+            )
 
     def _materialize(
         self, event: EventSnapshot, channel: Channel, bindings, tenant_accounts, registry=None,
@@ -271,7 +354,7 @@ class DeliveryDispatcher:
         elif (problem := _tenant_problem(route, tenant_accounts)) is not None:
             reason = problem
         elif channel not in self._senders:
-            reason = CHANNEL_NOT_CONFIGURED
+            reason = CHANNEL_UNAVAILABLE
         elif (
             binding is None
             or binding.fingerprint != route.fingerprint
@@ -327,15 +410,16 @@ class DeliveryDispatcher:
     def _recover(self, channel: Channel) -> None:
         with self._sessions() as db:
             expired = [
-                (row.delivery_id, row.attempts)
+                (row.delivery_id, row.attempts, row.event_id)
                 for row in deliveries_repo.lock_expired(db, channel, self._batch_size)
             ]
-            for delivery_id, attempts in expired:
+            for delivery_id, attempts, _event_id in expired:
                 deliveries_repo.recover_expired(
                     db, delivery_id, self._retry_or_exhaust(attempts, "UNKNOWN", LEASE_EXPIRED, 0),
                 )
+            self._record_events(db, (event_id for _, _, event_id in expired))
             db.commit()
-        for delivery_id, attempts in expired:
+        for delivery_id, attempts, _event_id in expired:
             logger.warning("notification_delivery_lease_expired", extra={
                 "delivery_id": delivery_id, "channel": channel, "attempts": attempts,
             })
@@ -351,25 +435,26 @@ class DeliveryDispatcher:
             if attempts >= self._max_attempts:
                 # 재기동으로 한도가 낮아져도 현재 한도를 넘겨 보내지 않는다(시도 수 증가 없음)
                 deliveries_repo.exhaust_pending(db, delivery_id, self._max_attempts)
+                self._record_events(db, (row.event_id,))
                 db.commit()
                 logger.warning("notification_delivery_exhausted", extra={
                     "delivery_id": delivery_id, "channel": channel, "attempts": attempts,
                 })
                 return _CLOSED
-            if not has_sender:
-                reason = CHANNEL_NOT_CONFIGURED
-            else:
-                event = EventSnapshot.from_row(events_repo.get(db, row.event_id))
-                decision = self._snapshot(db).resolve(event, channel)
-                current = deliveries_repo.get_route(db, row.aws_account_id, channel)
-                reason = _binding_problem(row, event, decision, current)
-                if reason is None:
-                    accounts = deliveries_repo.tenant_accounts(db, (decision.route.tenant_id,))
-                    reason = _tenant_problem(decision.route, accounts)
+            event = EventSnapshot.from_row(events_repo.get(db, row.event_id))
+            decision = self._snapshot(db).resolve(event, channel)
+            current = deliveries_repo.get_route(db, row.aws_account_id, channel)
+            reason = _binding_problem(row, event, decision, current)
+            if reason is None:
+                accounts = deliveries_repo.tenant_accounts(db, (decision.route.tenant_id,))
+                reason = _tenant_problem(decision.route, accounts)
+            if reason is None and not has_sender:
+                reason = CHANNEL_UNAVAILABLE
             if reason is not None:
                 deliveries_repo.block_pending(db, delivery_id, reason)
+                self._record_events(db, (row.event_id,))
                 db.commit()
-                if reason != CHANNEL_NOT_CONFIGURED:  # 의도적으로 뺀 채널은 건별로 경고하지 않는다
+                if reason != CHANNEL_NOT_SELECTED:  # 의도적으로 뺀 채널은 건별로 경고하지 않는다
                     logger.warning("notification_delivery_blocked", extra={
                         "delivery_id": delivery_id, "channel": channel, "reason": reason,
                     })
@@ -406,6 +491,8 @@ class DeliveryDispatcher:
                     db, claim.channel, claim.token,
                     interval_seconds=interval, cooldown_seconds=cooldown,
                 )
+            if applied and outcome["state"] in ("SUCCEEDED", "FAILED"):
+                self._record_events(db, (claim.event.event_id,))
             db.commit()
         logger.info(
             "notification_delivery_settled" if applied else "notification_delivery_result_fenced",

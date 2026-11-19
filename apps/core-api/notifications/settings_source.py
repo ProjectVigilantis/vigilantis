@@ -3,8 +3,8 @@
 - snapshot(db): 호출한 트랜잭션에서 읽은 현재 설정으로 RouteRegistry 를 만든다(발견 · claim 마다).
   소유는 tenants 표(한 계정 = 한 테넌트)다. 기존 규칙을 그대로 쓴다 — 다른 테넌트와 같은 실제
   목적지(Slack URL 해시 · SNS 토픽)는 모두 DESTINATION_SHARED, 비밀 누락은 SECRET_MISSING,
-  소유 · 형식이 맞지 않는 참조는 DESTINATION_INVALID, 채널이 없거나 이메일이 READY 가 아니면
-  CHANNEL_NOT_CONFIGURED 다. 다른 채널 · 다른 테넌트 · 파일 설정으로 대체하지 않는다.
+  소유 · 형식이 맞지 않는 참조는 DESTINATION_INVALID, 미선택 채널은 CHANNEL_NOT_SELECTED,
+  선택한 이메일이 READY 가 아니면 CHANNEL_UNAVAILABLE 다. 다른 채널 · 다른 테넌트 · 파일 설정으로 대체하지 않는다.
 - 관리 Slack 라우트의 destination 은 비밀 ARN 이다(URL 아님). URL 은 claim 뒤 발신기가 읽는다.
 - 바인딩(notification_routes)은 설정을 바꾼 트랜잭션이 sync_tenant 로 같이 바꾼다. 기동 때는
   prepare 가 기존 routes 파일을 아직 정하지 않은 채널에만 가져온 뒤 전체 바인딩을 맞춘다.
@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from .contracts import Route
 from .routing import (
+    CHANNEL_UNAVAILABLE,
     DESTINATION_INVALID,
     DESTINATION_SHARED,
     SECRET_MISSING,
@@ -110,6 +111,8 @@ def tenant_routes(
         else:
             fingerprint = _fingerprint(tenant_id, account, "SNS", arn)
             routes.append((Route(tenant_id, account, "SNS", fingerprint, arn, region), ("SNS", arn)))
+    elif record.email_source == "MANAGED":
+        blocked["SNS"] = CHANNEL_UNAVAILABLE
     return routes, blocked
 
 

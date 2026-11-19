@@ -4,7 +4,7 @@
     {"routes": [{"tenant_id": "11111111-1111-4111-8111-111111111111", "aws_account_id": "111111111111",
                  "slack_webhook_env": "NOTIFICATION_SLACK_A",
                  "sns_topic_arn": "arn:aws:sns:ap-northeast-2:999999999999:customer-a"}]}
-`slack_webhook_env`/`sns_topic_arn` 은 둘 다 생략 가능(소유만 선언 → 이벤트별 CHANNEL_NOT_CONFIGURED 차단).
+`slack_webhook_env`/`sns_topic_arn` 은 둘 다 생략 가능(소유만 선언 → 이벤트별 CHANNEL_NOT_SELECTED 제외).
 `{"routes": []}` 도 허용(모든 이벤트 OWNERSHIP_MISSING 차단). 웹훅 URL 자체는 환경변수에만 둔다.
 
 공개 인터페이스
@@ -46,6 +46,8 @@ ARN_ACCOUNT_MISMATCH = "ARN_ACCOUNT_MISMATCH"
 OWNERSHIP_MISSING = "OWNERSHIP_MISSING"
 OWNERSHIP_CONFLICT = "OWNERSHIP_CONFLICT"
 CHANNEL_NOT_CONFIGURED = "CHANNEL_NOT_CONFIGURED"
+CHANNEL_NOT_SELECTED = "CHANNEL_NOT_SELECTED"
+CHANNEL_UNAVAILABLE = "CHANNEL_UNAVAILABLE"
 SECRET_MISSING = "SECRET_MISSING"
 DESTINATION_INVALID = "DESTINATION_INVALID"
 DESTINATION_CONFLICT = "DESTINATION_CONFLICT"
@@ -285,5 +287,5 @@ class RouteRegistry:
             return RouteDecision(None, reason)
         route = self._by_key.get((account, channel))
         if route is None:
-            return RouteDecision(None, CHANNEL_NOT_CONFIGURED)
+            return RouteDecision(None, CHANNEL_NOT_SELECTED)
         return RouteDecision(route)

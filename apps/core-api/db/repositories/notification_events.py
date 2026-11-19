@@ -5,6 +5,7 @@ PR2의 채널 상태는 별도 (event_id, channel) 행이다. 이 목록을 읽�
 발송 claim/완료가 아니며, 조회 cursor를 발송 복구 근거로 사용하지 않는다.
 """
 
+from collections.abc import Iterable
 from datetime import datetime
 
 from schemas.api.actions import ExecutionStatus
@@ -59,6 +60,27 @@ def add(
 
 def get(db: Session, event_id: str) -> models.NotificationEvent | None:
     return db.get(models.NotificationEvent, event_id)
+
+
+def lock_for_activity(
+    db: Session, event_ids: Iterable[str],
+) -> list[tuple[models.NotificationEvent, str | None]]:
+    """종합 기록자를 사건별로 직렬화하고 인시던트 소속을 읽는다. batch 잠금 순서는 항상 같다."""
+    ids = sorted(set(event_ids))
+    if not ids:
+        return []
+    # NO KEY UPDATE는 채널 행 INSERT의 FK KEY SHARE와 충돌하지 않는다.
+    # FOR UPDATE로 올리면 두 발견자가 FK 잠금을 가진 채 서로의 사건 잠금을 기다릴 수 있다.
+    return list(db.execute(
+        select(models.NotificationEvent, models.Incident.tenant_id)
+        .outerjoin(
+            models.Incident,
+            models.Incident.incident_id == models.NotificationEvent.incident_id,
+        )
+        .where(models.NotificationEvent.event_id.in_(ids))
+        .order_by(models.NotificationEvent.event_id)
+        .with_for_update(of=models.NotificationEvent, key_share=True)
+    ).tuples())
 
 
 def list_by_incident(db: Session, incident_id: str) -> list[models.NotificationEvent]:

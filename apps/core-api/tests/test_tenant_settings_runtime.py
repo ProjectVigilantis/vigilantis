@@ -30,7 +30,8 @@ from notifications.channels import ManagedSlackSender, SlackSender, SnsSender
 from notifications.contracts import EventSnapshot, Route
 from notifications.dispatcher import DeliveryDispatcher
 from notifications.routing import (
-    CHANNEL_NOT_CONFIGURED,
+    CHANNEL_NOT_SELECTED,
+    CHANNEL_UNAVAILABLE,
     DESTINATION_INVALID,
     DESTINATION_SHARED,
     OWNERSHIP_MISSING,
@@ -54,6 +55,7 @@ from services.aws.settings_notifications import (
 )
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
+from tests.platform_event_cleanup import purge_platform_events
 
 PLATFORM_ACCOUNT = "999988887777"
 WEBHOOK_A = "https://hooks.slack.com/services/TRUNA/BRUNA/runtimeTokenA"
@@ -169,6 +171,9 @@ def world(pg_engine, committed_auth):
 
 def _wipe(engine):
     with engine.begin() as connection:
+        purge_platform_events(
+            connection, target_ids=connection.scalars(select(models.NotificationEvent.event_id)),
+        )
         for model in (
             models.NotificationDelivery, models.NotificationRoute, models.NotificationLane,
             models.NotificationEvent, models.TenantSettingsRecord, models.TenantSettingsCleanup,
@@ -321,7 +326,7 @@ def test_explicit_clear_is_final_and_has_no_fallback(world):
     event_id = _event(w, w.a)
     dispatcher.discover()
     assert {c: (r.state, r.blocked_reason) for c, r in _deliveries(w, event_id).items()} == {
-        "SLACK": ("BLOCKED", CHANNEL_NOT_CONFIGURED), "SNS": ("BLOCKED", CHANNEL_NOT_CONFIGURED),
+        "SLACK": ("BLOCKED", CHANNEL_NOT_SELECTED), "SNS": ("BLOCKED", CHANNEL_NOT_SELECTED),
     }
     assert w.slack.posts == [] and w.sns.publishes == []
     assert w.cloud.secrets.deleted == []  # 외부 비밀 · 토픽은 지우지 않는다
@@ -368,7 +373,7 @@ def test_newly_enabled_channel_works_without_restart(world):
     dispatcher.initialize()
     before = _event(w, w.b)
     dispatcher.discover("SLACK")
-    assert _deliveries(w, before)["SLACK"].blocked_reason == CHANNEL_NOT_CONFIGURED
+    assert _deliveries(w, before)["SLACK"].blocked_reason == CHANNEL_NOT_SELECTED
 
     _patch(w, w.b, {"notifications": {"slack_webhook_url": WEBHOOK_B}})
     _activate_now(w)
@@ -462,7 +467,7 @@ def test_email_reaches_ready_only_after_recipient_confirmation_and_unsubscribe_i
     assert "SNS" not in _bindings(w, w.b)
     later = _event(w, w.b)
     dispatcher.discover("SNS")
-    assert _deliveries(w, later)["SNS"].blocked_reason == CHANNEL_NOT_CONFIGURED
+    assert _deliveries(w, later)["SNS"].blocked_reason == CHANNEL_UNAVAILABLE
     assert w.sns.publishes == [topic]
     with w.sessions() as db:
         shown = tenant_settings.read_settings(db, _admin_user(w, db), w.b)
@@ -592,6 +597,24 @@ def test_shared_destination_and_foreign_secret_are_blocked():
     # 공유로 막힌 라우트도 바인딩 후보에는 남는다(공유가 풀리면 재기동 없이 다시 쓴다)
     assert {r.tenant_id for r in candidates} == {a, b}
     assert all(WEBHOOK_A not in repr(r) for r in candidates)
+
+
+@pytest.mark.parametrize(
+    "source,status,expected",
+    [
+        (None, None, CHANNEL_NOT_SELECTED),
+        ("CLEARED", None, CHANNEL_NOT_SELECTED),
+        ("MANAGED", "SETUP_PENDING", CHANNEL_UNAVAILABLE),
+        ("MANAGED", "CONFIRMATION_PENDING", CHANNEL_UNAVAILABLE),
+        ("MANAGED", "SETUP_FAILED", CHANNEL_UNAVAILABLE),
+    ],
+)
+def test_unselected_email_is_distinct_from_selected_but_unavailable(source, status, expected):
+    record = SimpleNamespace(slack_source=None, email_source=source, email_status=status)
+    registry, _ = build_registry([(str(uuid.uuid4()), "111111111111", record)], {})
+    decision = registry.resolve(_snapshot_event("111111111111"), "SNS")
+    assert decision.route is None
+    assert decision.blocked_reason == expected
 
 
 def _managed_route(url=WEBHOOK_A):

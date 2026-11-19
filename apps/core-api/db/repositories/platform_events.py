@@ -11,7 +11,7 @@
 #     로그를 못 쓰면 변경도 되돌아간다.
 #   - 거절 · 실패를 요청 트랜잭션과 따로 남기는 길은 platform_event_log.record_detached 다(자기 세션을 연다).
 #   - 재요청(멱등 200 재생)은 부르지 않는다 — 호출부가 새 행이 생긴 경로에서만 부른다(audit 와 같다).
-#   - 읽기는 list_events 하나다(GET /platform-events · #589 C). 범위는 호출부가 고객사 범위
+#   - 화면 조회는 list_events 다(GET /platform-events · #589 C). 범위는 호출부가 고객사 범위
 #     (auth.access.tenant_scope_ids)와 보는 사람을 넘기고, 여기는 그대로 거른다.
 # ==============================================================================
 
@@ -141,6 +141,25 @@ def record_platform_event(
     db.add(row)
     db.flush()
     return row
+
+
+def exists_for_target(
+    db: Session,
+    *,
+    action: PlatformEventAction,
+    target_type: PlatformEventTargetType,
+    target_id: str,
+) -> bool:
+    """호출부가 업무 대상 잠금을 가진 동안 재기록 여부를 확인한다."""
+    return db.scalar(
+        select(models.PlatformEvent.event_id)
+        .where(
+            models.PlatformEvent.action == action,
+            models.PlatformEvent.target_type == target_type,
+            models.PlatformEvent.target_id == target_id,
+        )
+        .limit(1)
+    ) is not None
 
 
 @dataclass(frozen=True)

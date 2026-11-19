@@ -92,7 +92,7 @@ def test_topic_account_is_not_used_to_infer_ownership():
 
 def test_missing_channel_and_secret_block_only_that_channel():
     reg = registry([route_a(sns_topic_arn=None), route_b(slack_webhook_env="MISSING_ENV")])
-    assert reg.resolve(event(), "SNS").blocked_reason == "CHANNEL_NOT_CONFIGURED"
+    assert reg.resolve(event(), "SNS").blocked_reason == "CHANNEL_NOT_SELECTED"
     assert reg.resolve(event(), "SLACK").route is not None
     assert reg.resolve(event("222222222222"), "SLACK").blocked_reason == "SECRET_MISSING"
     assert reg.resolve(event("222222222222"), "SNS").route is not None
@@ -102,7 +102,7 @@ def test_owned_account_without_channels_blocks_per_event():
     reg = registry([route_a(slack_webhook_env=None, sns_topic_arn=None), route_b()])
     assert reg.routes[0].tenant_id == TENANT_B and len(reg.routes) == 2
     for channel in ("SLACK", "SNS"):
-        assert reg.resolve(event(), channel).blocked_reason == "CHANNEL_NOT_CONFIGURED"
+        assert reg.resolve(event(), channel).blocked_reason == "CHANNEL_NOT_SELECTED"
         assert reg.resolve(event("222222222222"), channel).route is not None
 
 
