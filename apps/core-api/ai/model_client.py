@@ -58,7 +58,7 @@ class FailureKind(str, Enum):
     QUOTA_EXHAUSTED = "quota_exhausted"  # 결제·크레딧·지출 한도 소진(OpenAI insufficient_quota · 402)
     REQUEST_REJECTED = "request_rejected"  # 인증·권한·요청 형식·크기(400·401·403·404·413·422)
     SCHEMA_REJECTED = "schema_rejected"  # 제공자가 구조화 출력 스키마를 거절(400) — 어댑터·스키마 몫
-    REQUEST_SERIALIZATION = "request_serialization"  # user_payload가 JSON으로 직렬화되지 않음(호출부 몫)
+    REQUEST_SERIALIZATION = "request_serialization"  # user_payload가 JSON으로 직렬화되지 않거나 마스킹 뒤 키가 겹침(호출부 몫)
 
     # --- 응답: 왕복은 섰고 토큰도 발생했지만 출력을 쓸 수 없다 ---
     REFUSAL = "refusal"  # 모델이 응답을 거절(OpenAI refusal · Claude stop_reason=refusal)
@@ -411,13 +411,49 @@ def mask_outbound(value: Any) -> Any:
     return value
 
 
+class MaskedKeyCollisionError(ValueError):
+    """서로 다른 키가 마스킹 뒤 같은 키가 됐다. 메시지에 키를 싣지 않는다 — 원문이 비밀값이다."""
+
+
+def mask_mapping_keys(value: Any) -> Any:
+    """mask_outbound가 보존하는 dict 키에도 같은 문자열 규칙을 적용한다. 태그 키 역시 수집 입력이다.
+
+    mask_outbound를 지난 값(dict·list)을 받는다. 두 키가 같은 마스크가 되면 근거 하나를
+    조용히 덮어쓰지 않고 MaskedKeyCollisionError를 낸다 — 오류 처분은 호출부의 오류 체계가 정한다.
+    문자열이 아닌 키는 그대로 둔다 — 직렬화 가능 여부는 호출부의 직렬화 검사가 판정한다.
+    """
+    if isinstance(value, dict):
+        masked = {}
+        for key, item in value.items():
+            masked_key = _mask_text(key) if isinstance(key, str) else key
+            if masked_key in masked:
+                raise MaskedKeyCollisionError("마스킹 뒤 키가 겹칩니다")
+            masked[masked_key] = mask_mapping_keys(item)
+        return masked
+    if isinstance(value, list):
+        return [mask_mapping_keys(item) for item in value]
+    return value
+
+
 def build_outbound_payload(request: AIModelRequest) -> dict[str, Any]:
     """실제로 모델에 보낼 값. 이 함수를 지나지 않은 값은 전송하지 않는다.
 
     system_prompt도 마스킹을 지난다 — 프롬프트 본문에 `token:` 같은 라벨 표기를 쓰면
     지침 자체가 조용히 잘리므로, 프롬프트에는 비밀값 라벨 표기를 쓰지 않는다.
+    user_payload는 값 → 키 → 직렬화 순서로 지난다. 마스킹 뒤 키가 겹치면 보내지 않는다.
     """
-    masked = mask_outbound(dict(request.user_payload))
+    masked: Any = mask_outbound(dict(request.user_payload))
+    # raise는 except 밖에서 한다 — 아래 직렬화 검사와 같은 이유로 경계 예외에 원인을 매달지 않는다
+    key_collision = False
+    try:
+        masked = mask_mapping_keys(masked)
+    except MaskedKeyCollisionError:
+        key_collision = True
+    if key_collision:
+        raise AIModelContractError(
+            "user_payload의 키가 마스킹 뒤 서로 겹칩니다 — 값 하나를 덮어쓰지 않도록 보내지 않습니다",
+            kind=FailureKind.REQUEST_SERIALIZATION,
+        )
     # 직렬화 불가 값은 여기서 계약 위반으로 세운다. 이 검사가 없으면 호출부가 python
     # 모드 model_dump()를 넘겼을 때 TypeError가 경계 밖으로 그대로 나간다 —
     # AssetItem.collected_at의 UtcDateTime은 when_used="json"이라 python 모드에서
