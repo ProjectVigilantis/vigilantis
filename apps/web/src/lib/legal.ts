@@ -13,11 +13,23 @@ export const PRIVACY_OFFICER = {
   email: 'privacy@vigilantis.dev',
 } as const;
 
+/**
+ * 고객센터(2026-11-19 PM 결정). 이용 질문(Q&A)과 도입 중 오류를 받는 창구다. 서비스 장애는 여기가 아니라
+ * 로그인 후 사이드바의 문의하기로 받는다. 전화는 두지 않는다.
+ */
+export const SUPPORT_CENTER = {
+  email: 'support@vigilantis.dev',
+  hours: '09:00-18:00',
+} as const;
+
 /** 두 문서가 적는 역할 이름. 사용자 관리 화면의 표시 이름과 같은 말을 쓴다. */
 export const ROLE_NAMES = [ROLE_LABELS.ADMIN, ROLE_LABELS.OPERATOR, ROLE_LABELS.VIEWER].join(' · ');
 
-/** 두 문서의 시행일. 화면에는 `formatLegalDate`로 적는다. 플랫폼 상시 운영 시작일(11/16)을 따른다(2026-11-02 회의). */
+/** 처리방침 시행일. 화면에는 `formatLegalDate`로 적는다. 플랫폼 상시 운영 시작일(11/16)을 따른다(2026-11-02 회의). */
 export const LEGAL_EFFECTIVE_DATE = '2026-11-16';
+
+/** 이용약관 시행일(2026-11-19 PM 결정). 처리방침과 따로 둔다. */
+export const TERMS_EFFECTIVE_DATE = '2026-12-09';
 
 export function formatLegalDate(iso: string): string {
   const [year, month, day] = iso.split('-').map(Number);

@@ -20,7 +20,9 @@ import { GlobeBackdrop } from '@/components/landing/globe-backdrop';
 import { HeroPreview } from '@/components/landing/hero-preview';
 import { LoginOverlay } from '@/components/landing/login-overlay';
 import { PanelFocus } from '@/components/landing/panel-focus';
+import { SiteNav } from '@/components/landing/site-nav';
 import { LegalLinks } from '@/components/legal/legal-document';
+import { VigilantisLogo } from '@/components/vigilantis-logo';
 import { LOGIN_OVERLAY_HREF } from '@/lib/return-to';
 
 export const metadata: Metadata = {
@@ -130,14 +132,10 @@ export default function LandingPage() {
         <div data-panel-body className="flex flex-1 flex-col">
           <header className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
             <Link href="/landing" className="flex items-center gap-2.5">
-              <Shield aria-hidden className="size-6 text-white" />
-              <span className="text-lg font-bold tracking-tight">Vigilantis</span>
+              <VigilantisLogo className="size-[33px] text-white" />
+              <span className="text-[23px] font-bold tracking-tight">Vigilantis</span>
             </Link>
-            <nav aria-label="랜딩 목차" className="text-foreground-secondary hidden items-center gap-7 text-sm md:flex">
-              <a href="#how" className="hover:text-foreground">동작 방식</a>
-              <a href="#features" className="hover:text-foreground">기능</a>
-              <a href="#trust" className="hover:text-foreground">보안</a>
-            </nav>
+            <SiteNav />
             <Link
               href={LOGIN_OVERLAY_HREF}
               scroll={false}
