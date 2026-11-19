@@ -9,7 +9,7 @@
 // 랜딩 배경(지구 · 격자)은 창 뒤에 흐리게 비친다. 창은 모달이라 포커스를 가두고 Escape로 닫힌다(Radix Dialog).
 // 랜딩 안이 아니라 body에 붙으므로 야간 토큰을 쓰려고 창에 직접 .dark를 단다.
 
-import { Shield, X } from 'lucide-react';
+import { X } from 'lucide-react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useRef, useState } from 'react';
@@ -17,6 +17,7 @@ import { useRef, useState } from 'react';
 import { LoginFlow } from '@/components/auth/login-flow';
 import { INVITED_LOGIN_NOTICE, SignupGuide } from '@/components/auth/signup-guide';
 import { LegalLinks } from '@/components/legal/legal-document';
+import { VigilantisLogo } from '@/components/vigilantis-logo';
 import { SESSION_ENDED_PARAM } from '@/lib/auth-redirect';
 import { LOGIN_PARAM } from '@/lib/return-to';
 
@@ -52,10 +53,8 @@ export function LoginOverlay() {
           <DialogPrimitive.Title className="sr-only">Vigilantis 로그인 · 회원가입</DialogPrimitive.Title>
           <div className="mx-auto flex h-16 w-full max-w-6xl shrink-0 items-center justify-between px-4 sm:px-6">
             <span className="flex items-center gap-2.5">
-              <span className="bg-primary flex size-8 items-center justify-center rounded-md">
-                <Shield aria-hidden className="size-4.5 text-white" />
-              </span>
-              <span className="text-lg font-bold tracking-tight">Vigilantis</span>
+              <VigilantisLogo className="size-[33px] text-white" />
+              <span className="text-[23px] font-bold tracking-tight">Vigilantis</span>
             </span>
             <DialogPrimitive.Close className="text-foreground-secondary hover:text-foreground focus-visible:ring-ring inline-flex h-10 items-center gap-1.5 rounded-md px-3 text-sm font-semibold transition-colors focus-visible:ring-2 focus-visible:outline-none">
               <X aria-hidden className="size-4" />

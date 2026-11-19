@@ -7,7 +7,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { LegalDocument, LegalList, type LegalSection } from '@/components/legal/legal-document';
-import { formatLegalDate, LEGAL_EFFECTIVE_DATE, OPERATOR_NAME, ROLE_NAMES, SERVICE_NAME } from '@/lib/legal';
+import { formatLegalDate, OPERATOR_NAME, ROLE_NAMES, SERVICE_NAME, TERMS_EFFECTIVE_DATE } from '@/lib/legal';
 import { PRIVACY_PATH } from '@/lib/return-to';
 
 export const metadata: Metadata = {
@@ -254,7 +254,7 @@ const SECTIONS: LegalSection[] = [
   {
     id: 'addendum',
     title: '부칙',
-    body: <p>이 약관은 {formatLegalDate(LEGAL_EFFECTIVE_DATE)}부터 시행합니다.</p>,
+    body: <p>이 약관은 {formatLegalDate(TERMS_EFFECTIVE_DATE)}부터 시행합니다.</p>,
   },
 ];
 
@@ -269,6 +269,7 @@ export default function TermsPage() {
         </p>
       }
       sections={SECTIONS}
+      effectiveDate={TERMS_EFFECTIVE_DATE}
     />
   );
 }

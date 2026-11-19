@@ -2,11 +2,13 @@
 // 로그인 없이 여는 안내 문서(GuardDuty 켜기 안내 · T-14)도 같은 골격을 쓴다 — 시행일이 없는 문서라 `dated`를 끈다.
 // 로그인 전 화면이라 셸 · 실시간 연결 없이 그린다(lib/return-to.ts `PUBLIC_PATHS`).
 
-import { Shield } from 'lucide-react';
 import Link from 'next/link';
 
+import { SiteNav } from '@/components/landing/site-nav';
+import { VigilantisLogo } from '@/components/vigilantis-logo';
 import { formatLegalDate, LEGAL_EFFECTIVE_DATE, OPERATOR_NAME, SERVICE_NAME } from '@/lib/legal';
 import { LANDING_PATH, LOGIN_PATH, PRIVACY_PATH, TERMS_PATH } from '@/lib/return-to';
+import { FOOTER_GUIDE_LINKS } from '@/lib/site-menu';
 
 export type LegalSection = { id: string; title: string; body: React.ReactNode };
 
@@ -15,23 +17,25 @@ export function LegalDocument({
   intro,
   sections,
   dated = true,
+  effectiveDate = LEGAL_EFFECTIVE_DATE,
 }: {
   title: string;
   intro: React.ReactNode;
   sections: LegalSection[];
   /** 시행일 줄을 보일지. 처리방침 · 약관은 보이고, 시행일이 없는 안내 문서는 끈다. */
   dated?: boolean;
+  /** 시행일(YYYY-MM-DD). 약관은 처리방침과 날짜가 달라 따로 넘긴다. */
+  effectiveDate?: string;
 }) {
   return (
     <div className="bg-background flex flex-1 flex-col">
       <header className="dark bg-shell text-foreground">
         <div className="mx-auto flex h-16 w-full max-w-3xl items-center justify-between px-4 sm:px-6">
           <Link href={LANDING_PATH} className="flex items-center gap-2.5">
-            <span className="bg-primary flex size-8 items-center justify-center rounded-md">
-              <Shield aria-hidden className="size-4.5 text-white" />
-            </span>
-            <span className="text-lg font-bold tracking-tight">{SERVICE_NAME}</span>
+            <VigilantisLogo className="size-[33px] text-white" />
+            <span className="text-[23px] font-bold tracking-tight">{SERVICE_NAME}</span>
           </Link>
+          <SiteNav />
           <Link
             href={LOGIN_PATH}
             className="text-foreground-secondary hover:text-foreground focus-visible:text-foreground focus-visible:ring-ring rounded-md transition-colors focus-visible:ring-2 focus-visible:outline-none inline-flex h-10 items-center px-3 text-sm font-semibold"
@@ -45,18 +49,18 @@ export function LegalDocument({
         <div className="flex flex-col gap-3">
           <h1 className="text-3xl font-bold tracking-tight">{title}</h1>
           {dated ? (
-            <p className="text-muted-foreground text-sm">시행일 {formatLegalDate(LEGAL_EFFECTIVE_DATE)}</p>
+            <p className="text-muted-foreground text-sm">시행일 {formatLegalDate(effectiveDate)}</p>
           ) : null}
           <div className="text-foreground-secondary text-[15px] leading-7">{intro}</div>
         </div>
 
-        <nav aria-label="목차" className="bg-card rounded-xl border p-6">
+        <nav aria-label="목차">
           <h2 className="mb-3 text-sm font-semibold">목차</h2>
           {/* 2열은 위에서 아래로 채운다. 격자로 두면 1 · 2가 한 줄에 놓여 왼쪽 열만 읽을 때 번호가 건너뛴다. */}
           <ol className="gap-x-6 text-sm sm:columns-2">
             {sections.map((s) => (
               <li key={s.id} className="mb-1.5 break-inside-avoid">
-                <a href={`#${s.id}`} className="text-link hover:underline">
+                <a href={`#${s.id}`} className="text-foreground-secondary hover:text-foreground transition-colors">
                   {s.title}
                 </a>
               </li>
@@ -93,6 +97,20 @@ export function LegalLinks({ className }: { className?: string }) {
   );
 }
 
+/** 랜딩 · 문서 화면의 바닥글 링크: 안내 문서와 정책 문서. 좁은 화면에서 상단 메뉴가 접혀도 안내 문서로 갈 수 있게 한다. */
+export function FooterLinks() {
+  return (
+    <span className="flex flex-wrap gap-x-5 gap-y-2">
+      {FOOTER_GUIDE_LINKS.map((item) => (
+        <Link key={item.href} href={item.href} className="hover:underline">
+          {item.label}
+        </Link>
+      ))}
+      <LegalLinks className="contents" />
+    </span>
+  );
+}
+
 function LegalFooter() {
   return (
     <footer className="border-t">
@@ -100,7 +118,7 @@ function LegalFooter() {
         <span>
           © {SERVICE_NAME} · {OPERATOR_NAME}
         </span>
-        <LegalLinks />
+        <FooterLinks />
       </div>
     </footer>
   );

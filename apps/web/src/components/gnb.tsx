@@ -14,7 +14,6 @@ import {
   LayoutDashboard,
   LifeBuoy,
   ScrollText,
-  Shield,
   SlidersHorizontal,
   Users,
   type LucideIcon,
@@ -28,6 +27,7 @@ import { ConnectionIndicator } from '@/components/connection-indicator';
 import { InquiryButton } from '@/components/support/inquiry-button';
 import { SettingsMenu } from '@/components/settings-menu';
 import { NotificationBell } from '@/components/support/notification-bell';
+import { VigilantisLogo } from '@/components/vigilantis-logo';
 import {
   LOGS_PATH,
   MONITORING_PATH,
@@ -92,9 +92,9 @@ export function ShellHeader() {
     <header className="dark bg-shell text-foreground flex h-16 shrink-0 items-center gap-3 border-b px-4 sm:gap-6">
       {/* 고객 계정은 기존 역할별 진입점으로 간다. 플랫폼 대시보드 링크는 유지한다. */}
       <Link href={account !== null && !open ? homePathFor(account) : '/'} className="ml-2 flex shrink-0 items-center gap-2.5">
-        {/* 방패는 바탕 블록 없이 글자와 같은 흰색으로 둔다(2026-11-16 PM 결정). */}
-        <Shield aria-hidden className="size-5.5 text-white" />
-        <span className="text-lg font-bold tracking-tight">Vigilantis</span>
+        {/* 로고는 바탕 블록 없이 글자와 같은 흰색으로 둔다(2026-11-16 PM 결정). */}
+        <VigilantisLogo className="size-[33px] text-white" />
+        <span className="text-[23px] font-bold tracking-tight">Vigilantis</span>
       </Link>
 
       {/* 서버 칩은 이 화면과 서버의 실시간 연결이다(connection-indicator.tsx). 끊겼을 때 [재연결] 버튼(§4.8 4)이 여기 있다.

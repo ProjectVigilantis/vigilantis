@@ -99,3 +99,9 @@ test('처리방침 · 약관은 로그인 없이 열린다. 로그인 화면에�
   assert.equal(PUBLIC_PATHS.has('/'), false);
   assert.equal(PUBLIC_PATHS.has('/tenants'), false);
 });
+
+test('도입 가이드 · 사용 가이드 · 고객센터는 가입 전에 읽으므로 로그인 없이 열린다', () => {
+  assert.ok(PUBLIC_PATHS.has('/guides/onboarding'));
+  assert.ok(PUBLIC_PATHS.has('/guides/usage'));
+  assert.ok(PUBLIC_PATHS.has('/support'));
+});

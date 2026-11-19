@@ -20,6 +20,12 @@ export const TERMS_PATH = '/terms';
  * 고객사마다 다른 값은 싣지 않는 고정 문서다.
  */
 export const GUARDDUTY_GUIDE_PATH = '/guides/guardduty';
+/** 도입 가이드. 도입을 검토하는 회사가 가입 전에 읽으므로 로그인 없이 연다. */
+export const ONBOARDING_GUIDE_PATH = '/guides/onboarding';
+/** 사용 가이드. 고객사 계정 메뉴별 기능 안내라 가입 전에도 읽을 수 있게 로그인 없이 연다. */
+export const USAGE_GUIDE_PATH = '/guides/usage';
+/** 고객센터. 가입 전 회사도 연락처를 볼 수 있어야 하므로 로그인 없이 연다. */
+export const SUPPORT_CENTER_PATH = '/support';
 /** 로그인 없이 열리고 셸 · 실시간 연결 없이 그리는 경로. 접근 관문(src/proxy.ts)과 화면 골격(app-shell.tsx)이 같이 쓴다. */
 export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   LOGIN_PATH,
@@ -27,6 +33,9 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   PRIVACY_PATH,
   TERMS_PATH,
   GUARDDUTY_GUIDE_PATH,
+  ONBOARDING_GUIDE_PATH,
+  USAGE_GUIDE_PATH,
+  SUPPORT_CENTER_PATH,
 ]);
 const FALLBACK = '/';
 /** 해석 기준 오리진. 실제 주소와 무관하게 "다른 오리진으로 빠지는가"만 본다. */

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { formatLegalDate, LEGAL_EFFECTIVE_DATE, PRIVACY_OFFICER, ROLE_NAMES } from './legal.ts';
+import { formatLegalDate, LEGAL_EFFECTIVE_DATE, PRIVACY_OFFICER, ROLE_NAMES, TERMS_EFFECTIVE_DATE } from './legal.ts';
 
 test('보호책임자 이메일은 자리표시자가 아닌 실제 주소다', () => {
   assert.match(PRIVACY_OFFICER.email, /^[^\s@_]+@[^\s@]+\.[a-z]+$/);
@@ -19,6 +19,8 @@ test('시행일은 앞자리 0 없이 연 · 월 · 일로 적는다', () => {
 });
 
 test('시행일 상수는 실제 날짜다', () => {
-  assert.match(LEGAL_EFFECTIVE_DATE, /^\d{4}-\d{2}-\d{2}$/);
-  assert.equal(new Date(`${LEGAL_EFFECTIVE_DATE}T00:00:00Z`).toISOString().slice(0, 10), LEGAL_EFFECTIVE_DATE);
+  for (const date of [LEGAL_EFFECTIVE_DATE, TERMS_EFFECTIVE_DATE]) {
+    assert.match(date, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10), date);
+  }
 });
