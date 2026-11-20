@@ -330,10 +330,27 @@ def test_managed_rules_come_after_the_allow_rule_and_keep_their_own_actions():
     assert "RuleActionOverrides" not in rules["aws-ip-reputation"]["Statement"]["ManagedRuleGroupStatement"]
 
 
-def test_common_rule_set_only_counts_the_body_size_rule():
-    # 앱이 본문 상한을 직접 건다 — 8KB 규칙이 정상 요청을 막지 않게 세기만 한다
-    overrides = _rules()["aws-common"]["Statement"]["ManagedRuleGroupStatement"]["RuleActionOverrides"]
-    assert overrides == [{"Name": "SizeRestrictions_BODY", "ActionToUse": {"Count": {}}}]
+def test_common_rule_set_blocks_oversized_bodies_too():
+    # 앱이 본문 상한을 먼저 거는 경로는 공개 신청 접수뿐이다. 인증 전 크기 제약은 WAF 몫(auth README §운영 주의점)
+    assert "RuleActionOverrides" not in _rules()["aws-common"]["Statement"]["ManagedRuleGroupStatement"]
+
+
+def test_count_override_left_on_an_existing_acl_is_removed():
+    # 11/19 실 계정 모양: SizeRestrictions_BODY 만 Count. 정의에서 빼도 부분 비교로는 「같음」이라 남는다
+    rules = platform.waf_rules(f"arn:{platform.WAF_IPSET}", f"arn:{platform.WAF_NAT_IPSET}")
+    old = [dict(rule) for rule in rules]
+    common = old[RULE_NAMES.index("aws-common")]
+    common["Statement"] = {"ManagedRuleGroupStatement": {
+        **common["Statement"]["ManagedRuleGroupStatement"],
+        "RuleActionOverrides": [{"Name": "SizeRestrictions_BODY", "ActionToUse": {"Count": {}}}]}}
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: NATS}, acl_rules=old)
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == ["update_web_acl"]
+    assert all("RuleActionOverrides" not in r["Statement"].get("ManagedRuleGroupStatement", {})
+               for r in waf.acl_rules)
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == []  # 다시 돌리면 변경 0
 
 
 # ⑦ 속도 제한 (#484) ------------------------------------------------------------

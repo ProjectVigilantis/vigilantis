@@ -440,10 +440,12 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
 
 # AWS 관리형 규칙(ADR-0010 6차 개정) — 허용 IP(우선순위 3) 뒤라 허용 목록(NAT 포함)은 거치지 않는다.
 # 웹의 서버 측 API 호출이 NAT IP로 오므로, 본문 검사 규칙이 앱 자신의 요청을 막지 않게 하려는 배치다.
-# 본문 크기(8KB) 규칙은 Count — 앱이 본문 상한을 직접 건다(신청 접수 등). 관측 뒤 다시 정한다
+# 셋째 칸은 Count로 낮출 그룹 안 규칙 이름이다. 지금은 비어 있어 본문 크기(8KB) 규칙 SizeRestrictions_BODY도 Block이다.
+# 앱이 본문 상한을 먼저 거는 경로는 공개 신청 접수 하나뿐이고, 그 밖의 경로는 미인증 요청도 본문을 끝까지 읽은 뒤
+# 거절한다. 인증 전 크기 제약은 배포 계층에 두는 전제이고(apps/core-api/auth/README.md §운영 주의점), 이 규칙이 그 자리다
 MANAGED_RULE_GROUPS = (
     ("aws-ip-reputation", "AWSManagedRulesAmazonIpReputationList", ()),
-    ("aws-common", "AWSManagedRulesCommonRuleSet", ("SizeRestrictions_BODY",)),
+    ("aws-common", "AWSManagedRulesCommonRuleSet", ()),
 )
 
 
@@ -1798,9 +1800,17 @@ def _covers(current, desired) -> bool:
     return current == desired
 
 
+def _override_names(rule: dict) -> list[str]:
+    statement = rule.get("Statement", {}).get("ManagedRuleGroupStatement") or {}
+    return [o.get("Name") for o in statement.get("RuleActionOverrides") or []]
+
+
 def _same_rules(current: list[dict], desired: list[dict]) -> bool:
     by_priority = sorted(current, key=lambda r: r.get("Priority", 0))
-    return _covers(by_priority, desired)
+    # _covers는 desired에 없는 키를 보지 않는다. Count 덮어쓰기를 정의에서 빼도 기존 ACL에 남은 것은
+    # 「같음」이 되어 지워지지 않으므로, 관리형 규칙의 덮어쓰기 목록은 이름까지 따로 맞춘다
+    return (_covers(by_priority, desired)
+            and [_override_names(r) for r in by_priority] == [_override_names(r) for r in desired])
 
 
 _ACL_DEFAULT_ACTION = {"Allow": {}}  # 전체 공개(2026-11-19 · ADR-0010 6차 개정). 그 전에는 Block + 허용 IP
