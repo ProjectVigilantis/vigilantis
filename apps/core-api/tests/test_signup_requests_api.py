@@ -99,11 +99,14 @@ def test_replay_compares_validated_values_not_raw_json(post):
     first = post(key=key)
     padded = {**BODY, "company_name": "  Acme ", "contact_name": "Kim\n"}
     assert post(padded, key=key).json() == first.json()
-    # 선택 칸은 비어 있어도 null 과 같다
+    # 선택 칸은 비어 있어도 null 과 같다. 다른 이메일로 내야 같은 이메일 검사가 아니라 이 비교를 거친다
     key2 = new_key()
-    sparse = {**BODY, "phone": "  ", "note": None}
+    sparse = {**BODY, "email": "lee@example.com", "phone": "  ", "note": None}
     first2 = post(sparse, key=key2)
-    assert post({k: v for k, v in BODY.items() if k not in ("phone", "note")}, key=key2).json() == first2.json()
+    assert first2.json() != first.json()
+    omitted = {k: v for k, v in sparse.items() if k not in ("phone", "note")}
+    assert post(omitted, key=key2).json() == first2.json()
+    assert post({**omitted, "phone": "02-000-0000"}, key=key2).status_code == 409
 
 
 @pytest.mark.parametrize(
@@ -134,6 +137,36 @@ def test_same_email_with_a_new_key_returns_the_open_request_without_new_row_or_n
     first = post()
     notifications = count(db, models.OperatorNotification)
     again = post({**BODY, "email": "kim@example.COM", "company_name": "Other"})
+    assert again.status_code == 202 and again.json() == first.json()
+    assert count(db, models.SignupRequest) == 1
+    assert count(db, models.OperatorNotification) == notifications
+
+
+@pytest.mark.parametrize("change", [{"company_name": "Other"}, {"email": "kim@example.com"}, {"note": None}])
+def test_filtered_key_follows_the_same_retry_rule_as_a_stored_key(post, db, change):
+    # 걸러진 키도 값과 함께 남는다 — 같은 값은 같은 202, 다른 값은 409. 202 · 409 가 자기 키 이력으로만 갈려 이메일 신청 여부가 드러나지 않는다
+    first = post()
+    key = new_key()
+    filtered = post(key=key)
+    assert filtered.status_code == 202 and filtered.json() == first.json()
+    held = db.get(models.SignupRequestDuplicate, key)
+    assert (held.request_id, held.company_name, held.email) == (first.json()["request_id"], "Acme", "Kim@Example.com")
+    assert post(key=key).json() == first.json()
+    resp = post({**BODY, **change}, key=key)
+    assert resp.status_code == 409 and error_code(resp) == ErrorCode.IDEMPOTENCY_KEY_CONFLICT.value
+    assert count(db, models.SignupRequest) == 1
+    assert count(db, models.SignupRequestDuplicate) == 1
+
+
+def test_filtered_key_does_not_create_a_request_after_the_open_one_is_rejected(post, db):
+    first = post()
+    key = new_key()
+    post(key=key)
+    row = db.get(models.SignupRequest, first.json()["request_id"])
+    row.status, row.rejected_reason = SignupRequestStatus.REJECTED, "정보 부족"
+    db.commit()
+    notifications = count(db, models.OperatorNotification)
+    again = post(key=key)
     assert again.status_code == 202 and again.json() == first.json()
     assert count(db, models.SignupRequest) == 1
     assert count(db, models.OperatorNotification) == notifications

@@ -5,7 +5,9 @@
 #   - 접수: 신청 INSERT 와 운영자 알림이 한 트랜잭션이다. 재시도(같은 키)는 알림을 만들지 않는다.
 #     같은 키의 판정은 처음 저장된 검증 결과 값 다섯 칸(회사명 · 담당자명 · 이메일 · 전화 · 메모)과 이번 검증 결과 값의 비교다 — 원문 JSON 이나
 #     이메일 소문자화 같은 정규화를 새로 얹지 않는다(값 규약은 스키마가 정한다).
-#   - 재시도 키 ↔ 신청 매핑은 신청과 함께 남는다. 보존 · 삭제 기준(TTL)은 정하지 않았고, 공개 전
+#   - 같은 이메일의 처리 중 · 승인 신청이 있으면 새 키라도 새 신청을 만들지 않는다. 그 키는 중복 접수 행
+#     (SignupRequestDuplicate)에 값과 함께 남아 신청 행의 키와 같은 재시도 판정을 받는다.
+#   - 재시도 키 ↔ 신청 매핑은 신청(또는 중복 접수 행)과 함께 남는다. 보존 · 삭제 기준(TTL)은 정하지 않았고, 공개 전
 #     T15 에서 정해야 한다. 이 키는 스팸 방지도 이메일 소유 확인도 아니다.
 #   - 처리: 중앙 관리자만(support_access 가 쓰기 직전 행위자를 다시 판정). 승인은 POST approve 하나다(#572 묶음 B) —
 #     한 트랜잭션에서 고객사를 만들고(tenant_admin.create_tenant_uncommitted · PENDING_CONNECTION · 그룹 없음) 신청을
@@ -61,7 +63,9 @@ _TRANSITIONS = {
 _APPROVABLE = frozenset({SignupRequestStatus.NEW, SignupRequestStatus.IN_REVIEW})
 
 
-def _same_submission(row: models.SignupRequest, body: SignupRequestCreate) -> bool:
+def _same_submission(
+    row: models.SignupRequest | models.SignupRequestDuplicate, body: SignupRequestCreate
+) -> bool:
     return (
         row.company_name == body.company_name
         and row.contact_name == body.contact_name
@@ -75,17 +79,41 @@ def create(db: Session, idempotency_key: UUID, body: SignupRequestCreate) -> Sig
     """익명 접수. 키는 UUIDv4 이며 정본 문자열로 저장한다. 신규와 재시도 모두 같은 응답이다.
 
     같은 이메일(대소문자 무시)로 처리 중이거나 승인된 신청이 있으면 새로 만들지 않고 그 신청의 202 를 돌려준다.
-    공개 접수 도배를 막기 위해서다. 응답을 바꾸지 않아 어떤 이메일이 신청했는지 밖에서 가릴 수 없다.
-    반려된 신청만 있으면 다시 받는다. 같은 키의 재시도는 이 검사를 건너뛰고 아래 재시도 판정(409 포함)을 따른다.
+    공개 접수 도배를 막기 위해서다. 반려된 신청만 있으면 다시 받는다.
+    새로 만들지 않은 접수도 키와 검증 결과 값을 SignupRequestDuplicate 에 남긴다. 그래서 그 키의 재시도도
+    같은 값이면 같은 202, 다른 값이면 409 이고, 뒤에 기존 신청이 반려돼도 새 신청을 만들지 않는다.
+    202 와 409 가 호출자 자신의 키 이력으로만 갈려, 어떤 이메일이 신청했는지 응답으로 가릴 수 없다.
+    잠금 순서는 키 → 이메일이다. 키가 두 표에 나뉘어 저장되므로 같은 키의 동시 접수를 키 잠금으로 한 줄로 세운다.
     """
     now = datetime.now(UTC)
     key = str(idempotency_key)
     try:
+        repo.lock_key(db, key)
+        held = repo.get_duplicate_by_key(db, key)
+        if held is not None:
+            same = _same_submission(held, body)
+            request_id = held.request_id
+            db.rollback()  # 잠금을 바로 푼다
+            if not same:
+                raise ApiError(ErrorCode.IDEMPOTENCY_KEY_CONFLICT)
+            return SignupRequestAccepted(request_id=request_id)
         repo.lock_email(db, body.email)
         open_request = repo.find_open_by_email(db, body.email)
         if open_request is not None and open_request.idempotency_key != key and repo.get_by_key(db, key) is None:
-            db.rollback()  # 잠금을 바로 푼다
-            return SignupRequestAccepted(request_id=open_request.request_id)
+            request_id = open_request.request_id
+            repo.add_duplicate(
+                db,
+                idempotency_key=key,
+                request_id=request_id,
+                company_name=body.company_name,
+                contact_name=body.contact_name,
+                email=body.email,
+                phone=body.phone,
+                note=body.note,
+                now=now,
+            )
+            db.commit()
+            return SignupRequestAccepted(request_id=request_id)
         row, created = repo.insert(
             db,
             idempotency_key=key,

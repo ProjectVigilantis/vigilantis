@@ -70,6 +70,8 @@ EXPECTED_TABLES = {
     "notification_reads",
     # #565 — 도입 신청 최종 결정 기록
     "signup_request_decisions",
+    # 같은 이메일의 미결 · 승인 신청에 묶여 새 신청을 만들지 않은 접수(재시도 키 보관)
+    "signup_request_duplicates",
     # TOTP 분실 복구 작업 · 신원 변경 울타리 (#515)
     "totp_recovery_operations",
     "totp_provider_mutations",
