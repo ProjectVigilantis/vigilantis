@@ -45,6 +45,8 @@ CONTRACT_ERROR_CODES = {
     "REPORT_DRAFT_TOO_LARGE",     # 413 — 신고 초안 입력·파일 상한
     "REPORT_DRAFT_MODEL_UNAVAILABLE",  # 503 — 미연결·일시 장애
     "REPORT_DRAFT_GENERATION_FAILED",  # 502 — 생성·검증 실패
+    "REPORT_DRAFT_NOT_FOUND",     # 404 — 보관본 없음·만료
+    "REPORT_DRAFT_SUPERSEDED",    # 409 — 더 최신 기준 생성본이 저장됨
     "REQUEST_VALIDATION_FAILED",  # 422
     "INTERNAL_ERROR",             # 500
 }

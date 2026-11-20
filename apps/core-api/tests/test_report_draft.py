@@ -1,4 +1,4 @@
-"""#623: 저장 사실·AI 인용·사람 입력, 권한과 무부수효과를 HTTP 경계에서 확인한다."""
+"""#623: 저장 사실·AI 인용·사람 입력, 권한과 생성본 보관을 HTTP 경계에서 확인한다."""
 
 from __future__ import annotations
 
@@ -16,7 +16,11 @@ from report_draft import collect_facts
 from schemas.api.actions import ExecutionStatus
 from schemas.api.auth import AccountType, UserRole
 from schemas.api.incidents import IncidentCategory, IncidentStatus
-from schemas.api.report_draft import ReportDraftDocument, ReportNarrative, ReportSentence
+from schemas.api.report_draft import (
+    ReportDraftDocument,
+    ReportNarrative,
+    ReportSentence,
+)
 from schemas.evidence import EvidenceType
 from schemas.runbooks import TriggerSource
 from sqlalchemy import func, select
@@ -48,8 +52,8 @@ class RecordingClient:
         return response
 
 
-def request_draft(client, incident_id, fmt="json"):
-    return client.post(f"/api/v1/incidents/{incident_id}/report-draft", params={"format": fmt})
+def request_draft(client, incident_id, fmt="json", *, method="POST"):
+    return client.request(method, f"/api/v1/incidents/{incident_id}/report-draft", params={"format": fmt})
 
 
 @pytest.fixture()
@@ -140,28 +144,30 @@ def test_download_has_three_sections_provenance_and_blank_human_fields(
 
 
 @pytest.mark.parametrize("role,permissions", [(UserRole.VIEWER, None), (UserRole.OPERATOR, ())])
+@pytest.mark.parametrize("method", ["POST", "GET"])
 def test_permission_rejection_precedes_model_and_target(
-    client_pg, login_as, draft_case, role, permissions,
+    client_pg, login_as, draft_case, role, permissions, method,
 ):
     _, tenant, fake = draft_case
     kwargs = {"tenant_id": tenant}
     if permissions is not None:
         kwargs["permissions"] = permissions
     login_as(role, **kwargs)
-    response = request_draft(client_pg, "not-a-uuid")
+    response = request_draft(client_pg, "not-a-uuid", method=method)
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "AUTH_FORBIDDEN"
     assert not fake.sent
 
 
 @pytest.mark.parametrize("target", ["outside", "absent", "malformed"])
+@pytest.mark.parametrize("method", ["POST", "GET"])
 def test_unreadable_target_is_404_without_call(
-    client_pg, login_as, make_tenant, draft_case, target,
+    client_pg, login_as, make_tenant, draft_case, target, method,
 ):
     incident_id, _, fake = draft_case
     login_as(UserRole.OPERATOR, tenant_id=make_tenant())
     requested = {"outside": incident_id, "absent": str(uuid.uuid4()), "malformed": "bad"}[target]
-    response = request_draft(client_pg, requested)
+    response = request_draft(client_pg, requested, method=method)
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "INCIDENT_NOT_FOUND"
     assert not fake.sent
@@ -221,18 +227,35 @@ def test_mask_expansion_rejection_never_logs_model_text(client_pg, draft_case, c
 
 
 def test_repeat_requests_regenerate_without_changing_domain_records(
-    db, client_pg, draft_case, make_execution,
+    db, client_pg, draft_case, make_execution, monkeypatch,
 ):
+    import report_draft
+
+    class ClockMeta(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    class Clock(datetime, metaclass=ClockMeta):
+        value = datetime(2030, 1, 1, 0, 0, 0, 100, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.value
+
+    monkeypatch.setattr(report_draft, "datetime", Clock)
     incident_id, _, fake = draft_case
     execution = make_execution(db, incident_id)
     db.commit()
     tables = (models.Incident, models.Evidence, models.ActionExecution, models.AuditEvent, models.PlatformEvent)
     before = [db.scalar(select(func.count()).select_from(table)) for table in tables]
     first = request_draft(client_pg, incident_id)
+    Clock.value = Clock.value.replace(microsecond=200)
     second = request_draft(client_pg, incident_id)
     assert first.status_code == second.status_code == 200
     assert len(fake.sent) == 2
     assert second.json()["generated_at"] >= first.json()["generated_at"]
+    assert db.scalar(select(func.count()).select_from(models.IncidentReportDraft)) == 1
+    assert request_draft(client_pg, incident_id, method="GET").content == second.content
     assert [db.scalar(select(func.count()).select_from(table)) for table in tables] == before
     db.refresh(execution)
     assert execution.status is ExecutionStatus.IN_PROGRESS
@@ -560,7 +583,16 @@ def test_guardduty_intake_download_preserves_finding_not_open_ip(
         "Service": {
             "EventFirstSeen": AT.isoformat(),
             "EventLastSeen": (AT + timedelta(minutes=5)).isoformat(),
-            "Action": {"RemoteIpDetails": {"IpAddressV4": "203.0.113.77"}},
+            "ResourceRole": "ACTOR",
+            "Action": {
+                "ActionType": "NETWORK_CONNECTION",
+                "RemoteIpDetails": {"IpAddressV4": "203.0.113.77"},
+                "NetworkConnectionAction": {
+                    "ConnectionDirection": "OUTBOUND",
+                    "RemoteIpDetails": {"IpAddressV4": "203.0.113.88"},
+                    "Blocked": False,
+                },
+            },
         },
     }, account_id=account, region="ap-northeast-2")
     outcome = create_incident_from_intake(db, SecOpsIncidentIntake(
@@ -587,6 +619,17 @@ def test_guardduty_intake_download_preserves_finding_not_open_ip(
     assert facts[base + "last_seen_at"]["value"] == "2026-09-02T09:05:00Z"
     assert facts[base + "first_seen_at"]["label"] == "GuardDuty 최초 관측 시각"
     assert facts[base + "last_seen_at"]["interpretation"] == "최초 저장 사본에 기록된 관측 시각"
+    activity_base = base + "activity/"
+    assert facts[activity_base + "resource_role/value"]["value"] == "ACTOR"
+    assert facts[activity_base + "action_type/value"]["value"] == "NETWORK_CONNECTION"
+    assert facts[activity_base + "connection_direction/value"]["value"] == "OUTBOUND"
+    assert facts[activity_base + "remote_ip/value"]["value"] == "203.0.113.88"
+    assert facts[activity_base + "blocked/value"]["value"] is False
+    for field in ("resource_role", "action_type", "connection_direction", "remote_ip", "blocked"):
+        fact = facts[activity_base + field + "/value"]
+        assert fact["status"] == "known"
+        assert fact["interpretation"] is None
+        assert fact["record_id"] and fact["recorded_at"]
     target = facts["/evidence/0/content/event/target_arn"]
     expected = f"arn:aws:ec2:ap-northeast-2:{account}:instance/i-0123456789abcdef0"
     assert target["value"] == (expected if resource_type == "Instance" else finding_arn)
@@ -600,6 +643,8 @@ def test_guardduty_intake_download_preserves_finding_not_open_ip(
         assert excluded not in transmitted
     assert finding_id in response.text
     assert finding_type in response.text
+    assert "203.0.113.88" in response.text
+    assert "GuardDuty 네트워크 활동의 차단 관측" in response.text
     if fmt == "json":
         assert all(field["value"] is None for field in response.json()["human_input"])
     assert db.scalar(select(func.count()).select_from(models.ActionExecution)) == before
@@ -623,3 +668,144 @@ def test_guardduty_code_fields_reject_identity_and_free_text(field):
     withheld = next(f for f in facts.facts if f.json_path == f"/evidence/0/content/event/payload/{field}")
     assert withheld.status == "unknown" and withheld.reason == "invalid_identifier"
     assert "private-user" not in json.dumps(narrative_request(facts).user_payload)
+
+
+@pytest.mark.parametrize("collected", [False, True])
+def test_guardduty_activity_preserves_missing_and_unusable_value_reasons(collected):
+    incident, evidence = unit_rows()
+    event = evidence.content["event"]
+    event["event_type"] = "GUARDDUTY_FINDING"
+    event["payload"] = {
+        "finding_id": "f-1", "finding_type": "UnauthorizedAccess:EC2/SSHBruteForce",
+        "severity": 7.5, "resource_type": "Instance", "region": "ap-northeast-2",
+        "finding_region": "ap-northeast-2", "first_seen_at": AT.isoformat(),
+        "last_seen_at": AT.isoformat(),
+    }
+    if collected:
+        event["payload"]["activity"] = {
+            "resource_role": {"status": "UNRECOGNIZED", "source_value": "private-user@example.com"},
+            "action_type": {"status": "INVALID"},
+            "connection_direction": {"status": "ABSENT"},
+            "remote_ip": {"status": "INVALID"},
+            "blocked": {"status": "ABSENT"},
+        }
+    facts = collect_facts(incident, [evidence], [], [], AT + timedelta(seconds=1))
+    expected = {
+        "resource_role": "unrecognized_value", "action_type": "invalid_value",
+        "connection_direction": "not_recorded", "remote_ip": "invalid_value",
+        "blocked": "not_recorded",
+    }
+    indexed = {fact.json_path: fact for fact in facts.facts}
+    for field, reason in expected.items():
+        fact = indexed[f"/evidence/0/content/event/payload/activity/{field}/value"]
+        assert fact.status == "unknown"
+        assert fact.value is None and fact.interpretation is None
+        assert fact.reason == (reason if collected else "not_collected")
+    assert "private-user" not in json.dumps(narrative_request(facts).user_payload)
+
+
+@pytest.mark.parametrize("fmt", ["md", "json"])
+def test_saved_download_returns_original_bytes_without_model_or_render(
+    db, client_pg, draft_case, monkeypatch, fmt,
+):
+    import report_draft
+
+    incident_id, _, fake = draft_case
+    first = request_draft(client_pg, incident_id, fmt)
+    assert first.status_code == 200, first.text
+    saved = db.get(models.IncidentReportDraft, incident_id)
+    expected = {"md": saved.markdown, "json": saved.json_body}
+    assert expected[fmt] == first.content
+    assert saved.expires_at - saved.generated_at == timedelta(days=7)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("재다운로드는 모델이나 renderer를 부르면 안 된다")
+
+    monkeypatch.setattr(report_draft, "render_draft", forbidden)
+    client_pg.app.dependency_overrides[get_report_model_client] = forbidden
+    for downloaded_format, original in expected.items():
+        response = request_draft(client_pg, incident_id, downloaded_format, method="GET")
+        assert response.status_code == 200, response.text
+        assert response.content == original
+        assert response.headers["cache-control"] == "no-store"
+    assert len(fake.sent) == 1
+
+
+def test_failed_regeneration_keeps_previous_saved_output(client_pg, draft_case):
+    incident_id, _, fake = draft_case
+    first = request_draft(client_pg, incident_id)
+    assert first.status_code == 200
+    fake.error = AIModelTimeoutError("provider unavailable")
+    failed = request_draft(client_pg, incident_id)
+    assert failed.status_code == 503
+    saved = request_draft(client_pg, incident_id, method="GET")
+    assert saved.status_code == 200 and saved.content == first.content
+
+
+def test_saved_download_without_artifact_or_at_seven_day_expiry_is_404(
+    db, client_pg, draft_case, monkeypatch,
+):
+    import report_draft
+
+    incident_id, _, _ = draft_case
+    missing = request_draft(client_pg, incident_id, method="GET")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "REPORT_DRAFT_NOT_FOUND"
+    assert request_draft(client_pg, incident_id).status_code == 200
+    expiry = db.get(models.IncidentReportDraft, incident_id).expires_at
+
+    class ExpiredClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return expiry
+
+    monkeypatch.setattr(report_draft, "datetime", ExpiredClock)
+    expired = request_draft(client_pg, incident_id, method="GET")
+    assert expired.status_code == 404
+    assert expired.json()["error"]["code"] == "REPORT_DRAFT_NOT_FOUND"
+
+
+def test_newer_saved_generation_rejects_a_slower_older_request(
+    db, client_pg, draft_case, monkeypatch,
+):
+    from db.repositories import report_drafts
+
+    incident_id, tenant_id, fake = draft_case
+    complete = fake.complete
+
+    def newer_generation(request, response_model):
+        result = complete(request, response_model)
+        newer = datetime.now(UTC) + timedelta(minutes=1)
+        report_drafts.save_latest(
+            db, incident_id=incident_id, tenant_id=tenant_id, as_of=newer,
+            generated_at=newer, markdown=b"newer markdown", json_body=b'{"newer": true}',
+        )
+        db.commit()
+        return result
+
+    monkeypatch.setattr(fake, "complete", newer_generation)
+    response = request_draft(client_pg, incident_id)
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "REPORT_DRAFT_SUPERSEDED"
+    assert request_draft(client_pg, incident_id, method="GET").content == b'{"newer": true}'
+
+
+def test_storage_failure_preserves_previous_output_without_logging_artifact(
+    client_pg, draft_case, monkeypatch, caplog,
+):
+    from db.repositories import report_drafts
+    from sqlalchemy.exc import StatementError
+
+    incident_id, _, _ = draft_case
+    first = request_draft(client_pg, incident_id)
+    assert first.status_code == 200
+    marker = "PRIVATE_FINAL_REPORT_CONTENT"
+
+    def fail_storage(*args, **kwargs):
+        raise StatementError("storage failed", "INSERT", {"markdown": marker}, RuntimeError(marker))
+
+    monkeypatch.setattr(report_drafts, "save_latest", fail_storage)
+    failed = request_draft(client_pg, incident_id)
+    assert failed.status_code == 500
+    assert marker not in failed.text + caplog.text
+    assert request_draft(client_pg, incident_id, method="GET").content == first.content
