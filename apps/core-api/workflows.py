@@ -1309,6 +1309,12 @@ def reserve_protected_source_block(
             db, target_arns=[source.target_arn],
         ).get(source.target_arn, set())
         or _active_on_target(db, source.target_arn)
+        # 진행 중 → SUCCESS 전이가 두 조회 사이에 끝나도 이 조회가 차단을 잡는다.
+        # 완료 이력을 먼저 읽으면 대상 잠금 전의 낡은 판정으로 중복 접수할 수 있다.
+        or executions_repo.has_unreleased_auto_source_block(
+            db, tenant_id=incident.tenant_id,
+            target_arn=source.target_arn, cidr_block=source.cidr_block,
+        )
     ):
         db.rollback()
         return None

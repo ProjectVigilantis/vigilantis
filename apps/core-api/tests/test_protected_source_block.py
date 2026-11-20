@@ -7,10 +7,12 @@
 
 import copy
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import dispatcher
+import incident_intake
 import pytest
 import workflows
 from botocore.exceptions import ClientError
@@ -29,9 +31,11 @@ from services.aws.client import _current_tenant
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from schemas.platform_events import PlatformEventAction
+from schemas.guardrails import PrecheckReasonCode
 from tests.platform_event_faults import failing_platform_event_write
 from tests.test_agent_dispatcher import (
     EC2_ARN, INSTANCE_ID, NACL_ARN, _failing_precheck, _passing_precheck, _pending_secops,
+    _secops_intake, _seed_asset_row,
 )
 from tests.test_guardduty_ingress import FakeGuardDuty, _events, _finding, _incident_of, _ingest
 from tests.test_nacl_release_offer import aws  # noqa: F401  (fixture)
@@ -67,6 +71,20 @@ def _protected_incident(db, aws, *, entries=(ALLOW_200,), **kwargs):
 
 def _trigger(db, incident_id, publish=None):
     return soar.trigger_isolation(db, incident_id, trigger_source=PRE, publish=publish)
+
+
+def _independent_incident(db, *, source_ip="203.0.113.10"):
+    intake = _secops_intake()
+    event_id = str(uuid.uuid4())
+    intake.threat_event = intake.threat_event.model_copy(update={
+        "threat_event_id": event_id,
+        "source_event_id": event_id,
+        "deduplication_key": event_id,
+        "occurred_at": datetime.now(UTC),
+        "payload": intake.threat_event.payload.model_copy(update={"source_ip": source_ip}),
+    })
+    intake.initial_risk = intake.initial_risk.model_copy(update={"threat_event_id": event_id})
+    return incident_intake.create_incident_from_intake(db, intake).incident_id
 
 
 def _blocks(db, incident_id):
@@ -451,3 +469,180 @@ def test_untouched_block_expires_after_24_hours_with_its_original_backup(db, aws
     assert restore.status is ExecutionStatus.SUCCESS
     assert restore.backup_record_id == exec_repo.get_execution(db, block.execution_id).backup_record_id
     assert aws["entries"] == [ALLOW_200]
+
+
+@pytest.mark.parametrize("release", [
+    "manual", "expiry", "failed", "pending", "unverified_restore", "unverified_block", "external_delete",
+])
+def test_independent_incidents_share_one_block_until_successful_release(db, aws, audit_actor, release):
+    incident_id, block = _blocked_incident(db, aws)
+    finished_at, backup_id = block.finished_at, block.backup_record_id
+    second = _independent_incident(db)
+    assert second != incident_id
+    calls = list(aws["calls"])
+
+    _trigger(db, second)
+
+    assert _blocks(db, second) == []
+    assert aws["calls"] == calls  # 사전 중복 판정은 규칙 번호 조회·가드레일 AWS 호출보다 앞선다
+    assert aws["entries"] == [ALLOW_200, _expected_entry()]
+    assert _no_isolation_notice(db, second)
+    assert db.get(models.Incident, second).status.value == "ANALYZING"
+    assert release_candidates(db, second) == []
+    assert (block.finished_at, block.backup_record_id) == (finished_at, backup_id)
+
+    if release in {"unverified_block", "external_delete"}:
+        if release == "external_delete":
+            aws["entries"][:] = [dict(ALLOW_200)]
+        else:
+            block.status = ExecutionStatus.UNVERIFIED
+            block.verification_attempts = 1
+            block.verification_reason_code = PrecheckReasonCode.PRECHECK_INVALID_STATE
+            block.verification_first_failed_at = block.verification_last_failed_at = datetime.now(UTC)
+            db.commit()
+    else:
+        if release == "expiry":
+            block.finished_at = datetime.now(UTC) - timedelta(hours=25)
+            db.commit()
+            assert dispatcher.dispatch_pending(db).expiry_reserved == 1
+        else:
+            dispatcher.dispatch_pending(db)
+            assert workflows.reserve_execution(
+                db, ExecuteActionRequest(
+                    incident_id=incident_id, runbook_id=RESTORE,
+                    idempotency_key=f"release-cross-incident-{release}",
+                ), audit_actor=audit_actor,
+            ).created
+            if release in {"failed", "unverified_restore"}:
+                def refuse_delete(_kwargs):
+                    raise ClientError({
+                        "Error": {"Code": "UnauthorizedOperation", "Message": "denied"},
+                        "ResponseMetadata": {"HTTPStatusCode": 403, "RetryAttempts": 0},
+                    }, "DeleteNetworkAclEntry")
+                aws["hooks"]["delete_network_acl_entry"] = refuse_delete
+            if release != "pending":
+                dispatcher.dispatch_pending(db)
+        [restore] = [
+            r for r in exec_repo.list_by_incident(db, incident_id) if r.runbook_id is RESTORE
+        ]
+        if release == "unverified_restore":
+            assert restore.status is ExecutionStatus.FAILED
+            restore.status = ExecutionStatus.UNVERIFIED
+            restore.verification_attempts = 1
+            restore.verification_reason_code = PrecheckReasonCode.PRECHECK_INVALID_STATE
+            restore.verification_first_failed_at = restore.verification_last_failed_at = datetime.now(UTC)
+            db.commit()
+        else:
+            expected = (
+                ExecutionStatus.IN_PROGRESS if release == "pending" else
+                ExecutionStatus.FAILED if release == "failed" else ExecutionStatus.SUCCESS
+            )
+            assert restore.status is expected
+
+    third = _independent_incident(db)
+    _trigger(db, third)
+
+    if release in {"manual", "expiry"}:
+        [next_block] = _blocks(db, third)
+        assert next_block.status is ExecutionStatus.SUCCESS
+        assert next_block.backup_record_id != backup_id
+        assert next_block.finished_at > finished_at
+        assert aws["entries"] == [ALLOW_200, _expected_entry()]
+        assert aws["calls"].count("create_network_acl_entry") == 2
+    else:
+        assert _blocks(db, third) == []
+        assert aws["calls"].count("create_network_acl_entry") == 1
+        assert _no_isolation_notice(db, third)
+    assert release_candidates(db, second) == []
+    assert exec_repo.get_execution(db, block.execution_id).backup_record_id == backup_id
+
+
+@pytest.mark.parametrize("completion", ["precheck", "target_lookup"])
+def test_source_block_completed_between_precheck_and_reservation_is_not_duplicated(
+    db, aws, monkeypatch, completion,
+):
+    _, block = _blocked_incident(db, aws)
+    block.status = ExecutionStatus.IN_PROGRESS
+    block.finished_at = None
+    db.commit()
+    second = _independent_incident(db)
+    reads = []
+
+    def finish_during_precheck(_kwargs):
+        reads.append(True)
+        if completion == "precheck" and len(reads) == 2:
+            block.status = ExecutionStatus.SUCCESS
+            block.finished_at = datetime.now(UTC)
+            db.commit()
+
+    active_query = exec_repo.list_active_on_target
+
+    def finish_before_active_read(session, target_arn):
+        # 완료 이력을 먼저 읽는 잘못된 순서라면 IN_PROGRESS를 보고 지나간 뒤,
+        # 이 조회에서도 SUCCESS를 놓쳐 중복을 접수한다.
+        block.status = ExecutionStatus.SUCCESS
+        block.finished_at = datetime.now(UTC)
+        session.flush()
+        return active_query(session, target_arn)
+
+    if completion == "target_lookup":
+        monkeypatch.setattr(exec_repo, "list_active_on_target", finish_before_active_read)
+    aws["hooks"]["describe_network_acls"] = finish_during_precheck
+    _trigger(db, second)
+
+    assert len(reads) == 2
+    assert _blocks(db, second) == []
+    assert aws["entries"] == [ALLOW_200, _expected_entry()]
+    assert aws["calls"].count("create_network_acl_entry") == 1
+    assert _no_isolation_notice(db, second)
+
+
+@pytest.mark.parametrize("different", ["source", "nacl", "tenant"])
+def test_source_block_dedup_does_not_suppress_other_owners(db, aws, audit_actor, different):
+    _, original = _blocked_incident(db, aws)
+    source_ip = "203.0.113.11" if different == "source" else "203.0.113.10"
+    if different == "nacl":
+        other_nacl = NACL_ARN.replace("acl-0abc123456789def0", "acl-0abc123456789def1")
+        _seed_asset_row(
+            db, arn=other_nacl, asset_type=AssetType.NACL,
+            resource_id="acl-0abc123456789def1", spec={"is_default": False}, state=None,
+        )
+        asset = assets_repo.get_asset_by_arn(db, EC2_ARN)
+        assets_repo.replace_relationships(
+            db, asset.asset_id, [(RelationType.PROTECTED_BY, other_nacl)],
+            collection_run_id=asset.last_collection_run_id,
+        )
+        db.commit()
+        aws["entries"][:] = [dict(ALLOW_200)]
+    second = _independent_incident(db, source_ip=source_ip)
+    if different == "tenant":
+        tenant = _tenant(db)
+        db.get(models.Incident, second).tenant_id = tenant.tenant_id
+        db.commit()
+
+    _trigger(db, second)
+
+    [block] = _blocks(db, second)
+    assert block.status is ExecutionStatus.SUCCESS
+    assert block.validated_command["parameters"]["cidr_block"] == f"{source_ip}/32"
+    assert block.target_arn == (other_nacl if different == "nacl" else NACL_ARN)
+    assert aws["calls"].count("create_network_acl_entry") == 2
+
+    if different == "source":
+        dispatcher.dispatch_pending(db)
+        assert workflows.reserve_execution(
+            db, ExecuteActionRequest(
+                incident_id=second, runbook_id=RESTORE, idempotency_key="release-other-source",
+            ), audit_actor=audit_actor,
+        ).created
+        dispatcher.dispatch_pending(db)
+        [restore] = [r for r in exec_repo.list_by_incident(db, second) if r.runbook_id is RESTORE]
+        assert restore.status is ExecutionStatus.SUCCESS
+        assert restore.backup_record_id == block.backup_record_id != original.backup_record_id
+
+        third = _independent_incident(db)
+        _trigger(db, third)
+
+        assert _blocks(db, third) == []
+        assert aws["entries"] == [ALLOW_200, _expected_entry()]
+        assert aws["calls"].count("create_network_acl_entry") == 2

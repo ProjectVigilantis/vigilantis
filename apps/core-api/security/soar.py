@@ -193,6 +193,12 @@ def _trigger_protected_source_block(
     if source is None:
         db.rollback()
         return
+    if executions_repo.has_unreleased_auto_source_block(
+        db, tenant_id=incident.tenant_id,
+        target_arn=source.target_arn, cidr_block=source.cidr_block,
+    ):
+        db.rollback()
+        return
     owner = workflows.tenant_access_for(db, incident.tenant_id)
     tenant = None if incident.tenant_id is None else db.get(models.Tenant, incident.tenant_id)
     blocked = workflows.automatic_trigger_block(
