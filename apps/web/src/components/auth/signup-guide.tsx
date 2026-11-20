@@ -182,6 +182,9 @@ function ApplyForm() {
           운영팀이 확인한 뒤 {sentTo}(으)로 다음 단계를 안내드립니다. AWS 계정 연결이 확인되면 같은 주소로 관리자 초대 메일이
           갑니다.
         </p>
+        <p className="text-muted-foreground text-sm leading-relaxed">
+          같은 이메일로 처리 중이거나 승인된 신청이 있으면 새 신청으로 접수되지 않고, 이번에 적은 내용은 반영되지 않습니다.
+        </p>
       </div>
     );
   }
