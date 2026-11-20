@@ -35,9 +35,10 @@ from config import SubscriptionSettings, get_auth_settings, get_tenant_settings
 from db import models
 from db.repositories import auth as auth_repo
 from db.repositories import mock_marketplace as mock_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
-from schemas.api.auth import UserRole
+from schemas.api.auth import AccountType, UserRole
 from schemas.api.errors import ErrorCode
 from schemas.api.subscriptions import (
     SubscriptionAction,
@@ -50,6 +51,7 @@ from schemas.api.tenants import (
     TenantUpdateRequest,
     TenantVerificationResult,
 )
+from schemas.platform_events import PlatformActorKind
 from schemas.subscriptions import (
     MockAgreementStatus,
     MockMarketplaceEventKind,
@@ -125,9 +127,17 @@ def _cancel(db, tenant_id, now, authorize=_allow):
     return workflow.cancel_renewal(db, tenant_id, authorize=authorize, settings=_settings(), now=now)
 
 
+def _requester(db, tenant_id) -> platform_events_repo.EventActor:
+    """이용 중단을 요청한 사람 — 그 고객사의 계정(buyer 가 만든 ADMIN). HTTP 에서는 세션의 사용자다."""
+    user_id = db.scalar(select(models.AppUser.user_id).where(models.AppUser.tenant_id == tenant_id).limit(1))
+    return platform_events_repo.EventActor(
+        PlatformActorKind.USER, user_id=user_id, account_type=AccountType.TENANT)
+
+
 def _stop(db, tenant_id, now=NOW):
     return workflow.stop_service(
-        db, tenant_id, SubscriptionStopRequest(reason="운영 중단"), authorize=_allow, settings=_settings(), now=now)
+        db, tenant_id, SubscriptionStopRequest(reason="운영 중단"), event_actor=_requester(db, tenant_id),
+        authorize=_allow, settings=_settings(), now=now)
 
 
 def _agreements(db, tenant_id) -> list[models.MockMarketplaceAgreement]:
@@ -857,6 +867,7 @@ def test_stop_makes_overlapping_user_management_wait_and_then_refuse(pg_engine, 
         idle_seconds=get_auth_settings().AUTH_SESSION_IDLE_SECONDS,
         clock=lambda: datetime.now(UTC),
     )
+    requester = platform_events_repo.person(manager)  # 이용 중단의 활동 로그 행위자(#589 B)
     stopper, writer = Session(pg_engine), Session(pg_engine)
     stop_holds, release = threading.Event(), threading.Event()
     pids: dict = {}
@@ -869,8 +880,8 @@ def test_stop_makes_overlapping_user_management_wait_and_then_refuse(pg_engine, 
     def stop():
         pids["stopper"] = _backend_pid(stopper)  # 같은 트랜잭션 · 연결에서 잠근다
         return workflow.stop_service(
-            stopper, tenant_id, SubscriptionStopRequest(reason="운영 중단"), authorize=hold,
-            settings=_settings(), now=datetime.now(UTC))
+            stopper, tenant_id, SubscriptionStopRequest(reason="운영 중단"), event_actor=requester,
+            authorize=hold, settings=_settings(), now=datetime.now(UTC))
 
     def manage():
         pids["writer"] = _backend_pid(writer)

@@ -15,6 +15,7 @@
 #     ID 는 404 TENANT_NOT_FOUND, 있지만 범위 밖이면 403 AUTH_FORBIDDEN 이다. 검색은 범위 없이 이름 · ID 와
 #     접근 가능 여부(can_access_tenant)만 싣는다.
 #   - 활동 로그(platform_events · #589 B): 생성 · 수정 · 자동 조치 켜고 끄기 · 정지 · 연결 확인 · 재개 · 삭제를 남긴다.
+#     고객의 이용 중단과 권리 만료 정지는 같은 TENANT_SUSPEND 로 subscription_workflow 가 남긴다(행위자로 갈린다).
 #     상태가 바뀐 쓰기는 **같은 트랜잭션**에(로그를 못 쓰면 쓰기도 되돌아간다), 연결 확인 · 재개의 상태 충돌(409)은
 #     요청 트랜잭션을 되돌린 뒤 **따로**(platform_event_log.record_detached) 남긴다. 404 · 403 은 여기서 남기지 않는다.
 #     그룹 지정(set_tenant_group)의 기록은 그룹 기능 쪽 몫이다.
