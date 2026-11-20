@@ -705,6 +705,49 @@ def test_missing_service_is_a_failure():
     assert platform.WEB_SERVICE in problem
 
 
+class RolloutEcs:
+    """describe_services 호출마다 다음 api 롤아웃 상태를 돌려준다. web은 늘 COMPLETED다."""
+
+    def __init__(self, api_states: list[tuple[str, str]]):
+        self.api_states = api_states
+        self.calls = 0
+
+    def describe_services(self, cluster, services):
+        task_def, rollout = self.api_states[min(self.calls, len(self.api_states) - 1)]
+        self.calls += 1
+        return {"services": [_svc(platform.API_SERVICE, task_def, rollout), _svc(platform.WEB_SERVICE, WEB_V2)]}
+
+
+EXPECTED = {platform.API_SERVICE: API_V2, platform.WEB_SERVICE: WEB_V2}
+
+
+def test_rollout_still_in_progress_after_stable_wait_is_waited_out():
+    """2026-11-20 deploy: services_stable 통과 직후 IN_PROGRESS였다가 곧 COMPLETED가 됐다 — 실패가 아니다."""
+    ecs, sleeps = RolloutEcs([(API_V2, "IN_PROGRESS"), (API_V2, "IN_PROGRESS"), (API_V2, "COMPLETED")]), []
+    assert platform.settled_deployment_problems(ecs, EXPECTED, sleep=sleeps.append) == []
+    assert (ecs.calls, len(sleeps)) == (3, 2)
+
+
+def test_rollout_that_never_finishes_fails_after_the_last_attempt():
+    ecs, sleeps = RolloutEcs([(API_V2, "IN_PROGRESS")]), []
+    (problem,) = platform.settled_deployment_problems(ecs, EXPECTED, attempts=4, sleep=sleeps.append)
+    assert "IN_PROGRESS" in problem and (ecs.calls, len(sleeps)) == (4, 3)
+
+
+@pytest.mark.parametrize("state", [(API_V1, "COMPLETED"), (API_V2, "FAILED")])
+def test_rollback_or_failed_rollout_is_reported_without_waiting(state):
+    ecs, sleeps = RolloutEcs([state]), []
+    (problem,) = platform.settled_deployment_problems(ecs, EXPECTED, sleep=sleeps.append)
+    assert platform.API_SERVICE in problem and sleeps == []
+
+
+def test_previous_version_in_progress_is_not_waited_on():
+    """IN_PROGRESS여도 PRIMARY가 요청한 버전이 아니면(롤백 진행 중) 기다리지 않는다."""
+    ecs, sleeps = RolloutEcs([(API_V1, "IN_PROGRESS")]), []
+    (problem,) = platform.settled_deployment_problems(ecs, EXPECTED, sleep=sleeps.append)
+    assert "롤백" in problem and sleeps == []
+
+
 class DrainingEcs:
     """폴링마다 다음 상태를 돌려주는 가짜 ECS — 서비스·태스크가 서로 다른 시점에 내려가는 경우를 만든다.
     한 번의 폴링은 describe_services로 시작한다(_ecs_drained의 호출 순서)."""

@@ -2102,6 +2102,28 @@ def deployment_problems(services: list[dict], expected: dict[str, str]) -> list[
     return problems
 
 
+def settled_deployment_problems(ecs, expected: dict[str, str], *, delay: float = 15, attempts: int = 20,
+                                sleep: Callable[[float], None] = time.sleep) -> list[str]:
+    """`services_stable` 통과 뒤 PRIMARY 배포가 끝날 때까지 기다렸다가 `deployment_problems`로 판정한다.
+
+    대기가 통과해도 rolloutState가 잠깐 IN_PROGRESS로 남을 수 있다(2026-11-20 deploy: 대기 통과 직후
+    IN_PROGRESS로 실패 처리됐고, 수십 초 뒤 같은 배포가 COMPLETED가 됐다). 요청한 버전이 PRIMARY이고
+    IN_PROGRESS인 동안만 더 기다린다. 롤백(다른 버전이 PRIMARY)과 FAILED는 기다리지 않고 바로 판정한다.
+    """
+    for attempt in range(attempts):
+        services = ecs.describe_services(cluster=CLUSTER, services=list(expected))["services"]
+        by_name = {svc.get("serviceName"): svc for svc in services}
+        pending = any(
+            d.get("status") == "PRIMARY" and d.get("taskDefinition") == task_def
+            and d.get("rolloutState") == "IN_PROGRESS"
+            for name, task_def in expected.items()
+            for d in by_name.get(name, {}).get("deployments", []))
+        if not pending or attempt == attempts - 1:
+            return deployment_problems(services, expected)
+        sleep(delay)
+    return deployment_problems([], expected)  # attempts < 1
+
+
 def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
            notification: Optional[dict] = None) -> None:
     ec2, ecs = c["ec2"], c["ecs"]
@@ -2143,10 +2165,7 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
     print("[platform] 서비스 안정화 대기")
     ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE],
                                            WaiterConfig={"Delay": 15, "MaxAttempts": 60})
-    problems = deployment_problems(
-        ecs.describe_services(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE])["services"],
-        {API_SERVICE: api_def, WEB_SERVICE: web_def},
-    )
+    problems = settled_deployment_problems(ecs, {API_SERVICE: api_def, WEB_SERVICE: web_def})
     if problems:
         sys.exit("배포 실패 — " + " · ".join(problems) + f" (로그: {LOG_GROUPS['api']})")
     print(f"[platform] 배포 완료 — {public_origins(dist)[0]} (AI 분석·조치 실행 디스패치 {'켬' if dispatch_enabled else '끔'})")
