@@ -894,6 +894,23 @@ def test_cli_rejects_source_drift_before_settings_model_or_output(
     assert not output.exists()
 
 
+def test_cli_prompt_cache_flag_lets_older_models_omit_the_cache_off_argument():
+    import argparse
+
+    from ai.openai_client import build_openai_model_client
+
+    def client_for(**overrides):
+        args = argparse.Namespace(model=None, reasoning_effort=None, prompt_cache=False, key_env_file=None)
+        for name, value in overrides.items():
+            setattr(args, name, value)
+        settings = cli._settings(args).model_copy(update={"OPENAI_API_KEY": "sk-test"})
+        return build_openai_model_client(settings)
+
+    # 기준선은 서비스 기본값(캐시 끔)이고, 이전 모델은 플래그로만 인자를 뺀다(환경변수는 기본값이 덮는다)
+    assert client_for()._cache_params == {"prompt_cache_options": {"mode": "explicit"}}
+    assert client_for(model="gpt-4o", reasoning_effort="unset", prompt_cache=True)._cache_params == {}
+
+
 def test_new_result_file_is_exclusive(tmp_path):
     path = tmp_path / "result.json"
     cli._create(path, {"original": True})

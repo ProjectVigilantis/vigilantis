@@ -17,6 +17,7 @@
 #   - 모델 동작 파라미터(temperature·reasoning_effort)는 설정에 값이 있을 때만 싣는다
 #     (#237). 모델 계열마다 받는 것이 달라(gpt-4o는 temperature, gpt-5 계열 추론
 #     모델은 reasoning_effort) 안 쓰는 노브는 요청 본문에 나타나지도 않아야 한다.
+#   - 제공자 프롬프트 캐시는 설정(OPENAI_PROMPT_CACHE)이 끄면 요청마다 끈다(#648 §3).
 #   - 남기는 로그는 토큰 사용량·시도 횟수 같은 호출 메타뿐이다. Prompt 전문과 원문
 #     응답은 남기지 않는다(ADR-0005 미보존 대상).
 # ==============================================================================
@@ -81,6 +82,7 @@ class OpenAIModelClient:
         reasoning_effort: Optional[str] = None,
         service_tier: Optional[str] = None,
         timeout: Any = None,
+        prompt_cache: bool = True,
     ) -> None:
         self._client = client
         self._model = model
@@ -100,6 +102,9 @@ class OpenAIModelClient:
             )
             if value is not None
         }
+        # 제공자의 프롬프트 캐시는 기본으로 켜져 있다(1,024토큰 이상). 끌 때는 자동 캐시 지점을
+        # 만들지 않는 explicit 모드에 지점을 하나도 두지 않는다 — gpt-5.6 이후 모델만 받는 인자다
+        self._cache_params: dict[str, Any] = {} if prompt_cache else {"prompt_cache_options": {"mode": "explicit"}}
 
     def complete(
         self,
@@ -113,7 +118,7 @@ class OpenAIModelClient:
             {"role": "user", "content": payload["user_json"]},
         ]
 
-        extra_params = dict(self._model_params)
+        extra_params = {**self._model_params, **self._cache_params}
         if self._service_tier is not None:
             extra_params["service_tier"] = self._service_tier
 
@@ -344,5 +349,6 @@ def build_openai_model_client(
         policy=RetryPolicy.from_settings(settings),
         temperature=settings.OPENAI_TEMPERATURE,
         reasoning_effort=settings.OPENAI_REASONING_EFFORT,
+        prompt_cache=settings.OPENAI_PROMPT_CACHE,
         service_tier=None,  # 설정 키가 없다 — 실험 도구가 생성자로 직접 지정한다
     )

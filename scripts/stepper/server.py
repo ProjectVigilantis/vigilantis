@@ -55,7 +55,7 @@ SEED_REGION = "ap-northeast-2"  # override가 api에 고정한 리전과 같아�
 # 시연 사전 준비의 키 확인 줄과 같다 — 모델 조회라 토큰을 쓰지 않는다
 MODEL_CHECK = (
     "import os; from openai import OpenAI; "
-    "OpenAI(max_retries=0).models.retrieve(os.getenv('OPENAI_MODEL') or 'gpt-5.6-luna'); "
+    "OpenAI(max_retries=0).models.retrieve(os.getenv('OPENAI_MODEL') or 'gpt-6-luna'); "
     "print('OK')"
 )
 
