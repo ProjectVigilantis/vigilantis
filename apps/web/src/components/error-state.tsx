@@ -85,6 +85,8 @@ const PRESENTATION: Record<ErrorCode, Presentation> = {
   USER_NOT_FOUND: { variant: 'inline', note: '화면을 새로고침한 뒤 다시 확인해 주세요.' },
   USER_STATE_CONFLICT: { variant: 'inline', note: '화면을 새로고침한 뒤 다시 확인해 주세요.' },
   SIGNUP_REQUEST_APPROVAL_REQUIRED: { variant: 'inline' },
+  REPORT_DRAFT_NOT_FOUND: { variant: 'inline' },
+  REPORT_DRAFT_SUPERSEDED: { variant: 'inline' },
 };
 
 /** ApiError가 아닌 실패(네트워크 등)도 오류 화면을 그려야 하므로 INTERNAL_ERROR로 접는다. */

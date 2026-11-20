@@ -14,7 +14,7 @@ class ReportFact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fact_id: str
-    source_kind: Literal["incident", "evidence", "action_execution", "audit_event"]
+    source_kind: Literal["incident", "evidence", "action_execution", "audit_event", "platform_event"]
     record_id: str
     json_path: str
     recorded_at: UtcDateTime
@@ -24,6 +24,7 @@ class ReportFact(BaseModel):
     reason: Literal[
         "not_recorded", "no_history", "not_collected", "identity_omitted",
         "free_text_omitted", "after_cutoff", "invalid_identifier",
+        "unrecognized_value", "invalid_value",
     ] | None = None
     interpretation: str | None = None
     flags: EvidenceExportFlags | None = None
