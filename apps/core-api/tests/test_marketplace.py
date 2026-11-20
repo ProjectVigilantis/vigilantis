@@ -236,6 +236,12 @@ def test_real_entitlement_projects_before_mock_and_ends_in_suspension(db, make_t
     assert tenant.subscription_source is SubscriptionSource.APP_FREE and tenant.plan == "Free"
     assert tenant.status is TenantStatus.SUSPENDED
     assert tenant.suspended_reason == workflow.MARKETPLACE_EXPIRY_SUSPENSION_REASON
+    # 실제 권리 종료의 정지도 활동 로그에 SYSTEM 의 TENANT_SUSPEND 한 행으로 남는다(#589 B)
+    [suspension] = db.scalars(
+        select(models.PlatformEvent).where(models.PlatformEvent.target_id == tenant_id)
+    ).all()
+    assert (suspension.action, suspension.actor_kind.value, suspension.tenant_id, suspension.details) == (
+        "TENANT_SUSPEND", "SYSTEM", tenant_id, {"before": "ACTIVE", "after": "SUSPENDED"})
 
 
 def test_latest_plan_decision_wins_across_concurrent_licenses(db, make_tenant):

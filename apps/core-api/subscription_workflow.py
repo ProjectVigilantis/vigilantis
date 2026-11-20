@@ -17,6 +17,11 @@
 #     참조용(ROW SHARE)으로 잠근다(purchase_subscription · stop_service). 이벤트 소비는 이벤트 행 → 테넌트 행이고
 #     계약 행은 잠그지 않는다.
 #   - 거절은 기존 코드다: 고객사가 없으면 404 TENANT_NOT_FOUND, 지금 상태에서 할 수 없으면 409 TENANT_STATE_CONFLICT.
+#   - 활동 로그(platform_events · #589 B): 이 모듈이 서비스를 멈추는 두 자리 — 고객의 이용 중단(stop_service)과
+#     권리 만료 정지(reconcile_tenant_subscription) — 는 정지 전이와 **같은 트랜잭션에** TENANT_SUSPEND 한 행을 남긴다
+#     (_record_suspension). 운영자 정지(tenant_admin.suspend_tenant)와 같은 행동이고 행위자로 갈린다: 이용 중단은
+#     요청한 고객사 중앙계정, 만료 정지는 SYSTEM 이다. 실제로 멈췄을 때만 남긴다 — 이미 정지면 전이도 행도 없다.
+#     구매 · 갱신 끄기 · 계약의 활성화 · 갱신 · 만료(투영)는 남기지 않는다 — 계약의 행동 목록에 없다.
 # ==============================================================================
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from config import SubscriptionSettings
 from db import models
 from db.repositories import auth as auth_repo
 from db.repositories import mock_marketplace as mock_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import tenants as tenants_repo
 from exceptions import ApiError
 from schemas.api.errors import ErrorCode
@@ -43,6 +49,7 @@ from schemas.api.subscriptions import (
     SubscriptionStopRequest,
 )
 from schemas.api.tenants import SUSPENDABLE_STATUSES, TenantStatus, TenantSubscription
+from schemas.platform_events import PlatformEventAction
 from schemas.subscriptions import (
     CONTRACT_SOURCES,
     FREE_PLAN,
@@ -193,6 +200,24 @@ def _view(
     )
 
 
+def _record_suspension(
+    db: Session, tenant: models.Tenant, before: TenantStatus, actor: platform_events_repo.EventActor
+) -> None:
+    """정지 전이 한 건을 그 전이와 같은 트랜잭션에 남긴다(TENANT_SUSPEND · #589 B). commit 하지 않는다.
+
+    전이(tenants_repo.suspend_tenant)가 실제로 한 행을 바꾼 뒤에만 부른다. 행을 쓰지 못하면 예외가 올라가 호출부의
+    트랜잭션이 되돌아간다 — 로그 없는 정지를 남기지 않는다. 사유 원문은 싣지 않는다(운영자 정지와 같다 — 고칠 수 없는
+    로그에 사람이 적은 글을 넣지 않는다. 원문과 만료 정지의 고정 문구는 고객사 행의 suspended_reason 에 있다)."""
+    platform_events_repo.record_platform_event(
+        db,
+        PlatformEventAction.TENANT_SUSPEND,
+        actor,
+        tenant_id=tenant.tenant_id,
+        target_id=tenant.tenant_id,
+        details={"before": before.value, "after": TenantStatus.SUSPENDED.value},
+    )
+
+
 # --- 투영 (모의 계약의 현재 상태 → 테넌트 구독 칸) ------------------------------------
 
 
@@ -228,6 +253,8 @@ def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime)
     - 유료 수동 기록(MANUAL · Free 아님)은 계약으로 덮어쓰지 않는다(구매 · PATCH 관문이 이 조합을
       막으므로 정상 경로에서는 일어나지 않는다 — 일어나면 경고만 남긴다).
     정지 말고는 서비스 상태를 보지도 바꾸지도 않는다 — 정지 중에도 같은 투영이고, 같은 입력에 같은 결과다(멱등).
+    이 만료 정지는 활동 로그에 SYSTEM 의 TENANT_SUSPEND 로 남는다(_record_suspension) — 운영자의 재개 요청 안에서
+    일어나도(재개 직후의 이 호출) 정지를 정한 것은 그 사람이 아니라 권리 만료라 SYSTEM 이다. 이미 정지면 행도 없다.
     정지는 이용 중단과 같은 전이라 같은 잠금 순서를 지킨다 — 사용자 표 참조 잠금을 테넌트 행보다 먼저 잡아, 같은
     고객사의 사용자 관리 쓰기(사용자 표 EXCLUSIVE 뒤 정지를 잠그지 않고 읽는다)가 커밋 전의 정지를 지나치지 못하게 한다.
     테넌트 행을 먼저 잠근 호출부(cancel_renewal)는 그 앞에서 같은 잠금을 잡아 둔다.
@@ -267,7 +294,9 @@ def reconcile_tenant_subscription(db: Session, tenant_id: str, *, now: datetime)
             else EXPIRY_SUSPENSION_REASON
         )
         desired = tenants_repo.projection_values(tenants_repo.APP_FREE, SubscriptionSource.APP_FREE)
+        before = tenant.status  # 잠근 행의 DB 값(lock_tenant 가 덮어 읽는다)
         if tenants_repo.suspend_tenant(db, tenant_id, reason=reason, now=now):
+            _record_suspension(db, tenant, before, platform_events_repo.SYSTEM)
             logger.info("mock_entitlement_ended_service_suspended", extra={"tenant_id": tenant_id})
     else:
         return False
@@ -356,18 +385,25 @@ def stop_service(
     tenant_id: str,
     body: SubscriptionStopRequest,
     *,
+    event_actor: platform_events_repo.EventActor,
     authorize: Callable[[], None],
     settings: SubscriptionSettings,
     now: datetime,
 ) -> CustomerSubscriptionResponse:
-    """서비스 이용 중단 = 테넌트 정지와 같은 SUSPENDED 전이. 계약 · 투영은 그대로이고 계속 처리된다."""
+    """서비스 이용 중단 = 테넌트 정지와 같은 SUSPENDED 전이. 계약 · 투영은 그대로이고 계속 처리된다.
+
+    event_actor 는 요청한 고객사 중앙계정이다(활동 로그의 행위자 · platform_events_repo.person). 기본값이 없다 —
+    빠뜨리면 로그 없는 정지가 조용히 생긴다. authorize 가 잠금 뒤에 같은 사용자 · 계정 종류 · 소속 · 역할을 다시
+    확인하므로(routers.subscriptions.get_reauthorizer) 그 뒤에 쓰는 이 값은 재판정된 신원과 같다."""
     # 사용자 관리 쓰기(사용자 표 EXCLUSIVE → 소속 테넌트의 정지를 잠그지 않고 읽는다 · auth.admin_service)와 줄을
     # 서야 한다 — 테넌트 행만 잡으면 그 쓰기가 커밋 전의 정지를 못 보고 정지 뒤에 남는다. 구매와 같은 순서 · 같은
     # 참조용 잠금이다(EXCLUSIVE 면 테넌트 행을 쥔 채 사용자 FK 를 참조하는 신뢰 경로 쓰기와 교착한다).
     auth_repo.lock_users_for_reference(db)
-    _lock(db, tenant_id, authorize)
+    tenant = _lock(db, tenant_id, authorize)
+    before = tenant.status
     if not tenants_repo.suspend_tenant(db, tenant_id, reason=body.reason, now=now):
         raise _conflict(db)
+    _record_suspension(db, tenant, before, event_actor)
     return commit_after(db, lambda: _view(db, tenant_id, can_manage=True, settings=settings, now=now))
 
 

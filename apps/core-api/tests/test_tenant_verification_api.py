@@ -762,6 +762,22 @@ def test_resume_of_rights_that_ended_while_stopped_leaves_the_service_suspended_
     assert body["suspended_reason"] == subscription_workflow.EXPIRY_SUSPENSION_REASON
     assert resp.json()["verification"]["result"] == "OK"
     assert _agreement(db, tenant.tenant_id) == agreement  # 만료 전이 · 이벤트는 처리 주기(공급자)의 몫이다
+    # 활동 로그(#589 B): 운영자의 재개와, 그 직후 권리 만료가 다시 멈춘 정지가 각각 한 행이다. 정지는 SYSTEM 의 것이다
+    # — 재개를 누른 사람이 멈춘 것이 아니다
+    db.expire_all()
+    recorded = sorted(
+        (row.action, row.actor_kind.value, row.outcome.value, row.details.get("before"), row.details.get("after"))
+        for row in db.scalars(
+            select(models.PlatformEvent).where(
+                models.PlatformEvent.target_id == tenant.tenant_id,
+                models.PlatformEvent.action.in_(("TENANT_RESUME", "TENANT_SUSPEND")),
+            )
+        )
+    )
+    assert recorded == [
+        ("TENANT_RESUME", "USER", "SUCCEEDED", None, None),
+        ("TENANT_SUSPEND", "SYSTEM", "SUCCEEDED", "ACTIVE", "SUSPENDED"),
+    ]
     assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
 
 
