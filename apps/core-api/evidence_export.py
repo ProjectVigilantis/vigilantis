@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from ai.model_client import mask_outbound
+from ai.model_client import MaskedKeyCollisionError, mask_mapping_keys, mask_outbound
 from auth.service import CurrentUser
 from db import mappers, models
 from db.repositories import incidents as incidents_repo
@@ -155,23 +155,6 @@ def _validated(row: models.Evidence) -> EvidenceItem:
         raise ApiError(ErrorCode.INTERNAL_ERROR) from None
 
 
-def _mask_mapping_keys(value: Any) -> Any:
-    """기존 마스커가 보존하는 키에도 같은 문자열 규칙을 적용한다. 태그 키 역시 수집 입력이다."""
-    if isinstance(value, dict):
-        masked = {}
-        for key, item in value.items():
-            masked_key = mask_outbound(key)
-            if masked_key in masked:
-                # 두 키가 같은 마스크가 되면 근거 하나를 조용히 덮어쓰지 않는다.
-                logger.error("evidence_export_redacted_key_collision")
-                raise ApiError(ErrorCode.INTERNAL_ERROR)
-            masked[masked_key] = _mask_mapping_keys(item)
-        return masked
-    if isinstance(value, list):
-        return [_mask_mapping_keys(item) for item in value]
-    return value
-
-
 def build_document(
     incident: models.Incident,
     rows: Sequence[models.Evidence],
@@ -214,7 +197,12 @@ def build_document(
             for item in items
         ],
     )
-    return _mask_mapping_keys(mask_outbound(document.model_dump(mode="json")))
+    try:
+        return mask_mapping_keys(mask_outbound(document.model_dump(mode="json")))
+    except MaskedKeyCollisionError:
+        # 두 키가 같은 마스크가 되면 근거 하나를 조용히 덮어쓰지 않는다. raise는 except 밖 — 원인을 매달지 않는다.
+        logger.error("evidence_export_redacted_key_collision")
+    raise ApiError(ErrorCode.INTERNAL_ERROR)
 
 
 # --- Markdown ------------------------------------------------------------------------------
