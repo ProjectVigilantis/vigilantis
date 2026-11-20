@@ -44,6 +44,12 @@ def sessions(pg_engine):
             select(models.SignupRequest.request_id).where(models.SignupRequest.idempotency_key.in_(keys))
         ).all()
         session.execute(
+            delete(models.SignupRequestDuplicate).where(
+                models.SignupRequestDuplicate.idempotency_key.in_(keys)
+                | models.SignupRequestDuplicate.request_id.in_(ids)
+            )
+        )
+        session.execute(
             delete(models.OperatorNotification).where(models.OperatorNotification.target_id.in_(ids))
         )
         session.execute(
@@ -114,6 +120,63 @@ def test_same_key_different_payload_race_has_one_winner(sessions):
     assert [r for i, r in enumerate(results) if i not in winners] == [
         ErrorCode.IDEMPOTENCY_KEY_CONFLICT
     ] * (WORKERS - 1)
+
+
+def test_different_keys_same_email_race_creates_one_request(sessions):
+    # 이메일 잠금이 관문이다 — 키가 모두 달라 재시도 키 유일 제약은 막지 못한다
+    factory, keys = sessions
+    run_keys = [uuid.uuid4() for _ in range(WORKERS)]
+    keys.extend(str(k) for k in run_keys)
+    email = f"race-{uuid.uuid4().hex[:8]}@example.com"
+    barrier = threading.Barrier(WORKERS)
+    results: list = [None] * WORKERS
+
+    def run(i):
+        with factory() as session:
+            barrier.wait()
+            results[i] = service.create(session, run_keys[i], body(email=email.upper() if i % 2 else email)).request_id
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(WORKERS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    with factory() as session:
+        rows = session.scalars(
+            select(models.SignupRequest).where(func.lower(models.SignupRequest.email) == email)
+        ).all()
+    assert len(rows) == 1
+    assert set(results) == {rows[0].request_id}
+    with factory() as session:
+        held = session.scalars(
+            select(models.SignupRequestDuplicate.idempotency_key).where(
+                models.SignupRequestDuplicate.request_id == rows[0].request_id
+            )
+        ).all()
+    assert len(held) == WORKERS - 1  # 걸러진 키도 모두 남는다
+
+
+def test_same_key_split_between_open_and_new_email_race_has_one_winner(sessions):
+    # 키 잠금이 관문이다 — 열린 신청이 있는 이메일은 중복 접수 행에, 없는 이메일은 신청 행에 쓰려 해 두 표의 유일 제약이 서로를 막지 못한다
+    factory, keys = sessions
+    taken = f"taken-{uuid.uuid4().hex[:8]}@example.com"
+    fresh = f"fresh-{uuid.uuid4().hex[:8]}@example.com"
+    open_key = uuid.uuid4()
+    key = uuid.uuid4()
+    keys.extend([str(open_key), str(key)])
+    with factory() as session:
+        open_id = service.create(session, open_key, body(email=taken)).request_id
+    bodies = [body(email=taken if i % 2 else fresh) for i in range(WORKERS)]
+    results = race(factory, key, bodies)
+    rows, _ = stored(factory, key)
+    with factory() as session:
+        held = session.get(models.SignupRequestDuplicate, str(key))
+    assert (len(rows), held is not None) in {(1, False), (0, True)}
+    # 먼저 잡은 쪽의 본문이 그 키의 값이 된다. 같은 본문은 같은 202, 다른 본문은 409 다
+    winner_email, winner_id = (fresh, rows[0].request_id) if rows else (taken, open_id)
+    assert results == [
+        winner_id if b.email == winner_email else ErrorCode.IDEMPOTENCY_KEY_CONFLICT for b in bodies
+    ]
 
 
 @pytest.fixture()
