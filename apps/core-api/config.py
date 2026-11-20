@@ -189,6 +189,8 @@ class Settings(BaseSettings):
     # 초안은 모델에 연결하지 않는다(503 REPORT_DRAFT_MODEL_UNAVAILABLE) — 기본 꺼짐이라 머지만으로
     # 유료 호출이 생기지 않는다. R9에서 확인한 값은 gpt-6-luna · high다.
     REPORT_DRAFT_OPENAI_MODEL: Optional[str] = None
+    # 추론 모델만 받는다(R9 검증 범위). 분석용 OPENAI_REASONING_EFFORT와 달리 "unset"이 없고
+    # temperature도 싣지 않는다
     REPORT_DRAFT_OPENAI_REASONING_EFFORT: Literal[
         "none", "minimal", "low", "medium", "high", "xhigh", "max"
     ] = "high"

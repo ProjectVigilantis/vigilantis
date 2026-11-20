@@ -27,7 +27,7 @@ export const ROLE_NAMES = [ROLE_LABELS.ADMIN, ROLE_LABELS.OPERATOR, ROLE_LABELS.
 
 /** 처리방침 시행일. 화면에는 `formatLegalDate`로 적는다. 첫 시행은 플랫폼 상시 운영 시작일(11/16, 2026-11-02 회의)이고,
  * 신고 작성 보조 초안의 국외 이전 추가(#648)로 시행 7일 전 고지를 지켜 옮겼다. */
-export const LEGAL_EFFECTIVE_DATE = '2026-11-26';
+export const LEGAL_EFFECTIVE_DATE = '2026-11-27';
 
 /** 이용약관 시행일(2026-11-19 PM 결정). 처리방침과 따로 둔다. */
 export const TERMS_EFFECTIVE_DATE = '2026-12-09';
