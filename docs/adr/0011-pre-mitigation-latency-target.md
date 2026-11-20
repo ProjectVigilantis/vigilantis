@@ -58,7 +58,7 @@
 보호 자산은 에스컬레이션으로 넘기고, 격리는 관제자 승인으로만 한다. 자동 조치는 출발지 차단 하나만 허용한다.
 
 - **대상**: 보호 EC2의 High 위협 중 위협 접수 계약상 그 EC2가 공격받는 쪽(`TARGET`)인 경우뿐이다. `ACTOR`이거나 역할을 알 수 없으면 대상이 아니다. GuardDuty finding은 `ResourceRole`과 관계없이 제외하고 자동 대응을 켜지 않는다. T-6 자동 대응 스위치 판정은 그대로다.
-- **조치**: 공격 출발지 IPv4 단일 `/32`의 인바운드 TCP를 `RUNBOOK_NACL_ADD_DENY`로 막으며, 파라미터는 서버가 정한다. 출처는 §2의 `PRE_MITIGATION_0_5S`, 해제는 [ADR-0004](0004-rollback-runbook-whitelist-registration.md) 2차 개정을 그대로 따른다.
+- **조치**: 공격 출발지 IPv4 단일 `/32`의 인바운드 TCP를 `RUNBOOK_NACL_ADD_DENY`로 막으며, 파라미터는 서버가 정한다. 사설 IPv4 출발지도 이 `/32` 차단 대상에 포함된다. 출처는 §2의 `PRE_MITIGATION_0_5S`, 해제는 [ADR-0004](0004-rollback-runbook-whitelist-registration.md) 2차 개정을 그대로 따른다.
 - **시간 목표는 두지 않는다.** 격리가 아니므로 §1 목표와 Context 측정은 이 조치에 해당하지 않으며, 실 AWS에서 소요 시간을 재지 않았다. 차단 명령의 성공은 격리 확인도, 실제 패킷 차단을 따로 확인한 결과도 아니다.
 - **차단하지 못하면** 생략 · 에스컬레이션 · 알림만 남고, 대체 격리나 더 넓은 deny는 하지 않는다.
 
