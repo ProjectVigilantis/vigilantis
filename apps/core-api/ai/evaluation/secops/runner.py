@@ -43,6 +43,7 @@ from .scoring import (
 SETTING_NAMES = (
     "OPENAI_MODEL", "OPENAI_TEMPERATURE", "OPENAI_REASONING_EFFORT", "OPENAI_TIMEOUT_SECONDS",
     "OPENAI_MAX_ATTEMPTS", "OPENAI_RETRY_BACKOFF_SECONDS", "OPENAI_MAX_RETRY_AFTER_SECONDS",
+    "OPENAI_PROMPT_CACHE",  # cli.py는 환경변수 대신 이 기본값을 쓰고 --prompt-cache로만 바꾼다
 )
 SERVICE_FILES = (
     "apps/core-api/ai/agent.py", "apps/core-api/ai/capabilities.py",

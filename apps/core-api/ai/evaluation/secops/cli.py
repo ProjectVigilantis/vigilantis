@@ -38,6 +38,8 @@ def _settings(args: argparse.Namespace, *, paid: bool = False) -> Settings:
         values["OPENAI_MODEL"] = args.model
     if args.reasoning_effort:
         values["OPENAI_REASONING_EFFORT"] = args.reasoning_effort
+    if args.prompt_cache:
+        values["OPENAI_PROMPT_CACHE"] = True
     key = None
     if paid:
         key = os.getenv("OPENAI_API_KEY")
@@ -91,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="CANDIDATE_FIRST는 PM이 승인한 비교 라운드 전용 대비책(건당 2회 호출)")
     parser.add_argument("--model", help="생략 시 서비스 코드 기본 모델")
     parser.add_argument("--reasoning-effort", choices=["low", "medium", "high", "unset"])
+    parser.add_argument("--prompt-cache", action="store_true",
+                        help="캐시 끄는 인자를 싣지 않음; 그 인자를 받지 않는 gpt-5.6 이전 모델 전용")
     parser.add_argument("--key-env-file", type=Path, help="--run 인증 키만 읽을 .env 경로")
     args = parser.parse_args(argv)
     variant = SecOpsGraphVariant(args.variant)

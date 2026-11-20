@@ -17,6 +17,7 @@
 #   - 모델 동작 파라미터(temperature·reasoning_effort)는 설정에 값이 있을 때만 싣는다
 #     (#237). 모델 계열마다 받는 것이 달라(gpt-4o는 temperature, gpt-5 계열 추론
 #     모델은 reasoning_effort) 안 쓰는 노브는 요청 본문에 나타나지도 않아야 한다.
+#   - 제공자 프롬프트 캐시는 설정(OPENAI_PROMPT_CACHE)이 끄면 요청마다 끈다(#648 §3).
 #   - 남기는 로그는 토큰 사용량·시도 횟수 같은 호출 메타뿐이다. Prompt 전문과 원문
 #     응답은 남기지 않는다(ADR-0005 미보존 대상).
 # ==============================================================================
@@ -36,6 +37,7 @@ from openai import (
     OpenAI,
     OpenAIError,
     RateLimitError,
+    Timeout,
 )
 from pydantic import ValidationError
 
@@ -79,11 +81,16 @@ class OpenAIModelClient:
         temperature: Optional[float] = None,
         reasoning_effort: Optional[str] = None,
         service_tier: Optional[str] = None,
+        timeout: Any = None,
+        prompt_cache: bool = True,
     ) -> None:
         self._client = client
         self._model = model
         self._policy = policy
         self._service_tier = service_tier
+        # SDK 호출 1회에 넘길 제한 시간. None이면 policy.timeout_seconds 하나를 연결·전송·응답
+        # 대기 단계마다 같은 값으로 쓴다(SDK 동작) — 단계별 값이 필요한 호출부만 Timeout을 넘긴다
+        self._timeout = timeout
         # 값이 없는 노브는 키 자체를 만들지 않는다 — 모델이 받지 않는 파라미터는
         # 요청 본문에 나타나지도 않아야 한다. 전 호출이 같은 dict를 쓰므로 요약·후보
         # 호출에 서로 다른 설정이 실릴 여지가 없다.
@@ -95,6 +102,9 @@ class OpenAIModelClient:
             )
             if value is not None
         }
+        # 제공자의 프롬프트 캐시는 기본으로 켜져 있다(1,024토큰 이상). 끌 때는 자동 캐시 지점을
+        # 만들지 않는 explicit 모드에 지점을 하나도 두지 않는다 — gpt-5.6 이후 모델만 받는 인자다
+        self._cache_params: dict[str, Any] = {} if prompt_cache else {"prompt_cache_options": {"mode": "explicit"}}
 
     def complete(
         self,
@@ -108,7 +118,7 @@ class OpenAIModelClient:
             {"role": "user", "content": payload["user_json"]},
         ]
 
-        extra_params = dict(self._model_params)
+        extra_params = {**self._model_params, **self._cache_params}
         if self._service_tier is not None:
             extra_params["service_tier"] = self._service_tier
 
@@ -122,7 +132,7 @@ class OpenAIModelClient:
                     model=self._model,
                     messages=messages,
                     response_format=response_model,
-                    timeout=self._policy.timeout_seconds,
+                    timeout=self._timeout if self._timeout is not None else self._policy.timeout_seconds,
                     **extra_params,
                 )
             except APITimeoutError as exc:
@@ -307,22 +317,38 @@ def _token_usage(raw: Any) -> TokenUsage:
     )
 
 
-def build_openai_model_client(settings: Optional[Settings] = None) -> OpenAIModelClient:
-    """설정으로 실제 SDK 클라이언트를 만들어 경계 구현을 구성한다."""
+def build_openai_model_client(
+    settings: Optional[Settings] = None, *, setup_timeout_seconds: Optional[float] = None
+) -> OpenAIModelClient:
+    """설정으로 실제 SDK 클라이언트를 만들어 경계 구현을 구성한다.
+
+    setup_timeout_seconds를 주면 연결·요청 전송·연결 풀 대기를 그 값으로, 응답 대기만
+    OPENAI_TIMEOUT_SECONDS로 제한한다. 주지 않으면 모든 단계가 OPENAI_TIMEOUT_SECONDS다.
+    """
     settings = settings or get_settings()
     if not settings.OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY가 설정되지 않아 모델 클라이언트를 만들 수 없습니다")
+    timeout: Any = settings.OPENAI_TIMEOUT_SECONDS
+    if setup_timeout_seconds is not None:
+        timeout = Timeout(
+            connect=setup_timeout_seconds,
+            read=settings.OPENAI_TIMEOUT_SECONDS,
+            write=setup_timeout_seconds,
+            pool=setup_timeout_seconds,
+        )
     return OpenAIModelClient(
         # 재시도 소유자는 ai/model_retry.py의 엔진 하나다 — SDK 기본 재시도(2회)와
         # 중첩되면 최대 시도가 곱으로 늘어나므로 SDK 쪽은 0으로 끈다
         client=OpenAI(
             api_key=settings.OPENAI_API_KEY,
-            timeout=settings.OPENAI_TIMEOUT_SECONDS,
+            timeout=timeout,
             max_retries=0,
         ),
+        timeout=timeout if setup_timeout_seconds is not None else None,
         model=settings.OPENAI_MODEL,
         policy=RetryPolicy.from_settings(settings),
         temperature=settings.OPENAI_TEMPERATURE,
         reasoning_effort=settings.OPENAI_REASONING_EFFORT,
+        prompt_cache=settings.OPENAI_PROMPT_CACHE,
         service_tier=None,  # 설정 키가 없다 — 실험 도구가 생성자로 직접 지정한다
     )

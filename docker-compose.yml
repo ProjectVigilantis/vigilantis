@@ -84,6 +84,10 @@ services:
       dockerfile: apps/core-api/Dockerfile
     env_file: .env
     # 개발 스택은 코드 마운트 + 자동 재기동. 이미지의 기본 명령(serve.py)은 운영 배포용이다(ADR-0010)
+    # --no-sync 없는 uv run은 기동 때 워크스페이스 패키지를 재설치한다(#673). 마운트로 파일 변경 시각이
+    # 이미지와 달라져서다(잠금 불일치가 아니다). 빌드 도구(hatchling)는 이미지에 남은 uv 캐시에서 쓰므로
+    # 네트워크 없이도 끝난다(2026-11-20 확인). 캐시에 없는 패키지가 필요해지면 PyPI에 접속한다.
+    # 의존성을 바꿨으면 uv.lock을 갱신하고 docker compose up --build로 이미지를 다시 만든다.
     command: ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
       # compose 스택은 파일 로그를 기본 켠다(Settings 기본값은 False). 끄려면 셸/.env에서 false
