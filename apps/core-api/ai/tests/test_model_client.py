@@ -5,6 +5,7 @@
 test_outbound_payload_drops_secret_originals다 — SSOT 주차 종료 판정 기준 ⓕ.
 """
 
+import copy
 import json
 import logging
 from datetime import datetime, timezone
@@ -260,17 +261,23 @@ def test_masking_walks_nested_structures_and_keeps_keys():
     assert set(masked["asset_context"]) == {"arn", "account_id", "spec"}
 
 
-def test_non_serializable_payload_is_a_contract_error():
-    # AssetItem.collected_at의 UtcDateTime은 when_used="json"이라 python 모드
-    # model_dump()에서 datetime으로 남는다 — 경계 밖으로 TypeError가 나가면 안 된다
-    request = AIModelRequest(
-        system_prompt="분석",
-        user_payload={"collected_at": datetime(2026, 8, 25, tzinfo=timezone.utc)},
-    )
+@pytest.mark.parametrize(
+    "user_payload",
+    [
+        # AssetItem.collected_at의 UtcDateTime은 when_used="json"이라 python 모드
+        # model_dump()에서 datetime으로 남는다 — 경계 밖으로 TypeError가 나가면 안 된다
+        {"collected_at": datetime(2026, 8, 25, tzinfo=timezone.utc)},
+        # 문자열이 아닌 키도 키 마스킹에서 터지지 않고 같은 직렬화 거절로 간다
+        {"tags": {(AWS_KEY, "owner"): "finops"}},
+    ],
+)
+def test_non_serializable_payload_is_a_contract_error(user_payload):
+    request = AIModelRequest(system_prompt="분석", user_payload=user_payload)
     with pytest.raises(AIModelContractError) as exc_info:
         build_outbound_payload(request)
 
     assert "직렬화" in str(exc_info.value)
+    assert AWS_KEY not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
 
@@ -569,6 +576,65 @@ def test_secret_never_reaches_the_sdk():
     assert AWS_KEY not in blob
     assert "[REDACTED]" in blob
     assert INSTANCE_ARN in blob  # 대상 지목에 필요한 값은 그대로 나간다
+
+
+def test_credential_shaped_tag_key_never_reaches_the_sdk():
+    # 태그 키는 자유 문자열이다 — 키 자리에 든 자격증명도 값과 같은 규칙으로 가려야 한다
+    payload = {
+        "arn": INSTANCE_ARN,
+        "account_id": "123456789012",
+        "tags": {
+            AWS_KEY: "rotation-owner",
+            "password=hunter2": "legacy",
+            "db_password": "s3cr3t-value",
+            "Owner": "finops",
+        },
+    }
+    original = copy.deepcopy(payload)
+    fake = FakeAIModelClient([Answer(verdict="ok")])
+    client, completions = _client([_completion(Answer(verdict="ok"))])
+
+    fake.complete(_request(payload), Answer)
+    client.complete(_request(payload), Answer)
+
+    [sent] = fake.sent
+    assert sent["user_payload"]["tags"] == {
+        "[REDACTED]": "rotation-owner",
+        "password=[REDACTED]": "legacy",
+        "db_password": "[REDACTED]",  # 라벨 키는 남기고 값만 가린다
+        "Owner": "finops",
+    }
+    messages = json.dumps(completions.calls[0]["messages"], ensure_ascii=False)
+    for outbound in (sent["user_json"], messages):
+        for secret in (AWS_KEY, "hunter2", "s3cr3t-value"):
+            assert secret not in outbound
+        assert INSTANCE_ARN in outbound and "123456789012" in outbound
+    assert payload == original  # 호출부 값은 바꾸지 않는다
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {AWS_KEY: "first", TEMP_KEY: "second"},  # 두 키가 같은 마스크로 모인다
+        {AWS_KEY: "first", "[REDACTED]": "second"},  # 마스크가 기존 일반 키와 겹친다
+    ],
+)
+def test_masked_key_collision_fails_before_anything_is_sent(tags):
+    # 겹친 키 하나를 조용히 덮어쓰면 근거가 사라진다 — 보내지 않고 계약 위반으로 세운다
+    request = _request({"arn": INSTANCE_ARN, "tags": tags})
+    fake = FakeAIModelClient([Answer(verdict="ok")])
+    client, completions = _client([_completion(Answer(verdict="ok"))])
+
+    for model_client in (fake, client):
+        with pytest.raises(AIModelContractError) as exc_info:
+            model_client.complete(request, Answer)
+        error = exc_info.value
+        assert (error.kind, error.phase) == (FailureKind.REQUEST_SERIALIZATION, "request")
+        assert AWS_KEY not in str(error) and TEMP_KEY not in str(error)
+        assert error.__cause__ is None and error.__context__ is None
+
+    assert fake.sent == []
+    assert completions.calls == []
 
 
 # --- 재시도 분류 -----------------------------------------------------------------

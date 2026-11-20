@@ -84,6 +84,7 @@ from security.soar import start_timeout_watcher  # noqa: E402
 from services.scheduler import start_scheduler as start_scan_scheduler  # noqa: E402
 from marketplace_sync import start_marketplace_scheduler  # noqa: E402
 from subscription_scheduler import start_subscription_scheduler  # noqa: E402
+from report_draft_cleanup import start_report_draft_cleanup
 from support_http import SignupBodyLimitMiddleware
 
 _http_logger = logging.getLogger("vigilantis.http")
@@ -129,6 +130,8 @@ def create_app() -> FastAPI:
             start_subscription_scheduler,
             # 실제 AWS Marketplace 알림 수신 · 권리 끝 재확인. 상품 코드가 없으면 뜨지 않는다.
             start_marketplace_scheduler,
+            # 만료된 인시던트 보고서 보관본 삭제(#623) — 기동 즉시 1회, 이후 매시간.
+            start_report_draft_cleanup,
         )
         try:
             for start in starts:

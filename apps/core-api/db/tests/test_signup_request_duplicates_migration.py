@@ -1,6 +1,6 @@
 """도입 신청 중복 접수 기록 migration — 실제 PostgreSQL/Alembic.
 
-지키는 것: 부모 f598b2c3d402 · 단일 head · signup_request_duplicates(키 PK · 신청 FK RESTRICT) 생성 후 ORM 과 일치 ·
+지키는 것: 부모 a623c4d5e601 · 단일 head · signup_request_duplicates(키 PK · 신청 FK RESTRICT) 생성 후 ORM 과 일치 ·
 기록이 남아 있으면 downgrade 를 거절하고(지우면 그 키의 재시도가 새 신청을 만들 수 있다) 비어 있으면 표만 지운다.
 테스트마다 고유 이름의 일회용 DB 를 만들고 지운다(공용 pg_engine DB 의 head 를 건드리지 않는다).
 """
@@ -21,7 +21,7 @@ from db import models
 from sqlalchemy import create_engine, inspect, text
 
 REVISION = "b671a1c2d301"
-PARENT = "f598b2c3d402"
+PARENT = "a623c4d5e601"
 REQUEST_ID = "99999999-9999-4999-8999-999999999999"
 
 

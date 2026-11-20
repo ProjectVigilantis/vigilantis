@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     # 꺼져 있으면 발송 · 이메일 연결 관측 · 설정 자원 정리가 없고, 설정 API 도 AWS 를 부르지 않는다
     # (새 Slack URL 저장 거절). routes 파일은 선택이며 아직 정하지 않은 고객 채널로만 가져온다.
     NOTIFICATION_ENABLED: bool = False
+    # 만료된 인시던트 보고서 보관본(#623)의 정리 잡 기동 여부. 스캔 · 디스패치 · 알림과 독립이다.
+    # 만료 조회 차단은 이 스위치와 무관하게 저장소가 한다 — 끄면 행 삭제만 멈춘다.
+    REPORT_DRAFT_CLEANUP_ENABLED: bool = True
     NOTIFICATION_ROUTES_FILE: str = ""
     NOTIFICATION_PUBLIC_BASE_URL: str = ""
     NOTIFICATION_POLL_SECONDS: float = Field(default=1.0, ge=0.1, le=60)

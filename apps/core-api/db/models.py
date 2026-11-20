@@ -77,6 +77,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     SmallInteger,
     String,
     Text,
@@ -2428,4 +2429,32 @@ class TotpProviderMutation(Base):
             "reconciled_by IS NULL OR resolution IS NOT DISTINCT FROM 'OPERATOR_RECONCILED'",
             name="reconciler_shape",
         ),
+    )
+
+
+class IncidentReportDraft(Base):
+    """인시던트당 최신 보고서 생성 1회의 최종 산출물(마크다운 · JSON 바이트 그대로). 생성 후 7일에 만료한다.
+
+    검증 · 마스킹을 마친 결과만 둔다 — Prompt · 모델 원본 응답 · 고객 수정본은 저장하지 않는다.
+    tenant_id 는 인시던트의 값을 옮겨 싣는다(NULL = 테넌트 없는 인시던트). 인시던트가 지워지면 함께 지워진다.
+    """
+
+    __tablename__ = "incident_report_drafts"
+
+    incident_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("incidents.incident_id", ondelete="CASCADE"), primary_key=True
+    )
+    tenant_id: Mapped[str | None] = _tenant_fk()
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    markdown: Mapped[bytes] = mapped_column(LargeBinary)
+    json_body: Mapped[bytes] = mapped_column(LargeBinary)
+
+    __table_args__ = (
+        CheckConstraint(
+            "expires_at = generated_at + interval '7 days'", name="expires_after_seven_days"
+        ),
+        CheckConstraint("octet_length(markdown) <= 2097152", name="markdown_size_cap"),
+        CheckConstraint("octet_length(json_body) <= 2097152", name="json_body_size_cap"),
     )

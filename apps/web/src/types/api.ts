@@ -5,7 +5,7 @@ export type IsoDateTime = string;
 
 /* ────────────────────────────── errors.py ────────────────────────────── */
 
-/** REST 공통 오류 코드 28종. 괄호는 계약상 HTTP 상태. */
+/** REST 공통 오류 코드. 괄호는 계약상 HTTP 상태. */
 export type ErrorCode =
   | 'INCIDENT_NOT_FOUND' // 404 — 요청의 테넌트 범위 밖도 404(존재를 알리지 않는다)
   | 'IDEMPOTENCY_KEY_CONFLICT' // 409
@@ -35,6 +35,8 @@ export type ErrorCode =
   | 'GROUP_NAME_CONFLICT' // 409 — 같은 이름의 그룹이 이미 있다(#572 2번)
   | 'USER_STATE_CONFLICT' // 409 — 고객사별 마지막 활성 ADMIN · 중복 초대 · 상태 충돌(#492)
   | 'SIGNUP_REQUEST_APPROVAL_REQUIRED' // 409 — 승인은 AWS 계정 ID·리전을 받는 전용 approve 경로로 요청
+  | 'REPORT_DRAFT_NOT_FOUND' // 404 — 보관된 신고 초안 없음 또는 만료
+  | 'REPORT_DRAFT_SUPERSEDED' // 409 — 더 최신 기준의 신고 초안이 저장됨
   | 'REQUEST_VALIDATION_FAILED' // 422
   | 'INTERNAL_ERROR'; // 500
 

@@ -1,7 +1,7 @@
 """도입 신청 중복 접수 기록.
 
 Revision ID: b671a1c2d301
-Revises: f598b2c3d402
+Revises: a623c4d5e601
 
 같은 이메일의 처리 중 · 승인 신청에 묶여 새 신청을 만들지 않은 접수의 재시도 키와 검증 결과 값을 남긴다.
 그 키의 재시도도 신청 행의 키와 같은 규칙(같은 값 202 · 다른 값 409)을 따르게 하기 위해서다.
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "b671a1c2d301"
-down_revision = "f598b2c3d402"
+down_revision = "a623c4d5e601"
 branch_labels = None
 depends_on = None
 

@@ -24,7 +24,7 @@ EXPECTED_TABLES = {
     "mock_marketplace_events",
     # 실제 AWS Marketplace 라이선스 사본(ADR-0012 2차 개정)
     "marketplace_licenses",
-    # 자산·인시던트 계열 10종
+    # 자산·인시던트 계열 11종
     "collection_runs",
     "asset_inventory_counts",  # 회차별 유형별 자산 수 — 시계열 축 5 (2026-09-29)
     "assets",
@@ -33,6 +33,7 @@ EXPECTED_TABLES = {
     "rule_evaluations",
     "threat_events",
     "incidents",
+    "incident_report_drafts",
     "evidence_items",
     "runbook_candidates",
     # 조치·복구 계열 4종
