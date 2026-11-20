@@ -469,6 +469,25 @@ def test_only_configured_model_params_reach_the_sdk(temperature, reasoning_effor
     assert {k: sent[k] for k in ("temperature", "reasoning_effort") if k in sent} == expected
 
 
+def test_builder_turns_off_prompt_cache_unless_enabled():
+    from config import Settings
+
+    base = {
+        "_env_file": None,
+        "DATABASE_URL": "postgresql+psycopg://t:t@localhost:5432/t",
+        "OPENAI_API_KEY": "sk-test",
+    }
+    shipped = build_openai_model_client(Settings(**base))
+    enabled = build_openai_model_client(Settings(**base, OPENAI_PROMPT_CACHE=True))
+    sdk = _FakeCompletions([_completion(Answer(verdict="ok"))])
+    shipped._client = SimpleNamespace(chat=SimpleNamespace(completions=sdk))
+
+    shipped.complete(_request(), Answer)
+
+    assert sdk.calls[0]["prompt_cache_options"] == {"mode": "explicit"}
+    assert enabled._cache_params == {}
+
+
 def test_model_params_are_carried_into_retries():
     # 재시도는 같은 호출의 재실행이다 — 1회차와 다른 파라미터로 가면 재현성 측정에서
     # 같은 케이스가 두 설정으로 돈 셈이 된다
@@ -518,7 +537,7 @@ def test_shipped_defaults_pair_the_reasoning_model_with_its_knob(monkeypatch):
         )
     )
 
-    assert client._model == "gpt-5.6-luna"
+    assert client._model == "gpt-6-luna"
     assert client._model_params == {"reasoning_effort": "low"}
 
 
