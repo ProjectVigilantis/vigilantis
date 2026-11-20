@@ -29,8 +29,8 @@ from .api.assets import UtcDateTime
 @unique
 class GuardrailValidationContext(str, Enum):
     AI_CANDIDATE = "AI_CANDIDATE"
-    # 서버가 사람 승인 없이 시작한 격리 전부 — High 즉시 선차단과 1분 미응답 만료
-    # 자동 격리를 모두 포함한다. 둘의 구분은 Execution의 trigger_source가 담는다.
+    # 서버 자동 대응 — High 즉시 격리·보호 대상 출발지 차단과 Medium 만료 격리.
+    # 발동 출처와 실제 조치는 Execution의 trigger_source·runbook_id가 구분한다.
     AUTO_ISOLATION = "AUTO_ISOLATION"
     ROLLBACK_EXECUTION = "ROLLBACK_EXECUTION"
 
@@ -99,8 +99,7 @@ class ActionWhitelistReasonCode(str, Enum):
     WHITELIST_UNKNOWN_RUNBOOK = "WHITELIST_UNKNOWN_RUNBOOK"
     WHITELIST_NOT_AI_RECOMMENDABLE = "WHITELIST_NOT_AI_RECOMMENDABLE"
     WHITELIST_NOT_ROLLBACK_RUNBOOK = "WHITELIST_NOT_ROLLBACK_RUNBOOK"
-    # AUTO_ISOLATION 문맥의 목록(RUNBOOK_EC2_ISOLATE 하나)에 없는 확정 런북 —
-    # 사람 승인 없이 서버가 시작하는 경로에 격리 외 조치가 실린 신호다.
+    # AUTO_ISOLATION 문맥의 격리·보호 High 출발지 차단 허용 범위를 벗어난 명령.
     WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK = "WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK"
 
 

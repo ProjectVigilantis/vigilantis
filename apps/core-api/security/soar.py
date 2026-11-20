@@ -176,6 +176,76 @@ def trigger_isolation(
         )
 
 
+def _trigger_protected_source_block(
+    db: Session, incident_id: str, publish: Publish | None,
+) -> None:
+    """격리 생략 뒤의 별도 조치다. NACL 성공을 격리 확인·격리 시간으로 기록하지 않는다."""
+    existing = executions_repo.get_by_deduplication_key(
+        db, workflows.protected_source_block_key(incident_id),
+    )
+    if existing is not None:
+        existing_id = existing.execution_id
+        db.rollback()
+        dispatcher.dispatch_now(db, existing_id, publish)
+        return
+    incident = incidents_repo.get_incident(db, incident_id)
+    source = None if incident is None else workflows.protected_source_block(db, incident)
+    if source is None:
+        db.rollback()
+        return
+    owner = workflows.tenant_access_for(db, incident.tenant_id)
+    tenant = None if incident.tenant_id is None else db.get(models.Tenant, incident.tenant_id)
+    blocked = workflows.automatic_trigger_block(
+        tenant, trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+        received_at=incident.created_at, response_deadline_at=incident.response_deadline_at,
+    )
+    excluded = incidents_repo.list_open_nacl_rule_numbers(
+        db, target_arns=[source.target_arn],
+    ).get(source.target_arn, set())
+    db.rollback()
+    if blocked is not None:
+        return
+    execution_id = str(uuid.uuid4())
+    with tenant_scope(owner):
+        rule_number, reason = executor.resolve_nacl_add_deny_rule_number(
+            source.target_arn, excluded_rule_numbers=excluded,
+        )
+        if rule_number is None:
+            logger.warning("protected_source_block_unavailable", extra={
+                "incident_id": incident_id, "reason_code": reason.value,
+            })
+            return
+        guarded = guardrails.run_guardrail_validation(
+            GuardrailValidationRequest(
+                validation_context=GuardrailValidationContext.AUTO_ISOLATION,
+                execution_id=execution_id, command_payload=source.payload(rule_number),
+            ),
+            is_managed_arn=lambda arn: arn == source.target_arn,
+            precheck=lambda command: executor.precheck(
+                command.runbook_id, command.target_arn, command.parameters,
+            ),
+        )
+    reserved = workflows.reserve_protected_source_block(
+        db, incident_id, execution_id=execution_id, source=source, rule_number=rule_number,
+        validated_command=None if guarded.command is None else guarded.command.model_dump(mode="json"),
+        guardrail_result=guarded.result,
+    )
+    if reserved is not None:
+        dispatcher.dispatch_now(db, reserved, publish)
+        execution = executions_repo.get_execution(db, reserved)
+        incident = incidents_repo.get_incident(db, incident_id)
+        if execution.status is ExecutionStatus.SUCCESS:
+            logger.info("protected_source_block_latency", extra={
+                "incident_id": incident_id,
+                "execution_id": reserved,
+                "runbook_id": RunbookId.RUNBOOK_NACL_ADD_DENY.value,
+                "source_block_end_to_end_ms": (
+                    execution.finished_at - incident.created_at
+                ).total_seconds() * 1000,
+            })
+        db.rollback()
+
+
 def _trigger_isolation(
     db: Session,
     incident_id: str,
@@ -214,6 +284,8 @@ def _trigger_isolation(
         return "skipped"
     prepared = prepare_isolation(db, incident_id, trigger_source)
     if prepared is None:
+        if trigger_source is TriggerSource.PRE_MITIGATION_0_5S:
+            _trigger_protected_source_block(db, incident_id, publish)
         if trace is not None:
             trace.finish("failed")
         return "skipped"

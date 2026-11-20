@@ -40,13 +40,13 @@
 #       ②는 문맥별 허용 목록을 대조한다 — AI 후보는 추천 가능 7종, 원복은 롤백 3종.
 #       ③④는 문맥을 보지 않는다. 대조 대상이 target_arn과 AWS 판정뿐이라 문맥에
 #         따라 달라질 것이 없다.
-#     AUTO_ISOLATION(사람 승인 없이 서버가 시작한 격리)도 같은 네 단계를 지난다.
-#       ①은 실행 파라미터 계약(Ec2IsolateParameters) 하나만 쓴다 — 허용 목록이
-#         RUNBOOK_EC2_ISOLATE 하나뿐이라, 다른 ID의 파라미터를 여기서 대조하면 ②가
-#         막아야 할 거절이 ①에 남는다.
-#       ②는 RUNBOOK_EC2_ISOLATE만 통과시킨다. 확정 10종 중 다른 ID는
+#     AUTO_ISOLATION(서버 자동 대응)도 같은 네 단계를 지난다.
+#       ①은 격리·출발지 차단의 실행 파라미터 계약을 쓴다.
+#       ②는 RUNBOOK_EC2_ISOLATE와 보호 High 출발지 차단용 RUNBOOK_NACL_ADD_DENY만
+#         통과시킨다. 보호·위협·방향·근거 조건은 접수 Workflow가 잠근 뒤 재확인한다.
+#         확정 10종 중 다른 ID는
 #         WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK, 10종 밖은 WHITELIST_UNKNOWN_RUNBOOK이다.
-#       ②를 통과한 명령의 운반 타입은 AutoIsolationCommand다.
+#       ②를 통과한 명령은 AutoIsolationCommand 또는 AutoNaclDenyCommand다.
 #   - ②를 통과한 명령의 운반 타입은 문맥이 정한다 — AI 후보는 RunbookCandidateDraft,
 #     원복은 RollbackExecutionCommand다. 롤백 3종은 Draft가 될 수 없다(그 모델이 AI
 #     추천 7종만 받는다, ADR-0004 정책 ②).
@@ -57,6 +57,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from ipaddress import IPv4Network
 from typing import Annotated, Final, Protocol, Union
 
 from pydantic import (
@@ -90,6 +91,7 @@ from schemas.runbook_parameters import (
     CANDIDATE_PARAMETER_MODELS,
     PRECHECK_PARAMETER_MODELS,
     Ec2IsolateParameters,
+    NaclAddDenyParameters,
     RunbookParameters,
     bind_precheck_parameters,
 )
@@ -254,10 +256,33 @@ class AutoIsolationCommand(BaseModel):
         return self
 
 
-# ②가 승격한 명령의 운반 타입 — 문맥이 어느 쪽인지 정한다. ③④는 셋을 구분하지 않고
+class AutoNaclDenyCommand(BaseModel):
+    """#598 보호 High의 서버 명령. 주소 하나의 인바운드 TCP 차단만 허용한다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runbook_id: RunbookId
+    target_arn: str = Field(min_length=1)
+    parameters: NaclAddDenyParameters
+    evidence_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1, max_length=1)
+
+    @model_validator(mode="after")
+    def _enforce_contract(self):
+        if self.runbook_id is not RunbookId.RUNBOOK_NACL_ADD_DENY:
+            raise ValueError("자동 출발지 차단은 RUNBOOK_NACL_ADD_DENY만 허용합니다")
+        if IPv4Network(self.parameters.cidr_block).prefixlen != 32:
+            raise ValueError("자동 출발지 차단은 IPv4 /32만 허용합니다")
+        if self.parameters.protocol != "tcp":
+            raise ValueError("자동 출발지 차단은 TCP만 허용합니다")
+        if self.parameters.evidence_id != self.evidence_ids[0]:
+            raise ValueError("자동 출발지 차단의 근거가 일치하지 않습니다")
+        return self
+
+
+# ②가 승격한 명령의 운반 타입 — 문맥이 어느 쪽인지 정한다. ③④는 타입을 구분하지 않고
 # runbook_id·target_arn·parameters만 읽는다.
 GuardedCommand = Union[
-    RunbookCandidateDraft, RollbackExecutionCommand, AutoIsolationCommand
+    RunbookCandidateDraft, RollbackExecutionCommand, AutoIsolationCommand, AutoNaclDenyCommand
 ]
 
 
@@ -359,7 +384,8 @@ _PARAMETER_MODELS_BY_CONTEXT: Final = {
     GuardrailValidationContext.AI_CANDIDATE: CANDIDATE_PARAMETER_MODELS,
     GuardrailValidationContext.ROLLBACK_EXECUTION: PRECHECK_PARAMETER_MODELS,
     GuardrailValidationContext.AUTO_ISOLATION: {
-        RunbookId.RUNBOOK_EC2_ISOLATE: Ec2IsolateParameters
+        RunbookId.RUNBOOK_EC2_ISOLATE: Ec2IsolateParameters,
+        RunbookId.RUNBOOK_NACL_ADD_DENY: NaclAddDenyParameters,
     },
 }
 
@@ -441,8 +467,8 @@ def run_action_whitelist(
 ) -> ActionWhitelistOutcome:
     """② Action Whitelist — 확정 10종을 대조하고, **문맥이 허용하는 목록**만 통과시킨다.
 
-    AUTO_ISOLATION은 RUNBOOK_EC2_ISOLATE 하나만 통과시키고 AutoIsolationCommand로
-    승격한다. 확정 10종 중 그 밖의 ID는 WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK이고,
+    AUTO_ISOLATION은 격리와 보호 High 출발지 차단을 각각 전용 명령으로 승격한다.
+    확정 10종 중 그 밖의 ID는 WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK이고,
     10종 밖은 다른 문맥과 같이 WHITELIST_UNKNOWN_RUNBOOK이다.
 
     확정 10종 밖이면 어느 문맥에서도 WHITELIST_UNKNOWN_RUNBOOK이다. 목록 안이어도
@@ -453,8 +479,8 @@ def run_action_whitelist(
 
     승격 타입도 문맥이 정한다 — AI 후보는 RunbookCandidateDraft, 원복은
     RollbackExecutionCommand다. 두 판정을 이미 거쳤으므로 두 모델의 자체 검증이
-    여기서 실패할 수는 없다. parameters도 같다 — 승격되는 ID는 ①이 그 문맥의 typed
-    계약으로 이미 대조한 ID다.
+    parameters는 ①이 그 문맥의 typed 계약으로 이미 대조한 값이다. 자동 출발지
+    차단은 여기서 /32·TCP·단일 근거라는 무승인 실행 범위도 대조한다.
 
     기본값을 AI_CANDIDATE로 둔 것은 이 단계만 따로 부르는 호출부·테스트가 문맥을
     적지 않아도 종전과 같게 동작하게 하기 위해서다. run_guardrail_validation은
@@ -464,18 +490,28 @@ def run_action_whitelist(
         return _whitelist_fail(command.runbook_id, WHITELIST_UNKNOWN_RUNBOOK)
 
     if context is GuardrailValidationContext.AUTO_ISOLATION:
-        if command.runbook_id != RunbookId.RUNBOOK_EC2_ISOLATE.value:
+        command_model = {
+            RunbookId.RUNBOOK_EC2_ISOLATE.value: AutoIsolationCommand,
+            RunbookId.RUNBOOK_NACL_ADD_DENY.value: AutoNaclDenyCommand,
+        }.get(command.runbook_id)
+        if command_model is None:
+            return _whitelist_fail(
+                command.runbook_id, WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK
+            )
+        try:
+            promoted = command_model(
+                runbook_id=RunbookId(command.runbook_id),
+                target_arn=command.target_arn,
+                parameters=command.parameters,
+                evidence_ids=command.evidence_ids,
+            )
+        except ValidationError:
             return _whitelist_fail(
                 command.runbook_id, WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK
             )
         return ActionWhitelistOutcome(
             step_result=_step_pass(GuardrailStep.ACTION_WHITELIST),
-            command=AutoIsolationCommand(
-                runbook_id=RunbookId(command.runbook_id),
-                target_arn=command.target_arn,
-                parameters=command.parameters,
-                evidence_ids=command.evidence_ids,
-            ),
+            command=promoted,
         )
 
     if context is GuardrailValidationContext.ROLLBACK_EXECUTION:
