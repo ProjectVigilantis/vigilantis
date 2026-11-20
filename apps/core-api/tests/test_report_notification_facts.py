@@ -7,6 +7,7 @@ from ai.model_client import FakeAIModelClient
 from ai.report_draft import get_report_model_client
 from db import models
 from db.repositories import platform_events
+from notifications.dispatcher import _event_outcome
 from schemas.api.incidents import RiskLevel
 from schemas.api.report_draft import ReportNarrative, ReportSentence
 from schemas.platform_events import PlatformEventAction, PlatformEventOutcome
@@ -87,16 +88,26 @@ def test_notification_facts_keep_aggregate_result_provenance_and_scope(
     assert "수신자의 열람" in response.json()["notice"]
 
 
-def test_unknown_delivery_result_does_not_claim_non_delivery(
+def test_partial_failure_does_not_claim_all_channels_unconfirmed_or_non_delivery(
     db, client_pg, make_incident, make_tenant,
 ):
     incident = make_incident(db)
     incident.tenant_id = make_tenant()
     db.flush()
+    notification = _notification(db, incident)
+    outcome, details = _event_outcome([
+        models.NotificationDelivery(
+            event_id=notification.event_id, channel="SLACK", state="SUCCEEDED",
+        ),
+        models.NotificationDelivery(
+            event_id=notification.event_id, channel="SNS", state="FAILED",
+            final_reason="EXHAUSTED", last_category="UNKNOWN",
+        ),
+    ])
+    assert outcome is PlatformEventOutcome.FAILED
     row = _record(
-        db, _notification(db, incident), incident.tenant_id,
-        outcome=PlatformEventOutcome.FAILED,
-        reason_code="SNS:EXHAUSTED:UNKNOWN",
+        db, notification, incident.tenant_id,
+        outcome=outcome, reason_code=details["reason_code"],
     )
     record_id, incident_id = row.event_id, incident.incident_id
     db.commit()
@@ -111,16 +122,16 @@ def test_unknown_delivery_result_does_not_claim_non_delivery(
         assert indexed["/outcome"]["value"] == "FAILED"
         assert indexed["/details/reason_code"]["value"] == "SNS:EXHAUSTED:UNKNOWN"
         meaning = indexed["/outcome"]["interpretation"]
-        assert "공급자 접수 미확인" in meaning
-        assert "미전달을 뜻하지 않음" in meaning
+        assert "채널 중 하나 이상에서 공급자 접수를 확인하지 못한 기록" in meaning
+        assert "모든 채널의 접수 미확인이나 실제 미전달을 뜻하지 않음" in meaning
 
     saved = client_pg.get(
         f"/api/v1/incidents/{incident_id}/report-draft", params={"format": "md"},
     )
     assert saved.status_code == 200
     assert "SNS:EXHAUSTED:UNKNOWN" in saved.text
-    assert "공급자 접수 미확인" in saved.text
-    assert "미전달을 뜻하지 않음" in saved.text
+    assert "채널 중 하나 이상에서 공급자 접수를 확인하지 못한 기록" in saved.text
+    assert "모든 채널의 접수 미확인이나 실제 미전달을 뜻하지 않음" in saved.text
 
 
 @pytest.mark.parametrize("quarantined", [False, True])

@@ -319,7 +319,10 @@ def collect_facts(
             meaning=(
                 "발송 대상 채널 전체의 공급자 접수 기록"
                 if row.outcome is PlatformEventOutcome.SUCCEEDED
-                else "발송 대상 채널 전체의 공급자 접수 미확인 기록이며 미전달을 뜻하지 않음"
+                else (
+                    "발송 대상 채널 중 하나 이상에서 공급자 접수를 확인하지 못한 기록이며, "
+                    "모든 채널의 접수 미확인이나 실제 미전달을 뜻하지 않음"
+                )
             ),
         )
         if row.outcome is PlatformEventOutcome.FAILED:
