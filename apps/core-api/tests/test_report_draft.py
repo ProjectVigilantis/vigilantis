@@ -236,12 +236,16 @@ def test_invalid_generated_output_is_not_a_partial_success(db, client_pg, draft_
     assert_report_event(db, incident_id, GENERATE, "FAILED", "REPORT_DRAFT_GENERATION_FAILED")
 
 
-@pytest.mark.parametrize("error,status,reason", [
-    (AIModelTimeoutError("SDK Bearer secret-value"), 503, "REPORT_DRAFT_MODEL_UNAVAILABLE"),
-    (AIModelContractError("SDK password=secret-value"), 502, "REPORT_DRAFT_GENERATION_FAILED"),
-    (RuntimeError("SDK password=secret-value"), 500, "INTERNAL_ERROR"),
+@pytest.mark.parametrize("error,status,reason,error_type", [
+    (AIModelTimeoutError("SDK Bearer secret-value"), 503, "REPORT_DRAFT_MODEL_UNAVAILABLE", None),
+    (AIModelContractError("SDK password=secret-value"), 502, "REPORT_DRAFT_GENERATION_FAILED", None),
+    (RuntimeError("SDK password=secret-value"), 500, "INTERNAL_ERROR", "RuntimeError"),
 ])
-def test_model_failures_have_fixed_safe_errors(db, client_pg, draft_case, caplog, error, status, reason):
+def test_model_failures_have_fixed_safe_errors(
+    db, client_pg, draft_case, caplog, error, status, reason, error_type,
+):
+    from logging_config import JsonLineFormatter
+
     incident_id, _, fake = draft_case
     fake.error = error
     response = request_draft(client_pg, incident_id)
@@ -249,6 +253,20 @@ def test_model_failures_have_fixed_safe_errors(db, client_pg, draft_case, caplog
     assert response.json()["error"]["code"] == reason
     assert "secret-value" not in response.text + caplog.text
     assert_report_event(db, incident_id, GENERATE, "FAILED", reason)
+    records = [record for record in caplog.records if record.getMessage() == "report_draft_failed"]
+    if error_type is None:
+        assert records == []
+    else:
+        [record] = records
+        assert record.name == "vigilantis.report_draft"
+        assert record.levelname == "ERROR"
+        assert record.exc_info is None and record.exc_text is None
+        rendered = JsonLineFormatter().format(record)
+        payload = json.loads(rendered)
+        assert payload["event_action"] == GENERATE
+        assert payload["error_type"] == error_type
+        assert "secret-value" not in rendered
+        assert "exc_info" not in payload
 
 
 def test_mask_expansion_rejection_never_logs_model_text(client_pg, draft_case, caplog):

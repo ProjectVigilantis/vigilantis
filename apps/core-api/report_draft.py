@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import Callable, Iterator
@@ -51,6 +52,8 @@ from schemas.platform_events import (
 )
 from schemas.runbooks import TriggerSource
 from sqlalchemy.orm import Session
+
+_logger = logging.getLogger("vigilantis.report_draft")
 
 REPORT_FILE_MAX_BYTES = 2 * 1024 * 1024
 NOTICE = (
@@ -411,6 +414,11 @@ def _report_activity(
     except Exception as exc:  # noqa: BLE001 — SQL·모델 예외 원문을 공통 예외 로그에 넘기지 않는다
         db.rollback()
         code = exc.code if isinstance(exc, ApiError) else ErrorCode.INTERNAL_ERROR
+        if not isinstance(exc, ApiError):
+            _logger.error(
+                "report_draft_failed",
+                extra={"event_action": action.value, "error_type": type(exc).__name__},
+            )
         denied = code in {
             ErrorCode.INCIDENT_NOT_FOUND,
             ErrorCode.REPORT_DRAFT_NOT_FOUND,
