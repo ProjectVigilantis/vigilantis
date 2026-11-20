@@ -29,7 +29,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -65,7 +65,7 @@ from auth.service import CurrentUser
 from db import mappers, models
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
-from db.session import get_db
+from db.session import get_db, get_session_factory
 from exceptions import ApiError, OutOfScopeError
 from evidence_export import ExportFormat, export_incident_evidence
 from ai.model_client import AIModelClient
@@ -328,9 +328,10 @@ def download_report_draft(
     user: CurrentUser = Depends(require_export_evidence),  # noqa: B008 — FastAPI의 요청별 권한 의존성 선언.
     scope: TenantScope = Depends(require_tenant_scope),  # noqa: B008 — FastAPI의 요청별 고객사 범위 의존성 선언.
     db: Session = Depends(get_db),  # noqa: B008 — FastAPI의 요청별 DB 세션 의존성 선언.
+    session_factory: Callable[[], Session] = Depends(get_session_factory),  # noqa: B008
 ) -> Response:
     row = _load_incident(db, incident_id, scope)
-    file = load_saved_report_draft(db, row, format)
+    file = load_saved_report_draft(db, row, format, user, session_factory)
     return Response(
         content=file.body, media_type=file.media_type,
         headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},
@@ -345,9 +346,10 @@ def report_draft(
     scope: TenantScope = Depends(require_tenant_scope),
     db: Session = Depends(get_db),
     client: AIModelClient | None = Depends(get_report_model_client),
+    session_factory: Callable[[], Session] = Depends(get_session_factory),  # noqa: B008
 ) -> Response:
     row = _load_incident(db, incident_id, scope)
-    file = generate_report_draft(db, row, format, client)
+    file = generate_report_draft(db, row, format, client, user, session_factory)
     return Response(
         content=file.body, media_type=file.media_type,
         headers={"Content-Disposition": f'attachment; filename="{file.filename}"'},

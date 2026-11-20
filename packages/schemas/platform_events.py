@@ -133,6 +133,10 @@ class PlatformEventAction(str, Enum):
     INCIDENT_ANALYZE = "INCIDENT_ANALYZE"
     INCIDENT_RESOLVE = "INCIDENT_RESOLVE"
     INCIDENT_EVIDENCE_EXPORT = "INCIDENT_EVIDENCE_EXPORT"
+    # 생성 성공은 최신 초안 저장 commit, 다운로드 성공은 감사 기록을 확정한 파일 응답 준비다.
+    # 둘 다 클라이언트 수신이나 기관 제출을 뜻하지 않는다.
+    INCIDENT_REPORT_DRAFT_GENERATE = "INCIDENT_REPORT_DRAFT_GENERATE"
+    INCIDENT_REPORT_DRAFT_DOWNLOAD = "INCIDENT_REPORT_DRAFT_DOWNLOAD"
     INCIDENT_ESCALATE = "INCIDENT_ESCALATE"
     ACTION_APPROVE = "ACTION_APPROVE"
     ACTION_AUTO_TRIGGER = "ACTION_AUTO_TRIGGER"
@@ -388,6 +392,8 @@ ACTION_SPECS: Mapping[PlatformEventAction, ActionSpec] = {
     _A.INCIDENT_EVIDENCE_EXPORT: _spec(
         _C.INCIDENT, {_S}, {_USER}, _T.INCIDENT, EvidenceExportDetails
     ),
+    _A.INCIDENT_REPORT_DRAFT_GENERATE: _spec(_C.INCIDENT, {_S, _D, _F}, {_USER}, _T.INCIDENT),
+    _A.INCIDENT_REPORT_DRAFT_DOWNLOAD: _spec(_C.INCIDENT, {_S, _D, _F}, {_USER}, _T.INCIDENT),
     _A.INCIDENT_ESCALATE: _spec(
         _C.INCIDENT, {_S}, {_SYSTEM}, _T.INCIDENT, EscalationDetails
     ),

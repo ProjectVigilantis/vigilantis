@@ -27,6 +27,8 @@ from sqlalchemy import func, select
 
 AT = datetime(2026, 9, 2, 9, tzinfo=UTC)
 ARN = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0123456789abcdef0"
+GENERATE = "INCIDENT_REPORT_DRAFT_GENERATE"
+DOWNLOAD = "INCIDENT_REPORT_DRAFT_DOWNLOAD"
 
 
 class RecordingClient:
@@ -54,6 +56,22 @@ class RecordingClient:
 
 def request_draft(client, incident_id, fmt="json", *, method="POST"):
     return client.request(method, f"/api/v1/incidents/{incident_id}/report-draft", params={"format": fmt})
+
+
+def report_events(db, incident_id=None):
+    query = select(models.PlatformEvent).where(models.PlatformEvent.action.in_([GENERATE, DOWNLOAD]))
+    if incident_id is not None:
+        query = query.where(models.PlatformEvent.target_id == incident_id)
+    return db.scalars(query).all()
+
+
+def assert_report_event(db, incident_id, action, outcome, reason=None):
+    [row] = [
+        row for row in report_events(db, incident_id)
+        if row.action == action and row.outcome.value == outcome
+    ]
+    assert row.details == ({"reason_code": reason} if reason else {})
+    return row
 
 
 @pytest.fixture()
@@ -110,9 +128,9 @@ def unit_rows(*, synthetic=False):
 
 @pytest.mark.parametrize("fmt", ["json", "md"])
 def test_download_has_three_sections_provenance_and_blank_human_fields(
-    db, client_pg, draft_case, fmt,
+    db, client_pg, draft_case, platform_session, fmt,
 ):
-    incident_id, _, fake = draft_case
+    incident_id, tenant_id, fake = draft_case
     start = time.perf_counter()
     response = request_draft(client_pg, incident_id, fmt)
     print(f"fake-only {fmt} request: {time.perf_counter() - start:.6f}s (not provider latency)")
@@ -123,6 +141,15 @@ def test_download_has_three_sections_provenance_and_blank_human_fields(
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert len(fake.sent) == 1
+    row = assert_report_event(db, incident_id, GENERATE, "SUCCEEDED")
+    assert (row.category.value, row.target_type.value, row.tenant_id) == (
+        "INCIDENT", "INCIDENT", tenant_id,
+    )
+    assert (row.actor_kind.value, row.actor_user_id, row.actor_account_type.value) == (
+        "USER", platform_session.user_id, "PLATFORM",
+    )
+    assert row.actor_platform_role.value == "CENTRAL_ADMIN"
+    assert row.session_id is not None
     if fmt == "json":
         document = ReportDraftDocument.model_validate(response.json())
         assert document.as_of <= document.generated_at
@@ -146,7 +173,7 @@ def test_download_has_three_sections_provenance_and_blank_human_fields(
 @pytest.mark.parametrize("role,permissions", [(UserRole.VIEWER, None), (UserRole.OPERATOR, ())])
 @pytest.mark.parametrize("method", ["POST", "GET"])
 def test_permission_rejection_precedes_model_and_target(
-    client_pg, login_as, draft_case, role, permissions, method,
+    db, client_pg, login_as, draft_case, role, permissions, method,
 ):
     _, tenant, fake = draft_case
     kwargs = {"tenant_id": tenant}
@@ -157,12 +184,13 @@ def test_permission_rejection_precedes_model_and_target(
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "AUTH_FORBIDDEN"
     assert not fake.sent
+    assert report_events(db) == []
 
 
 @pytest.mark.parametrize("target", ["outside", "absent", "malformed"])
 @pytest.mark.parametrize("method", ["POST", "GET"])
 def test_unreadable_target_is_404_without_call(
-    client_pg, login_as, make_tenant, draft_case, target, method,
+    db, client_pg, login_as, make_tenant, draft_case, target, method,
 ):
     incident_id, _, fake = draft_case
     login_as(UserRole.OPERATOR, tenant_id=make_tenant())
@@ -171,14 +199,17 @@ def test_unreadable_target_is_404_without_call(
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "INCIDENT_NOT_FOUND"
     assert not fake.sent
+    assert report_events(db) == []
 
 
-def test_default_client_is_unavailable_but_missing_target_still_404(client_pg, draft_case):
+def test_default_client_is_unavailable_but_missing_target_still_404(db, client_pg, draft_case):
     incident_id, _, fake = draft_case
     client_pg.app.dependency_overrides.pop(get_report_model_client)
     assert request_draft(client_pg, incident_id).status_code == 503
     assert request_draft(client_pg, str(uuid.uuid4())).status_code == 404
     assert not fake.sent
+    assert_report_event(db, incident_id, GENERATE, "FAILED", "REPORT_DRAFT_MODEL_UNAVAILABLE")
+    assert len(report_events(db)) == 1
 
 
 @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.ADMIN])
@@ -190,7 +221,7 @@ def test_tenant_can_generate_with_execute_permission(client_pg, login_as, draft_
 
 
 @pytest.mark.parametrize("bad", ["citation", "email", "control"])
-def test_invalid_generated_output_is_not_a_partial_success(client_pg, draft_case, bad):
+def test_invalid_generated_output_is_not_a_partial_success(db, client_pg, draft_case, bad):
     incident_id, _, fake = draft_case
     if bad == "citation":
         fake.citation = f"{uuid.uuid4()}:F1"
@@ -202,18 +233,40 @@ def test_invalid_generated_output_is_not_a_partial_success(client_pg, draft_case
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "REPORT_DRAFT_GENERATION_FAILED"
     assert "platform@example.com" not in response.text
+    assert_report_event(db, incident_id, GENERATE, "FAILED", "REPORT_DRAFT_GENERATION_FAILED")
 
 
-@pytest.mark.parametrize("error,status", [
-    (AIModelTimeoutError("SDK Bearer secret-value"), 503),
-    (AIModelContractError("SDK password=secret-value"), 502),
+@pytest.mark.parametrize("error,status,reason,error_type", [
+    (AIModelTimeoutError("SDK Bearer secret-value"), 503, "REPORT_DRAFT_MODEL_UNAVAILABLE", None),
+    (AIModelContractError("SDK password=secret-value"), 502, "REPORT_DRAFT_GENERATION_FAILED", None),
+    (RuntimeError("SDK password=secret-value"), 500, "INTERNAL_ERROR", "RuntimeError"),
 ])
-def test_model_failures_have_fixed_safe_errors(client_pg, draft_case, caplog, error, status):
+def test_model_failures_have_fixed_safe_errors(
+    db, client_pg, draft_case, caplog, error, status, reason, error_type,
+):
+    from logging_config import JsonLineFormatter
+
     incident_id, _, fake = draft_case
     fake.error = error
     response = request_draft(client_pg, incident_id)
     assert response.status_code == status
+    assert response.json()["error"]["code"] == reason
     assert "secret-value" not in response.text + caplog.text
+    assert_report_event(db, incident_id, GENERATE, "FAILED", reason)
+    records = [record for record in caplog.records if record.getMessage() == "report_draft_failed"]
+    if error_type is None:
+        assert records == []
+    else:
+        [record] = records
+        assert record.name == "vigilantis.report_draft"
+        assert record.levelname == "ERROR"
+        assert record.exc_info is None and record.exc_text is None
+        rendered = JsonLineFormatter().format(record)
+        payload = json.loads(rendered)
+        assert payload["event_action"] == GENERATE
+        assert payload["error_type"] == error_type
+        assert "secret-value" not in rendered
+        assert "exc_info" not in payload
 
 
 def test_mask_expansion_rejection_never_logs_model_text(client_pg, draft_case, caplog):
@@ -246,7 +299,7 @@ def test_repeat_requests_regenerate_without_changing_domain_records(
     incident_id, _, fake = draft_case
     execution = make_execution(db, incident_id)
     db.commit()
-    tables = (models.Incident, models.Evidence, models.ActionExecution, models.AuditEvent, models.PlatformEvent)
+    tables = (models.Incident, models.Evidence, models.ActionExecution, models.AuditEvent)
     before = [db.scalar(select(func.count()).select_from(table)) for table in tables]
     first = request_draft(client_pg, incident_id)
     Clock.value = Clock.value.replace(microsecond=200)
@@ -257,6 +310,14 @@ def test_repeat_requests_regenerate_without_changing_domain_records(
     assert db.scalar(select(func.count()).select_from(models.IncidentReportDraft)) == 1
     assert request_draft(client_pg, incident_id, method="GET").content == second.content
     assert [db.scalar(select(func.count()).select_from(table)) for table in tables] == before
+    events = db.scalars(select(models.PlatformEvent).where(
+        models.PlatformEvent.target_id == incident_id,
+    )).all()
+    assert sorted((row.action, row.outcome.value, row.details) for row in events) == [
+        ("INCIDENT_REPORT_DRAFT_DOWNLOAD", "SUCCEEDED", {}),
+        ("INCIDENT_REPORT_DRAFT_GENERATE", "SUCCEEDED", {}),
+        ("INCIDENT_REPORT_DRAFT_GENERATE", "SUCCEEDED", {}),
+    ]
     db.refresh(execution)
     assert execution.status is ExecutionStatus.IN_PROGRESS
     assert db.get(models.Incident, incident_id).status is IncidentStatus.AWAITING_APPROVAL
@@ -499,7 +560,7 @@ def test_cutoff_excludes_later_evidence_and_marks_later_mutable_state_unknown():
     assert resolution["interpretation"] == "추가 조치 없이 관제 종료한 판단 기록"
 
 
-def test_input_limit_fails_before_call(client_pg, draft_case, monkeypatch):
+def test_input_limit_fails_before_call(db, client_pg, draft_case, monkeypatch):
     import ai.report_draft
     monkeypatch.setattr(ai.report_draft, "REPORT_INPUT_MAX_BYTES", 1)
     incident_id, _, fake = draft_case
@@ -507,6 +568,7 @@ def test_input_limit_fails_before_call(client_pg, draft_case, monkeypatch):
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "REPORT_DRAFT_TOO_LARGE"
     assert not fake.sent
+    assert_report_event(db, incident_id, GENERATE, "FAILED", "REPORT_DRAFT_TOO_LARGE")
 
 
 @pytest.mark.parametrize("bad_arn", [
@@ -751,6 +813,7 @@ def test_saved_download_without_artifact_or_at_seven_day_expiry_is_404(
     missing = request_draft(client_pg, incident_id, method="GET")
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "REPORT_DRAFT_NOT_FOUND"
+    assert_report_event(db, incident_id, DOWNLOAD, "DENIED", "REPORT_DRAFT_NOT_FOUND")
     assert request_draft(client_pg, incident_id).status_code == 200
     expiry = db.get(models.IncidentReportDraft, incident_id).expires_at
 
@@ -763,6 +826,12 @@ def test_saved_download_without_artifact_or_at_seven_day_expiry_is_404(
     expired = request_draft(client_pg, incident_id, method="GET")
     assert expired.status_code == 404
     assert expired.json()["error"]["code"] == "REPORT_DRAFT_NOT_FOUND"
+    denials = [row for row in report_events(db, incident_id) if row.action == DOWNLOAD]
+    assert len(denials) == 2
+    assert all(
+        row.outcome.value == "DENIED" and row.details == {"reason_code": "REPORT_DRAFT_NOT_FOUND"}
+        for row in denials
+    )
 
 
 def test_newer_saved_generation_rejects_a_slower_older_request(
@@ -787,11 +856,12 @@ def test_newer_saved_generation_rejects_a_slower_older_request(
     response = request_draft(client_pg, incident_id)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "REPORT_DRAFT_SUPERSEDED"
+    assert_report_event(db, incident_id, GENERATE, "DENIED", "REPORT_DRAFT_SUPERSEDED")
     assert request_draft(client_pg, incident_id, method="GET").content == b'{"newer": true}'
 
 
 def test_storage_failure_preserves_previous_output_without_logging_artifact(
-    client_pg, draft_case, monkeypatch, caplog,
+    db, client_pg, draft_case, monkeypatch, caplog,
 ):
     from db.repositories import report_drafts
     from sqlalchemy.exc import StatementError
@@ -808,4 +878,174 @@ def test_storage_failure_preserves_previous_output_without_logging_artifact(
     failed = request_draft(client_pg, incident_id)
     assert failed.status_code == 500
     assert marker not in failed.text + caplog.text
+    assert_report_event(db, incident_id, GENERATE, "FAILED", "INTERNAL_ERROR")
     assert request_draft(client_pg, incident_id, method="GET").content == first.content
+
+
+def test_output_limit_keeps_previous_draft_and_records_failure(db, client_pg, draft_case, monkeypatch):
+    import report_draft
+
+    incident_id, _, fake = draft_case
+    first = request_draft(client_pg, incident_id)
+    assert first.status_code == 200
+    monkeypatch.setattr(report_draft, "REPORT_FILE_MAX_BYTES", 1)
+    failed = request_draft(client_pg, incident_id)
+    assert failed.status_code == 413
+    assert len(fake.sent) == 2
+    assert_report_event(db, incident_id, GENERATE, "FAILED", "REPORT_DRAFT_TOO_LARGE")
+    assert request_draft(client_pg, incident_id, method="GET").content == first.content
+
+
+@pytest.mark.parametrize("method,previous", [("POST", False), ("POST", True), ("GET", True)])
+def test_audit_failure_rolls_back_generation_or_blocks_download(
+    db, client_pg, draft_case, monkeypatch, caplog, method, previous,
+):
+    from sqlalchemy import event
+    from sqlalchemy.exc import StatementError
+
+    incident_id, _, _ = draft_case
+    if previous:
+        assert request_draft(client_pg, incident_id).status_code == 200
+    saved = db.get(models.IncidentReportDraft, incident_id)
+    before = None if saved is None else (
+        saved.markdown, saved.json_body, saved.generated_at, saved.expires_at,
+    )
+    action = GENERATE if method == "POST" else DOWNLOAD
+    failed_inserts = []
+    marker = "PRIVATE_FINAL_REPORT password=secret-value"
+
+    def fail_insert(mapper, connection, row):
+        if row.action == action and row.outcome.value == "SUCCEEDED":
+            failed_inserts.append(row.event_id)
+            raise StatementError("write failed", "INSERT", {"body": marker}, RuntimeError(marker))
+
+    event.listen(models.PlatformEvent, "after_insert", fail_insert)
+    try:
+        response = request_draft(client_pg, incident_id, method=method)
+    finally:
+        event.remove(models.PlatformEvent, "after_insert", fail_insert)
+    assert len(failed_inserts) == 1
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "INTERNAL_ERROR"
+    assert "content-disposition" not in response.headers
+    assert marker not in response.text + caplog.text
+    assert_report_event(db, incident_id, action, "FAILED", "INTERNAL_ERROR")
+    successes = [row for row in report_events(db, incident_id) if row.outcome.value == "SUCCEEDED"]
+    assert len(successes) == int(previous)
+    saved = db.get(models.IncidentReportDraft, incident_id)
+    after = None if saved is None else (
+        saved.markdown, saved.json_body, saved.generated_at, saved.expires_at,
+    )
+    assert after == before
+
+
+@pytest.mark.parametrize("change", ["delete", "tenant"])
+def test_target_changed_during_generation_records_original_tenant(
+    db, client_pg, draft_case, make_tenant, monkeypatch, change,
+):
+    from sqlalchemy import delete
+
+    incident_id, original_tenant, fake = draft_case
+    other_tenant = make_tenant()
+    db.commit()
+    complete = fake.complete
+
+    def change_target(request, response_model):
+        result = complete(request, response_model)
+        if change == "delete":
+            db.execute(delete(models.Incident).where(models.Incident.incident_id == incident_id))
+        else:
+            db.get(models.Incident, incident_id).tenant_id = other_tenant
+        db.commit()
+        return result
+
+    monkeypatch.setattr(fake, "complete", change_target)
+    response = request_draft(client_pg, incident_id)
+    assert response.status_code == 404
+    row = assert_report_event(db, incident_id, GENERATE, "DENIED", "INCIDENT_NOT_FOUND")
+    assert row.tenant_id == original_tenant
+    assert db.get(models.IncidentReportDraft, incident_id) is None
+
+
+@pytest.mark.parametrize("method,status,reason", [
+    ("POST", 503, "REPORT_DRAFT_MODEL_UNAVAILABLE"),
+    ("GET", 404, "REPORT_DRAFT_NOT_FOUND"),
+])
+def test_detached_audit_failure_keeps_original_report_error(
+    db, client_pg, draft_case, caplog, method, status, reason,
+):
+    from db.session import get_session_factory
+
+    incident_id, _, fake = draft_case
+    fake.error = AIModelTimeoutError("password=private-model-error")
+
+    def unavailable():
+        raise RuntimeError("password=private-database-error")
+
+    client_pg.app.dependency_overrides[get_session_factory] = lambda: unavailable
+    response = request_draft(client_pg, incident_id, method=method)
+    assert (response.status_code, response.json()["error"]["code"]) == (status, reason)
+    assert report_events(db) == []
+    assert "platform_event_write_failed" in caplog.text
+    assert "private-model-error" not in response.text + caplog.text
+    assert "private-database-error" not in response.text + caplog.text
+
+
+def test_failed_generation_commits_audit_outside_request_transaction(
+    pg_engine, committed_auth, make_incident,
+):
+    from contextlib import contextmanager
+
+    from db.session import get_db, get_session_factory
+    from fastapi.testclient import TestClient
+    from sqlalchemy import delete, text
+    from tests.test_workflow_platform_events import _committed_app
+
+    sessions = committed_auth.sessions
+    seed = committed_auth.make()
+    tenant_id = committed_auth.make_tenant()
+    with sessions() as setup:
+        incident = make_incident(setup)
+        incident.tenant_id = tenant_id
+        setup.commit()
+        incident_id = incident.incident_id
+    requests, detached = [], []
+    app = _committed_app(sessions)
+
+    def request_session():
+        with sessions() as session:
+            requests.append(session)
+            session.execute(select(models.AppUser).where(
+                models.AppUser.user_id == seed.user_id,
+            ).with_for_update())
+            try:
+                yield session
+            finally:
+                session.rollback()
+
+    @contextmanager
+    def audit_session():
+        with sessions() as session:
+            detached.append(session)
+            assert not requests[-1].in_transaction()
+            session.execute(text("SET LOCAL lock_timeout = '2s'"))
+            yield session
+
+    app.dependency_overrides[get_db] = request_session
+    app.dependency_overrides[get_session_factory] = lambda: audit_session
+    app.dependency_overrides[get_report_model_client] = lambda: None
+    try:
+        with TestClient(app, headers=seed.headers) as client:
+            response = request_draft(client, incident_id)
+        assert response.status_code == 503
+        assert len(detached) == 1 and detached[0] is not requests[0]
+        with sessions() as check:
+            row = assert_report_event(
+                check, incident_id, GENERATE, "FAILED", "REPORT_DRAFT_MODEL_UNAVAILABLE",
+            )
+            assert row.actor_user_id == seed.user_id and row.tenant_id == tenant_id
+            assert check.get(models.IncidentReportDraft, incident_id) is None
+    finally:
+        with sessions() as cleanup:
+            cleanup.execute(delete(models.Incident).where(models.Incident.incident_id == incident_id))
+            cleanup.commit()

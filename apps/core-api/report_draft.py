@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timezone
 from enum import Enum
 from ipaddress import ip_address, ip_network
@@ -12,10 +15,12 @@ from uuid import UUID
 
 from ai.model_client import AIModelClient, mask_outbound
 from ai.report_draft import generate_narrative, narrative_request
+from auth.service import CurrentUser
 from db import models
 from db.repositories import audit as audit_repo
 from db.repositories import executions as executions_repo
 from db.repositories import incidents as incidents_repo
+from db.repositories import platform_events as platform_events_repo
 from db.repositories import report_drafts as drafts_repo
 from db.repositories import report_notifications
 from evidence_export import (
@@ -27,6 +32,7 @@ from evidence_export import (
     json_fence,
 )
 from exceptions import ApiError
+from platform_event_log import record_detached
 from pydantic import ValidationError
 from schemas.api.audit import AuditEventAction
 from schemas.api.errors import ErrorCode
@@ -39,10 +45,15 @@ from schemas.api.report_draft import (
     ReportHumanField,
 )
 from schemas.guardduty import GuardDutyFactStatus
-from schemas.platform_events import PlatformEventDetails, PlatformEventOutcome
+from schemas.platform_events import (
+    PlatformEventAction,
+    PlatformEventDetails,
+    PlatformEventOutcome,
+)
 from schemas.runbooks import TriggerSource
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+
+_logger = logging.getLogger("vigilantis.report_draft")
 
 REPORT_FILE_MAX_BYTES = 2 * 1024 * 1024
 NOTICE = (
@@ -387,67 +398,99 @@ def render_draft(document: ReportDraftDocument, fmt: ExportFormat) -> bytes:
     return body
 
 
+@contextmanager
+def _report_activity(
+    db: Session, incident: models.Incident, user: CurrentUser,
+    session_factory: Callable[[], Session], action: PlatformEventAction,
+) -> Iterator[tuple[str, str | None]]:
+    actor = platform_events_repo.person(user)
+    incident_id, tenant_id = incident.incident_id, incident.tenant_id
+    try:
+        yield incident_id, tenant_id
+        platform_events_repo.record_platform_event(
+            db, action, actor, tenant_id=tenant_id, target_id=incident_id,
+        )
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 — SQL·모델 예외 원문을 공통 예외 로그에 넘기지 않는다
+        db.rollback()
+        code = exc.code if isinstance(exc, ApiError) else ErrorCode.INTERNAL_ERROR
+        if not isinstance(exc, ApiError):
+            _logger.error(
+                "report_draft_failed",
+                extra={"event_action": action.value, "error_type": type(exc).__name__},
+            )
+        denied = code in {
+            ErrorCode.INCIDENT_NOT_FOUND,
+            ErrorCode.REPORT_DRAFT_NOT_FOUND,
+            ErrorCode.REPORT_DRAFT_SUPERSEDED,
+        }
+        record_detached(
+            session_factory, action, actor, tenant_id=tenant_id, target_id=incident_id,
+            outcome=PlatformEventOutcome.DENIED if denied else PlatformEventOutcome.FAILED,
+            details={"reason_code": code.value},
+        )
+        raise ApiError(code) from None
+
+
 def generate_report_draft(
     db: Session, incident: models.Incident, fmt: ExportFormat, client: AIModelClient | None,
+    user: CurrentUser, session_factory: Callable[[], Session],
 ) -> ExportFile:
-    if client is None:
-        raise ApiError(ErrorCode.REPORT_DRAFT_MODEL_UNAVAILABLE)
-    # STARTED와 실행 행은 함께 commit된다. 감사부터 읽어야 연결 실행이 조회에서 빠지지 않는다.
-    evidence = incidents_repo.list_evidence(db, incident.incident_id)
-    audits = audit_repo.list_by_incident(db, incident.incident_id)
-    executions = executions_repo.list_by_incident(db, incident.incident_id)
-    as_of = datetime.now(timezone.utc)
-    notifications = report_notifications.list_send_events(
-        db, incident_id=incident.incident_id, tenant_id=incident.tenant_id, as_of=as_of,
-    )
-    facts = collect_facts(incident, evidence, audits, executions, as_of, notifications=notifications)
-    incident_id = incident.incident_id
-    tenant_id = incident.tenant_id
-    request = narrative_request(facts)
-    # 모든 ORM 값을 복사한 뒤 종료한다. rollback 뒤 행에 접근하면 새 트랜잭션이 열린다.
-    db.rollback()
-    narrative = generate_narrative(client, request)
-    generated_at = datetime.now(timezone.utc)
-    document = ReportDraftDocument(
-        incident_id=incident_id, as_of=as_of, generated_at=generated_at,
-        notice=NOTICE, server_facts=facts, ai_narrative=narrative, human_input=human_fields(),
-    )
-    document = ReportDraftDocument.model_validate(mask_outbound(document.model_dump(mode="json")))
-    markdown, json_body = render_draft(document, ExportFormat.MD), render_draft(document, ExportFormat.JSON)
-    try:
+    with _report_activity(
+        db, incident, user, session_factory, PlatformEventAction.INCIDENT_REPORT_DRAFT_GENERATE,
+    ) as (incident_id, tenant_id):
+        if client is None:
+            raise ApiError(ErrorCode.REPORT_DRAFT_MODEL_UNAVAILABLE)
+        # STARTED와 실행 행은 함께 commit된다. 감사부터 읽어야 연결 실행이 조회에서 빠지지 않는다.
+        evidence = incidents_repo.list_evidence(db, incident_id)
+        audits = audit_repo.list_by_incident(db, incident_id)
+        executions = executions_repo.list_by_incident(db, incident_id)
+        as_of = datetime.now(timezone.utc)
+        notifications = report_notifications.list_send_events(
+            db, incident_id=incident_id, tenant_id=tenant_id, as_of=as_of,
+        )
+        facts = collect_facts(incident, evidence, audits, executions, as_of, notifications=notifications)
+        request = narrative_request(facts)
+        # 모든 ORM 값을 복사한 뒤 종료한다. rollback 뒤 행에 접근하면 새 트랜잭션이 열린다.
+        db.rollback()
+        narrative = generate_narrative(client, request)
+        generated_at = datetime.now(timezone.utc)
+        document = ReportDraftDocument(
+            incident_id=incident_id, as_of=as_of, generated_at=generated_at,
+            notice=NOTICE, server_facts=facts, ai_narrative=narrative, human_input=human_fields(),
+        )
+        document = ReportDraftDocument.model_validate(mask_outbound(document.model_dump(mode="json")))
+        markdown = render_draft(document, ExportFormat.MD)
+        json_body = render_draft(document, ExportFormat.JSON)
         current = db.get(models.Incident, incident_id)
         if current is None or current.tenant_id != tenant_id:
-            db.rollback()
             raise ApiError(ErrorCode.INCIDENT_NOT_FOUND)
         saved = drafts_repo.save_latest(
             db, incident_id=incident_id, tenant_id=tenant_id, as_of=as_of,
             generated_at=generated_at, markdown=markdown, json_body=json_body,
         )
         if not saved:
-            db.rollback()
             raise ApiError(ErrorCode.REPORT_DRAFT_SUPERSEDED)
-        db.commit()
-    except SQLAlchemyError:
-        db.rollback()
-        # SQL 예외의 파라미터에는 최종 산출물이 들어갈 수 있다. 공통 예외 로그에 넘기지 않는다.
-        raise ApiError(ErrorCode.INTERNAL_ERROR) from None
-    return ExportFile(
-        media_type=MEDIA_TYPES[fmt], filename=f"incident-{incident_id}-report-draft.{fmt.value}",
-        body=markdown if fmt is ExportFormat.MD else json_body,
-    )
+        return ExportFile(
+            media_type=MEDIA_TYPES[fmt], filename=f"incident-{incident_id}-report-draft.{fmt.value}",
+            body=markdown if fmt is ExportFormat.MD else json_body,
+        )
 
 
 def load_saved_report_draft(
     db: Session, incident: models.Incident, fmt: ExportFormat,
+    user: CurrentUser, session_factory: Callable[[], Session],
 ) -> ExportFile:
-    row = drafts_repo.get_latest(
-        db, incident_id=incident.incident_id, tenant_id=incident.tenant_id,
-        now=datetime.now(UTC),
-    )
-    if row is None:
-        raise ApiError(ErrorCode.REPORT_DRAFT_NOT_FOUND)
-    return ExportFile(
-        media_type=MEDIA_TYPES[fmt],
-        filename=f"incident-{incident.incident_id}-report-draft.{fmt.value}",
-        body=row.markdown if fmt is ExportFormat.MD else row.json_body,
-    )
+    with _report_activity(
+        db, incident, user, session_factory, PlatformEventAction.INCIDENT_REPORT_DRAFT_DOWNLOAD,
+    ) as (incident_id, tenant_id):
+        row = drafts_repo.get_latest(
+            db, incident_id=incident_id, tenant_id=tenant_id, now=datetime.now(UTC),
+        )
+        if row is None:
+            raise ApiError(ErrorCode.REPORT_DRAFT_NOT_FOUND)
+        return ExportFile(
+            media_type=MEDIA_TYPES[fmt],
+            filename=f"incident-{incident_id}-report-draft.{fmt.value}",
+            body=row.markdown if fmt is ExportFormat.MD else row.json_body,
+        )

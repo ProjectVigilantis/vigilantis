@@ -84,6 +84,28 @@ def test_every_action_has_one_spec_and_fits_the_column():
     assert all(spec.outcomes and spec.actors for spec in ACTION_SPECS.values())
 
 
+@pytest.mark.parametrize("action", [A.INCIDENT_REPORT_DRAFT_GENERATE, A.INCIDENT_REPORT_DRAFT_DOWNLOAD])
+@pytest.mark.parametrize("outcome", [OUT.SUCCEEDED, OUT.DENIED, OUT.FAILED])
+def test_report_activity_accepts_human_results_with_only_reason_details(action, outcome):
+    details = {} if outcome is OUT.SUCCEEDED else {"reason_code": "INTERNAL_ERROR"}
+    row = _record(
+        action=action, outcome=outcome, actor_kind=PlatformActorKind.USER,
+        actor_user_id=str(uuid.uuid4()), actor_account_type=AccountType.TENANT,
+        details=details,
+    )
+    assert row.category is PlatformEventCategory.INCIDENT
+    assert row.target_type is PlatformEventTargetType.INCIDENT
+    assert row.details == details
+    with pytest.raises(ValidationError):
+        _record(action=action, outcome=outcome, details=details)
+    with pytest.raises(ValidationError):
+        _record(
+            action=action, outcome=outcome, actor_kind=PlatformActorKind.USER,
+            actor_user_id=str(uuid.uuid4()), actor_account_type=AccountType.TENANT,
+            details={**details, "draft": "password=private-report"},
+        )
+
+
 @pytest.mark.parametrize(
     ("db_type", "contract"),
     [
