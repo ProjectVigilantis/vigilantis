@@ -49,10 +49,14 @@ jobs:
       - name: Install uv (Python 3.11)
         uses: astral-sh/setup-uv@v5
         with:
+          # core-api 이미지(apps/core-api/Dockerfile)의 uv와 같은 버전 — 올릴 때 함께 바꾼다(#673)
+          version: "0.13.9"
           python-version: "3.11"
 
+      # --locked: pyproject.toml과 uv.lock이 어긋나면 여기서 실패한다. 이미지 빌드도 같은 조건으로
+      # 실패하므로 배포 빌드 전에 PR에서 먼저 잡는다(#673).
       - name: Install dependencies
-        run: uv sync --all-packages
+        run: uv sync --locked --all-packages
 
       - name: Seed LocalStack
         run: uv run python scripts/seed_localstack.py
