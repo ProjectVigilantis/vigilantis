@@ -237,12 +237,32 @@ class AIModelRejectedError(AIModelError):
     """호출이 거절됨(인증·요청 오류·한도 소진·모델 refusal). 재시도하지 않는다."""
 
 
+class RequestSerializationFailure(str, Enum):
+    """REQUEST_SERIALIZATION의 두 원인 — 로그 구분용 고정 값이다(저장·공개 계약이 아니다)."""
+
+    MASKED_KEY_COLLISION = "masked_key_collision"
+    NOT_JSON_SERIALIZABLE = "not_json_serializable"
+
+
 class AIModelContractError(AIModelError):
     """계약 위반. 전송 예산으로는 재시도하지 않는다.
 
     양방향이다 — 요청 페이로드가 JSON으로 직렬화되지 않는 경우, 제공자가 스키마를
     거절한 경우, 응답이 요구한 구조화 출력으로 파싱되지 않거나 잘린 경우.
+
+    serialization_failure는 build_outbound_payload가 REQUEST_SERIALIZATION의 원인을 가를
+    때만 싣는다. 그 밖의 경로·구버전 호출부는 None이다.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        serialization_failure: Optional[RequestSerializationFailure] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.serialization_failure = serialization_failure
 
 
 class AIModelAdapterError(AIModelError):
@@ -453,6 +473,7 @@ def build_outbound_payload(request: AIModelRequest) -> dict[str, Any]:
         raise AIModelContractError(
             "user_payload의 키가 마스킹 뒤 서로 겹칩니다 — 값 하나를 덮어쓰지 않도록 보내지 않습니다",
             kind=FailureKind.REQUEST_SERIALIZATION,
+            serialization_failure=RequestSerializationFailure.MASKED_KEY_COLLISION,
         )
     # 직렬화 불가 값은 여기서 계약 위반으로 세운다. 이 검사가 없으면 호출부가 python
     # 모드 model_dump()를 넘겼을 때 TypeError가 경계 밖으로 그대로 나간다 —
@@ -471,6 +492,7 @@ def build_outbound_payload(request: AIModelRequest) -> dict[str, Any]:
             f"user_payload를 JSON으로 직렬화하지 못했습니다 ({serialize_error}) — "
             'model_dump(mode="json")으로 넘기세요',
             kind=FailureKind.REQUEST_SERIALIZATION,
+            serialization_failure=RequestSerializationFailure.NOT_JSON_SERIALIZABLE,
         )
     return {
         "system_prompt": _mask_text(request.system_prompt),
