@@ -72,10 +72,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, unique
+from ipaddress import IPv4Address
 
 import notification_events
 import platform_event_log
 from ai import guardrails
+from ai.capabilities import secops_action_targets
 from auth import access as auth_access
 from auth import permissions as auth_permissions
 from auth import service as auth_service
@@ -143,7 +145,7 @@ from schemas.guardrails import (
     GuardrailValidationResult,
 )
 from schemas.events import ThreatEventType
-from schemas.evidence import EvidenceType
+from schemas.evidence import EvidenceType, ThreatEvidence
 from schemas.incidents import (
     AGENT_TERMINAL_STATUSES,
     INCIDENT_RESOLVABLE_STATUSES,
@@ -815,10 +817,11 @@ def _invalidate_executable_candidates(db: Session, incident_id: str) -> None:
         )
 
 
-# --- 자동 격리 접수 (Issue #447) ------------------------------------------------
+# --- 자동 대응 접수 (Issue #447 · #598) -----------------------------------------
 #
 # 사람 승인 없이 서버가 시작하는 EC2_ISOLATE — High 즉시 선차단(PRE_MITIGATION_0_5S)과
 # Medium 1분 미응답 만료(TIMEOUT_ISOLATION_1M) — 의 **접수**다. AWS를 부르지 않는다.
+# 보호 High는 격리를 생략하고 주 THREAT가 TARGET인 출발지 /32 차단만 별도로 접수한다.
 #
 #   - 가드레일 4단계는 호출부가 미리 발급한 execution_id로 트랜잭션 밖에서 먼저 돌린다
 #     (④가 AWS 호출이다). 여기는 그 판정을 받아 같은 ID의 실행과 판정 기록을 함께
@@ -1188,6 +1191,156 @@ def _protected_isolation_recorded(db: Session, incident_id: str) -> bool:
         row.kind == notification_events.EventKind.PROTECTED_TARGET_ESCALATION.value
         for row in notification_events_repo.list_by_incident(db, incident_id)
     )
+
+
+@dataclass(frozen=True)
+class ProtectedSourceBlock:
+    target_arn: str
+    network_acl_id: str
+    cidr_block: str
+    evidence_id: str
+
+    def payload(self, rule_number: int) -> dict:
+        return {
+            "runbook_id": RunbookId.RUNBOOK_NACL_ADD_DENY.value,
+            "target_arn": self.target_arn,
+            "parameters": {
+                "network_acl_id": self.network_acl_id,
+                "rule_number": rule_number,
+                "cidr_block": self.cidr_block,
+                "protocol": "tcp",
+                "evidence_id": self.evidence_id,
+            },
+            "evidence_ids": [self.evidence_id],
+        }
+
+
+def protected_source_block_key(incident_id: str) -> str:
+    return f"protected-source-block:{incident_id}"
+
+
+def protected_source_block(
+    db: Session, incident: models.Incident,
+) -> ProtectedSourceBlock | None:
+    """#598: 주 THREAT의 SSH 입력만 TARGET으로 확정한다. DB 조회만 수행한다."""
+    if (
+        incident.category is not IncidentCategory.SECOPS
+        or incident.initial_risk_level is not RiskLevel.HIGH
+        or incident.response_mode is not ResponseMode.PRE_MITIGATION_0_5S
+        or incident.status is not IncidentStatus.ANALYZING
+        or auto_isolation_excluded(db, incident)
+        or incidents_repo.threat_event_type_of(
+            db, incident.threat_event_id,
+        ) is not ThreatEventType.SSH_BRUTE_FORCE
+        or not _protected_isolation_recorded(db, incident.incident_id)
+    ):
+        return None
+    threats = [
+        row for row in incidents_repo.list_evidence(db, incident.incident_id)
+        if row.evidence_type is EvidenceType.THREAT
+    ]
+    if len(threats) != 1:
+        return None
+    try:
+        evidence = mappers.to_evidence_item(threats[0])
+        content = evidence.content
+        if not isinstance(content, ThreatEvidence):
+            return None
+        event, context = content.event, content.context
+        if (
+            event.event_type is not ThreatEventType.SSH_BRUTE_FORCE
+            or event.threat_event_id != incident.threat_event_id
+            or event.target_arn != incident.subject_arn
+            or context is None
+            or context.target_status != "available"
+        ):
+            return None
+        source = IPv4Address(event.payload.source_ip)
+        targets = secops_action_targets(context.target.asset)[RunbookId.RUNBOOK_NACL_ADD_DENY.value]
+    except (ValidationError, ValueError):
+        return None
+    if len(targets) != 1:
+        return None
+    target = parse_arn(targets[0])
+    owner = tenant_access_for(db, incident.tenant_id)
+    if (
+        assets_repo.get_asset_by_arn(db, targets[0]) is None
+        or not in_owner_account(owner, targets[0])
+    ):
+        return None
+    return ProtectedSourceBlock(targets[0], target.resource_id, f"{source}/32", evidence.evidence_id)
+
+
+def reserve_protected_source_block(
+    db: Session, incident_id: str, *, execution_id: str,
+    source: ProtectedSourceBlock, rule_number: int,
+    validated_command: dict | None, guardrail_result: GuardrailValidationResult,
+) -> str | None:
+    """잠금 뒤 서버 공급값과 허용 범위를 다시 대조하고 자동 차단을 인시던트당 한 번 접수한다."""
+    if canonical_id(execution_id) != execution_id:
+        raise ValueError("execution_id는 정규형 UUID 문자열이어야 합니다")
+    command = None
+    if guardrail_result.result is GuardrailDecision.PASS:
+        command = guardrails.AutoNaclDenyCommand.model_validate(validated_command)
+        if command.model_dump(mode="json") != source.payload(rule_number):
+            raise ValueError("자동 차단 명령이 서버 공급값과 다릅니다")
+    elif validated_command is not None:
+        raise ValueError("가드레일 거절 판정에는 실행 명령을 싣지 않습니다")
+    incident = incidents_repo.lock_incident(db, incident_id)
+    if incident is None:
+        raise ValueError(f"Incident를 찾을 수 없습니다: {incident_id}")
+    key = protected_source_block_key(incident.incident_id)
+    existing = executions_repo.get_by_deduplication_key(db, key)
+    if existing is not None:
+        existing_id = existing.execution_id
+        db.rollback()
+        return existing_id
+    tenant = (
+        None if incident.tenant_id is None
+        else tenants_repo.read_tenant_for_share(db, incident.tenant_id)
+    )
+    if (
+        automatic_trigger_block(
+            tenant, trigger_source=TriggerSource.PRE_MITIGATION_0_5S,
+            received_at=incident.created_at, response_deadline_at=incident.response_deadline_at,
+        ) is not None
+        or protected_source_block(db, incident) != source
+        or rule_number in incidents_repo.list_open_nacl_rule_numbers(
+            db, target_arns=[source.target_arn],
+        ).get(source.target_arn, set())
+        or _active_on_target(db, source.target_arn)
+        # 진행 중 → SUCCESS 전이가 두 조회 사이에 끝나도 이 조회가 차단을 잡는다.
+        # 완료 이력을 먼저 읽으면 대상 잠금 전의 낡은 판정으로 중복 접수할 수 있다.
+        or executions_repo.has_unreleased_auto_source_block(
+            db, tenant_id=incident.tenant_id,
+            target_arn=source.target_arn, cidr_block=source.cidr_block,
+        )
+    ):
+        db.rollback()
+        return None
+    execution = executions_repo.create_execution(
+        db, execution_id=execution_id, incident_id=incident.incident_id,
+        runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY, target_arn=source.target_arn,
+        trigger_source=TriggerSource.PRE_MITIGATION_0_5S, deduplication_key=key,
+        validated_command=None if command is None else command.model_dump(mode="json"),
+    )
+    audit_repo.record_execution_started(db, execution, audit_repo.SYSTEM)
+    guardrails_repo.add_evaluation(
+        db, validation_context=GuardrailValidationContext.AUTO_ISOLATION,
+        result=guardrail_result, execution_id=execution_id,
+        validated_command=None if command is None else command.model_dump(mode="json"),
+    )
+    if command is None:
+        _settle_rejected_isolation(db, incident, execution_id, guardrail_result)
+        _record_guardrail_block(db, incident.incident_id, incident.tenant_id, guardrail_result)
+    else:
+        _move_incident_to_in_progress(db, incident.incident_id)
+        platform_events_repo.record_platform_event(
+            db, PlatformEventAction.ACTION_AUTO_TRIGGER, platform_events_repo.SYSTEM,
+            tenant_id=execution.tenant_id, target_id=execution_id,
+        )
+    db.commit()
+    return execution_id
 
 
 def _protected_isolation_offer(
@@ -6424,9 +6577,16 @@ def _release_candidate(
         if block.candidate_id is not None
         else None
     )
-    if source is None or not source.evidence_ids:
-        # 사람 승인 없이 시작한 차단(선차단 계열)은 후보가 없다 — 그 경로가 배선될 때
-        # 근거를 어디서 가져올지 함께 정한다. 지금 차단은 전부 USER_APPROVAL이다.
+    evidence_ids = source.evidence_ids if source is not None else []
+    if source is None and block.trigger_source is TriggerSource.PRE_MITIGATION_0_5S:
+        try:
+            command = guardrails.AutoNaclDenyCommand.model_validate(block.validated_command)
+        except ValidationError:
+            return None, "자동 차단의 저장된 실행 명령을 읽을 수 없습니다"
+        if command.target_arn != block.target_arn:
+            return None, "자동 차단 명령의 대상이 실행 대상과 다릅니다"
+        evidence_ids = command.evidence_ids
+    if not evidence_ids:
         return None, "차단 후보의 근거(evidence_ids)가 없습니다"
 
     try:
@@ -6437,7 +6597,7 @@ def _release_candidate(
                 runbook_id=RunbookId.RUNBOOK_NACL_RESTORE,
                 target_arn=record.target_arn,
                 parameters={"rule_number": backup.rule_number, "egress": backup.egress},
-                evidence_ids=list(source.evidence_ids),
+                evidence_ids=list(evidence_ids),
                 status=CandidateStatus.PENDING_VALIDATION,
             ),
             None,

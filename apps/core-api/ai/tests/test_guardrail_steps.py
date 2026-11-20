@@ -839,7 +839,7 @@ def test_rollback_command_rejects_a_non_rollback_runbook():
 
 
 # ------------------------------------------------------------------------------
-# AUTO_ISOLATION 문맥 (#447) — 허용 목록은 RUNBOOK_EC2_ISOLATE 하나
+# AUTO_ISOLATION 문맥 (#447 · #598) — 격리와 보호 High 출발지 차단
 # ------------------------------------------------------------------------------
 
 ISOLATE_PARAMS = {
@@ -892,6 +892,35 @@ def test_auto_isolation_passes_all_four_steps_and_keeps_execution_parameters():
     assert precheck.asked == [outcome.command]
 
 
+@pytest.mark.parametrize("overrides,allowed", [
+    ({}, True),
+    ({"cidr_block": "203.0.113.0/24"}, False),
+    ({"protocol": "-1"}, False),
+    ({"protocol": "udp"}, False),
+    ({"evidence_id": "other-evidence"}, False),
+])
+def test_automatic_source_block_limits_unattended_command(overrides, allowed):
+    target = "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0123456789abcdef0"
+    parameters = {
+        "network_acl_id": "acl-0123456789abcdef0", "rule_number": 1,
+        "cidr_block": "203.0.113.10/32", "protocol": "tcp", "evidence_id": "ev-1",
+        **overrides,
+    }
+    precheck = _passing_precheck()
+    outcome = _validate_auto({
+        "runbook_id": RunbookId.RUNBOOK_NACL_ADD_DENY.value,
+        "target_arn": target, "parameters": parameters, "evidence_ids": ["ev-1"],
+    }, collected=(target,), precheck=precheck)
+    if allowed:
+        assert outcome.result.result is GuardrailDecision.PASS
+        assert outcome.command.parameters.model_dump(mode="json") == parameters
+        assert precheck.asked == [outcome.command]
+    else:
+        assert outcome.result.result is GuardrailDecision.FAIL
+        assert outcome.command is None
+        assert precheck.asked == []
+
+
 def test_auto_isolation_schema_check_uses_the_execution_parameter_contract():
     # 후보 계약이면 빈 parameters가 통과한다 — 실행 계약이라 거절된다
     for parameters in ({}, {**ISOLATE_PARAMS, "instance_id": "bad"},
@@ -905,11 +934,13 @@ def test_auto_isolation_schema_check_uses_the_execution_parameter_contract():
 @pytest.mark.parametrize(
     "runbook_id",
     sorted(
-        {r.value for r in RunbookId if r is not RunbookId.RUNBOOK_EC2_ISOLATE}
+        {r.value for r in RunbookId if r not in (
+            RunbookId.RUNBOOK_EC2_ISOLATE, RunbookId.RUNBOOK_NACL_ADD_DENY,
+        )}
         | set(UNKNOWN_RUNBOOK_IDS)
     ),
 )
-def test_auto_isolation_whitelist_admits_only_ec2_isolate(runbook_id):
+def test_auto_isolation_whitelist_rejects_nonautomatic_runbooks(runbook_id):
     precheck = _passing_precheck()
     # ①은 ID를 판정하지 않으므로 어떤 ID든 ②까지 도달한다
     payload = {**ISOLATE_PAYLOAD, "runbook_id": runbook_id}
@@ -929,7 +960,9 @@ def test_auto_isolation_whitelist_admits_only_ec2_isolate(runbook_id):
     [
         (
             sorted(
-                r.value for r in RunbookId if r is not RunbookId.RUNBOOK_EC2_ISOLATE
+                r.value for r in RunbookId if r not in (
+                    RunbookId.RUNBOOK_EC2_ISOLATE, RunbookId.RUNBOOK_NACL_ADD_DENY,
+                )
             ),
             WHITELIST_NOT_AUTO_ISOLATION_RUNBOOK,
         ),
