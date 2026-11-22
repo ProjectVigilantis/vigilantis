@@ -23,12 +23,9 @@ from ai.agent import (
     _FINOPS_SUMMARY_SYSTEM_PROMPT,
     _PARAMETER_CONSTRAINTS,
     FINOPS_PROMPT_VERSION,
-    CandidateProposalOutput,
-    EvidenceSummaryOutput,
     FinOpsCandidateProposalOutput,
     FinOpsEvidenceDecisionOutput,
     FinOpsProposedCandidate,
-    ProposedCandidate,
     _capability_payload,
     finops_prompt_fingerprint,
     finops_prompt_material,
@@ -672,15 +669,13 @@ def test_prompt_material_covers_every_instruction_surface():
     assert "ai_savings_estimate" not in FinOpsCandidateProposalOutput.model_json_schema()["properties"]
 
 
-def test_finops_prompt_material_points_at_the_finops_schemas_not_the_legacy_ones():
+def test_finops_prompt_material_contains_the_requested_schemas():
     material = finops_prompt_material()
 
     assert json.dumps(FinOpsEvidenceDecisionOutput.model_json_schema(), ensure_ascii=False,
                       sort_keys=True) in material
     assert json.dumps(FinOpsCandidateProposalOutput.model_json_schema(), ensure_ascii=False,
                       sort_keys=True) in material
-    assert json.dumps(ProposedCandidate.model_json_schema(), ensure_ascii=False,
-                      sort_keys=True) not in material
 
 
 def test_summary_output_fields_are_the_three_roles_then_the_decision():
@@ -694,20 +689,6 @@ def test_summary_output_fields_are_the_three_roles_then_the_decision():
     assert FinOpsEvidenceDecisionOutput.model_json_schema()["properties"]["decision"]["items"] == {
         "type": "integer"
     }
-
-
-def test_finops_proposal_fields_are_the_legacy_ones_without_the_target():
-    legacy = list(ProposedCandidate.model_fields)
-    assert list(FinOpsProposedCandidate.model_fields) == [f for f in legacy if f != "target_arn"]
-    assert list(FinOpsCandidateProposalOutput.model_fields) == ["candidates"]
-
-
-def test_legacy_models_stay_the_secops_request_schemas():
-    # SecOps 정상·대비책이 쓰는 모델은 FinOps 변경으로 움직이지 않는다
-    assert list(EvidenceSummaryOutput.model_fields) == ["observation", "diagnosis", "rationale"]
-    assert "target_arn" in ProposedCandidate.model_fields
-    assert "decision" not in EvidenceSummaryOutput.model_json_schema()["properties"]
-    assert list(CandidateProposalOutput.model_fields) == ["candidates"]
 
 
 def test_summary_prompt_carries_the_multi_action_decision_criteria():

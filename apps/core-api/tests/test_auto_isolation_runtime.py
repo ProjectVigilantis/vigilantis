@@ -1110,7 +1110,7 @@ def test_high_hook_finishes_before_graph_input_and_failed_is_not_applied(
 
 @pytest.mark.parametrize("kind", ["secops_medium", "finops"])
 def test_medium_and_finops_bypass_high_hook(db, monkeypatch, kind):
-    from ai.agent import CandidateProposalOutput
+    from ai.agent import FinOpsCandidateProposalOutput
     from schemas.api.incidents import IncidentCategory
     from tests.test_agent_dispatcher import (
         SUMMARY,
@@ -1129,7 +1129,7 @@ def test_medium_and_finops_bypass_high_hook(db, monkeypatch, kind):
         expected = (IncidentCategory.SECOPS, RiskLevel.MEDIUM, ResponseMode.AGENT_WAIT)
     else:
         incident_id = _pending_incident(db)
-        client = _client(SUMMARY, CandidateProposalOutput(candidates=[]))
+        client = _client(SUMMARY, FinOpsCandidateProposalOutput(candidates=[]))
         expected = (IncidentCategory.FINOPS, None, None)
     row = incidents_repo.get_incident(db, incident_id)
     assert (row.category, row.initial_risk_level, row.response_mode) == expected

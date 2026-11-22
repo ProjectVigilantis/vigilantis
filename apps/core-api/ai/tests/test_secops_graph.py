@@ -1,7 +1,6 @@
 """SecOps 그래프 계약·노드 단락. 실제 모델·DB·AWS 호출은 하지 않는다.
 
 기본 그래프는 근거 3줄 + decision 1회 호출 뒤 코드가 실행 계획을 조립한다(#583 2단계).
-1단계 그래프(후보 생성 → 요약)는 SecOpsGraphVariant.CANDIDATE_FIRST 대비책으로 뒤쪽 테스트가 본다.
 """
 
 import json
@@ -10,8 +9,7 @@ import logging
 import pytest
 
 from ai.agent import (
-    SECOPS_FALLBACK_MODEL_CALLS, SECOPS_MODEL_CALLS, CandidateProposalOutput, EvidenceSummaryOutput,
-    ProposedCandidate, SecOpsEvidenceDecisionOutput, SecOpsGraphVariant, run_secops_graph,
+    SECOPS_MODEL_CALLS, SecOpsEvidenceDecisionOutput, run_secops_graph,
 )
 from ai.capabilities import build_secops_capabilities
 from ai.claude_client import _schema_for
@@ -23,9 +21,6 @@ from schemas.runbooks import RunbookId
 
 EC2 = "arn:aws:ec2:ap-northeast-2:123456789012:instance/i-0abc"
 NACL = "arn:aws:ec2:ap-northeast-2:123456789012:network-acl/acl-0abc"
-SUMMARY = EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회",
-                                diagnosis="SSH 반복 공격으로 추정", rationale="출발지 차단 필요")
-FALLBACK = SecOpsGraphVariant.CANDIDATE_FIRST
 NACL_MENU = {"runbook_id": "RUNBOOK_NACL_ADD_DENY", "purpose": "출발지 차단",
              "allowed_target_asset_types": ["NACL"]}
 
@@ -62,14 +57,6 @@ def decided(decision):
         observation="300초 동안 SSH 실패 120회", diagnosis="SSH 반복 공격으로 추정",
         rationale="출발지 차단을 제시하되 정상 통신 영향을 먼저 확인", decision=decision,
     )
-
-
-def proposal(**over):
-    values = dict(runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY, target_arn=NACL,
-                  evidence_ids=["ev-1"], rule_number=100, cidr_block="203.0.113.10/32",
-                  protocol="tcp")
-    values.update(over)
-    return ProposedCandidate(**values)
 
 
 def _failure_log(caplog):
@@ -212,46 +199,6 @@ def test_model_failure_skips_plan_assembly(caplog):
     assert (record.failed_step, record.reason_code) == ("summarize_evidence", "MODEL_UNAVAILABLE")
 
 
-# ------------------------------------------------------------------------------
-# 1단계 그래프 — SECOPS_GRAPH_VARIANT=CANDIDATE_FIRST 대비책
-# ------------------------------------------------------------------------------
-
-
-def test_fallback_two_calls_and_null_reviewed_risk():
-    """대비책은 후보·요약 2회다. 등급 호출이 없어 reviewed_risk_level은 null이다(ADR-0005 1차 개정)."""
-    data = graph_input()
-    before = data.model_dump(mode="json")
-    client = FakeAIModelClient([CandidateProposalOutput(candidates=[proposal()]), SUMMARY])
-    output = run_secops_graph(data, client=client, nacl_rule_numbers={NACL: 1}, variant=FALLBACK)
-    assert output.invocation_status is AgentInvocationStatus.SUCCEEDED
-    assert output.reviewed_risk_level is None
-    assert output.candidates[0].target_arn == NACL
-    assert len(client.sent) == SECOPS_FALLBACK_MODEL_CALLS == 2
-    assert data.model_dump(mode="json") == before
-    assert client.sent[0]["user_payload"]["isolation_execution"] is None
-    for request in client.sent:
-        # 서버 초기 판정은 그대로 전달되고, 재평가 등급·표기는 어느 호출에도 실리지 않는다.
-        assert request["user_payload"]["initial_risk"]["initial_risk_level"] == "HIGH"
-        assert "reviewed_risk_level" not in request["user_payload"]
-        assert "reviewed_risk_label" not in request["user_payload"]
-    assert "initial_risk_label" not in client.sent[0]["user_payload"]
-    assert client.sent[1]["user_payload"]["initial_risk_label"] == "높음"
-    assert client.sent[1]["user_payload"]["candidates"] == [
-        output.candidates[0].model_dump(mode="json")
-    ]
-
-
-def test_fallback_no_proposal_keeps_summary_with_null_reviewed_risk():
-    client = FakeAIModelClient([CandidateProposalOutput(candidates=[]), SUMMARY])
-    output = run_secops_graph(graph_input(), client=client, nacl_rule_numbers={NACL: 1},
-                              variant=FALLBACK)
-    assert output.invocation_status is AgentInvocationStatus.NO_PROPOSAL
-    assert len(output.summary_lines) == 3
-    assert output.reviewed_risk_level is None
-    assert client.sent[1]["user_payload"]["candidates"] == []
-    assert client.sent[1]["user_payload"]["initial_risk_label"] == "높음"
-
-
 @pytest.mark.parametrize("entries,expected", [
     ([{"RuleNumber": 100, "RuleAction": "allow"}], 1),
     ([{"RuleNumber": 1, "RuleAction": "deny"}, {"RuleNumber": 100, "RuleAction": "allow"}], 2),
@@ -320,46 +267,6 @@ def test_secops_output_rejects_a_rule_number_not_selected_by_the_server(caplog):
     assert checked.candidates == []
     assert [r.reason_code for r in caplog.records
             if r.getMessage() == "agent_output_contract_violation"] == ["SERVER_VALUE_MISMATCH"]
-
-
-@pytest.mark.parametrize("completed,step", [
-    (0, "propose_candidates"), (1, "summarize_evidence"),
-])
-def test_fallback_node_failure_stops_later_model_calls(completed, step, caplog):
-    client = FakeAIModelClient([CandidateProposalOutput(candidates=[])][:completed])
-    with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
-        output = run_secops_graph(graph_input(), client=client, nacl_rule_numbers={NACL: 1},
-                                  variant=FALLBACK)
-    assert output.invocation_status is AgentInvocationStatus.FAILED
-    assert output.summary_lines == [] and output.candidates == []
-    assert output.reviewed_risk_level is None
-    assert len(client.sent) == completed + 1
-    record = _failure_log(caplog)
-    assert record.failed_step == step and record.reason_code == "MODEL_UNAVAILABLE"
-
-
-@pytest.mark.parametrize("over,reason", [
-    ({"target_arn": EC2}, "TARGET_NOT_ALLOWED"),
-    ({"target_arn": NACL.replace("acl-0abc", "acl-0def")}, "TARGET_NOT_ALLOWED"),
-    ({"runbook_id": RunbookId.RUNBOOK_NACL_RESTORE}, "RUNBOOK_NOT_OFFERED"),
-    ({"cidr_block": None}, "CANDIDATE_CONTRACT_VIOLATION"),
-    ({"evidence_ids": []}, "CANDIDATE_CONTRACT_VIOLATION"),
-])
-def test_fallback_invalid_proposal_fails_whole_graph(over, reason, caplog):
-    client = FakeAIModelClient([CandidateProposalOutput(candidates=[proposal(**over)]), SUMMARY])
-    with caplog.at_level(logging.WARNING, logger="vigilantis.ai.agent"):
-        output = run_secops_graph(graph_input(), client=client, nacl_rule_numbers={NACL: 1},
-                                  variant=FALLBACK)
-    assert output.invocation_status is AgentInvocationStatus.FAILED
-    assert len(client.sent) == 1  # 잘못된 후보는 요약 생성 전에 그래프를 중단시킨다.
-    # 메뉴 밖·대상 밖(주입 의심)과 형식 위반을 사유로 가른다. 대상 밖이면 그 대상을 남긴다
-    fields = _failure_log(caplog).__dict__
-    assert fields["failed_step"] == "validate_candidates"
-    assert fields["reason_code"] == reason
-    if reason == "TARGET_NOT_ALLOWED":
-        assert fields["target_arn"] == over["target_arn"]
-    else:
-        assert "target_arn" not in fields
 
 
 def test_capability_menu_requires_ssh_and_direct_nacl_relation():

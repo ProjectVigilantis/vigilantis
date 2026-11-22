@@ -30,12 +30,9 @@ import agent_dispatcher  # noqa: E402
 import incident_intake  # noqa: E402
 import workflows  # noqa: E402
 from ai.agent import (  # noqa: E402
-    CandidateProposalOutput as SecOpsCandidateProposalOutput,
-    EvidenceSummaryOutput,
     FinOpsCandidateProposalOutput,
     FinOpsEvidenceDecisionOutput,
     FinOpsProposedCandidate,
-    ProposedCandidate as SecOpsProposedCandidate,
     SecOpsEvidenceDecisionOutput,
 )
 from ai.model_client import FakeAIModelClient  # noqa: E402
@@ -572,9 +569,8 @@ def test_finops_claim_ceiling_explicitly_includes_followup_calls(monkeypatch):
 
     assert FINOPS_MODEL_CALLS == 2
     assert SAVINGS_MODEL_CALLS == 1
-    # SecOps 호출 수(두 그래프)와 우연히 상한이 맞는 구현은 잡는다.
+    # SecOps 호출 수와 우연히 상한이 맞는 구현은 잡는다.
     monkeypatch.setattr(agent_dispatcher, "SECOPS_MODEL_CALLS", 1)
-    monkeypatch.setattr(agent_dispatcher, "SECOPS_FALLBACK_MODEL_CALLS", 1)
     settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
                         OPENAI_MAX_RETRY_AFTER_SECONDS=60)
     assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
@@ -590,7 +586,6 @@ def test_claim_ceiling_follows_the_retry_engine_policy(monkeypatch):
     per_call = RetryPolicy.from_settings(settings).worst_case_seconds()
     assert per_call == 20 * 2 + 45
     monkeypatch.setattr(agent_dispatcher, "SECOPS_MODEL_CALLS", 1)
-    monkeypatch.setattr(agent_dispatcher, "SECOPS_FALLBACK_MODEL_CALLS", 1)
     assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == per_call * 3
 
 
@@ -1304,26 +1299,6 @@ def _secops_client(db, incident_id, *, candidates=True):
     ))
 
 
-def _secops_fallback_client(db, incident_id, *, candidates=True, **over):
-    """대비책 그래프(SECOPS_GRAPH_VARIANT=CANDIDATE_FIRST) 대본 — 후보·요약 2건."""
-    evidence_id = incidents_repo.list_evidence(db, incident_id)[0].evidence_id
-    values = dict(runbook_id=RunbookId.RUNBOOK_NACL_ADD_DENY, target_arn=NACL_ARN,
-                  evidence_ids=[evidence_id], rule_number=100,
-                  cidr_block="203.0.113.10/32", protocol="tcp")
-    values.update(over)
-    return _client(
-        SecOpsCandidateProposalOutput(candidates=[SecOpsProposedCandidate(**values)] if candidates else []),
-        EvidenceSummaryOutput(observation="300초 동안 SSH 실패 120회", diagnosis="SSH 공격 추정",
-                              rationale="출발지 차단 필요"),
-    )
-
-
-def _use_secops_variant(monkeypatch, variant):
-    """Dispatcher가 읽는 SECOPS_GRAPH_VARIANT만 바꾼다. 테스트가 끝나면 되돌아간다."""
-    settings = agent_dispatcher.get_settings().model_copy(update={"SECOPS_GRAPH_VARIANT": variant})
-    monkeypatch.setattr(agent_dispatcher, "get_settings", lambda: settings)
-
-
 @pytest.mark.parametrize("candidate_status,incident_status,execution_status,same_acl,expected", [
     ("EXECUTABLE", "AWAITING_APPROVAL", None, True, 2),
     ("EXECUTABLE", "ACTION_IN_PROGRESS", "IN_PROGRESS", True, 2),
@@ -1596,15 +1571,20 @@ def test_secops_non_executable_results_remain_readable(db, client_pg, monkeypatc
         monkeypatch.setattr(ex, "aws_client", aws_client)
         monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number", ex.resolve_nacl_add_deny_rule_number)
     monkeypatch.setattr(workflows, "_candidate_precheck", _failing_precheck)
+    client = _secops_client(db, incident_id, candidates=kind != "no_proposal")
     if kind in ("unknown_evidence", "broad_cidr"):
-        # 기본 그래프는 근거·CIDR을 코드가 조립해 이런 후보를 낼 수 없다. 모델이 후보 값을 쓰는
-        # 대비책 그래프에서 Workflow 검증(ⓐ·SSH 차단 파라미터 대조)이 거절하는지 본다
-        _use_secops_variant(monkeypatch, "CANDIDATE_FIRST")
-        over = ({"evidence_ids": ["unknown"]} if kind == "unknown_evidence"
-                else {"cidr_block": "203.0.113.0/24"})
-        client = _secops_fallback_client(db, incident_id, **over)
-    else:
-        client = _secops_client(db, incident_id, candidates=kind != "no_proposal")
+        # 그래프가 조립한 결과를 변조해 독립 경계인 Workflow 검증의 거절을 확인한다.
+        run_graph = agent_dispatcher.run_secops_graph
+
+        def invalid_output(*args, **kwargs):
+            output = run_graph(*args, **kwargs)
+            if kind == "unknown_evidence":
+                output.candidates[0].evidence_ids = ["unknown"]
+            else:
+                output.candidates[0].parameters.cidr_block = "203.0.113.0/24"
+            return output
+
+        monkeypatch.setattr(agent_dispatcher, "run_secops_graph", invalid_output)
     if kind == "nul":
         client._outputs[0] = SecOpsEvidenceDecisionOutput(
             observation="bad\x00text", diagnosis="추정", rationale="차단", decision=[1],
@@ -1701,41 +1681,17 @@ def test_secops_prior_execution_controls_state_and_input(db, client_pg, monkeypa
 def test_claim_ceiling_covers_the_larger_domain_call_count():
     from ai.agent import (
         FINOPS_MODEL_CALLS,
-        SECOPS_FALLBACK_MODEL_CALLS,
         SECOPS_MODEL_CALLS,
     )
     from ai.rate_estimator import SAVINGS_MODEL_CALLS
     from config import Settings
 
-    # SecOps 기본 그래프는 1회, 대비책 그래프는 2회(#583 2단계)이고, FinOps는 후보 2회 + 단가
-    # 1회가 상한이다. 상한은 SECOPS_GRAPH_VARIANT에 따라 달라지지 않는다.
+    # SecOps는 1회이고, FinOps는 근거·후보 2회 + 단가 1회가 상한이다.
     assert SECOPS_MODEL_CALLS == 1
-    assert SECOPS_FALLBACK_MODEL_CALLS == 2
     assert FINOPS_MODEL_CALLS + SAVINGS_MODEL_CALLS == 3
-    for variant in ("EVIDENCE_FIRST", "CANDIDATE_FIRST"):
-        settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
-                            OPENAI_MAX_RETRY_AFTER_SECONDS=60, SECOPS_GRAPH_VARIANT=variant)
-        assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
-
-
-def test_secops_candidate_first_switch_runs_the_two_call_graph(db, client_pg, monkeypatch):
-    """대비책 스위치는 그래프만 바꾼다 — 후보 → 요약 2호출이 같은 Workflow 검증·저장을 지난다(#583)."""
-    incident_id = _pending_secops(db, medium=True)
-    monkeypatch.setattr(agent_dispatcher, "resolve_nacl_add_deny_rule_number",
-                        lambda target, **kwargs: (1, None))
-    monkeypatch.setattr(workflows, "_candidate_precheck", _passing_precheck)
-    _use_secops_variant(monkeypatch, "CANDIDATE_FIRST")
-    client = _secops_fallback_client(db, incident_id)
-
-    report = _cycle(db, client)
-
-    assert (report.succeeded, report.failed, report.errored) == (1, 0, 0)
-    assert len(client.sent) == 2
-    assert client.sent[1]["user_payload"]["candidates"][0]["target_arn"] == NACL_ARN
-    data = client_pg.get(f"/api/v1/incidents/{incident_id}").json()
-    assert data["status"] == "AWAITING_APPROVAL"
-    assert data["reviewed_risk_level"] is None
-    assert incidents_repo.list_candidates(db, incident_id)[0].parameters["rule_number"] == 1
+    settings = Settings(OPENAI_TIMEOUT_SECONDS=30, OPENAI_MAX_ATTEMPTS=3,
+                        OPENAI_MAX_RETRY_AFTER_SECONDS=60)
+    assert agent_dispatcher.stale_claim_ceiling_seconds(settings) == 630
 
 
 def test_secops_ssh_reaches_approval_through_localstack_guardrail(db, client_pg, monkeypatch):
