@@ -31,8 +31,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from realtime import incident_event
+import pytest
+
+from realtime import execution_event, incident_event
+from schemas.api.actions import ExecutionStatus
 from schemas.api.auth import UserRole
+from schemas.api.incidents import IncidentCategory
 from schemas.api.ws import WsEventType
 from schemas.collections import CollectionRunStatus
 from tests.test_asset_tenant_scope import MVP_ACCOUNT, REGION, _collected
@@ -304,8 +308,12 @@ def test_metrics_timeseries_hide_other_tenant(client_pg, db, login_as, make_tena
     assert _callers(cw) == [world["A"].tenant_id] * 2
 
 
-def test_ws_does_not_deliver_other_tenants_events(make_tenant_ws_client, tenant_incidents):
-    """17. A WS 연결 중 B 인시던트 갱신 → 이벤트 미수신 — #535(`routers/ws.py` authorize · PR #567).
+@pytest.mark.parametrize(
+    "event_type",
+    [WsEventType.INCIDENT_CREATED, WsEventType.INCIDENT_UPDATED, WsEventType.EXECUTION_UPDATED],
+)
+def test_ws_does_not_deliver_other_tenants_events(make_tenant_ws_client, tenant_incidents, event_type):
+    """17. A WS 연결 중 B 인시던트 생성·갱신·실행 → 이벤트 미수신 — #535(`routers/ws.py` authorize · PR #567).
 
     거부될 이벤트(B · 소속 없는 MVP 기록 · 없는 인시던트)를 먼저 발행하고 A 것을 마지막에 발행한다 —
     큐 순서라 하나라도 새면 첫 수신이 A가 아니어서 실패한다(sleep 없이 결정적). 수신 헬퍼는
@@ -316,5 +324,19 @@ def test_ws_does_not_deliver_other_tenants_events(make_tenant_ws_client, tenant_
 
     with client.websocket_connect(WS) as ws:
         for incident_id in (ids["b"], ids["null"], "inc-nonexistent", ids["a"]):
-            manager.publish(incident_event(WsEventType.INCIDENT_UPDATED, incident_id=incident_id, occurred_at=T0))
+            if event_type is WsEventType.EXECUTION_UPDATED:
+                event = execution_event(
+                    incident_id=incident_id,
+                    execution_id=f"exe-{incident_id}",
+                    status=ExecutionStatus.SUCCESS,
+                    updated_at=T0,
+                )
+            else:
+                event = incident_event(
+                    event_type,
+                    incident_id=incident_id,
+                    occurred_at=T0,
+                    category=IncidentCategory.SECOPS if event_type is WsEventType.INCIDENT_CREATED else None,
+                )
+            manager.publish(event)
         assert _next_incident_id(ws) == ids["a"]

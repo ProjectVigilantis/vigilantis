@@ -9,7 +9,7 @@
 #   ② 로그인 사용자 풀은 auth README의 전제(MFA ON · TOTP · 관리자만 생성 · 비밀번호 12자)대로
 #   ③ ALB는 비밀 헤더가 있는 요청만 앱으로 보낸다(CloudFront 우회 차단) · 도메인이 있으면 CloudFront→ALB는
 #      origin.<도메인> HTTPS만(평문 80 리스너·SG 규칙을 걷어 낸다)
-#   ④ WAF는 기본 차단 · 허용 IP만 통과 · 허용 CIDR은 /24보다 넓으면 거부
+#   ④ WAF는 기본 허용(6차 개정) · 속도 규칙 셋은 Block · 허용 CIDR은 /24보다 넓으면 거부
 #   ⑤ api는 겹쳐 뜨지 않는다(min 0 · max 100) · AI 분석·조치 실행 디스패치는 명시해야 켜진다
 #      · 비밀은 값이 아니라 참조로만
 #   ⑥ 고객 계정은 건드리지 않는다: 관제 범위 필터 없이 테넌트 문맥으로만 고객 계정에 닿는다
@@ -301,7 +301,9 @@ def test_down_removes_only_alias_records_that_point_at_this_distribution():
 
 
 # ④ ---------------------------------------------------------------------------
-RULE_NAMES = ["rate-login-per-ip", "rate-signup-per-ip", "rate-per-ip", "allow-listed-ips"]
+RULE_NAMES = ["rate-login-per-ip", "rate-signup-per-ip", "rate-per-ip", "allow-listed-ips",
+              "aws-ip-reputation", "aws-common"]
+PRIORITIES = list(range(len(RULE_NAMES)))
 
 
 def _rules():
@@ -314,13 +316,50 @@ def test_waf_allows_only_the_ip_set():
     assert allow["Action"] == {"Allow": {}}
 
 
+def test_managed_rules_come_after_the_allow_rule_and_keep_their_own_actions():
+    # 허용 목록(NAT 포함) 뒤 — 웹의 서버 측 API 호출이 본문 검사에 막히지 않는다
+    rules = _rules()
+    allow = rules["allow-listed-ips"]["Priority"]
+    for name, group in (("aws-ip-reputation", "AWSManagedRulesAmazonIpReputationList"),
+                        ("aws-common", "AWSManagedRulesCommonRuleSet")):
+        rule = rules[name]
+        assert rule["Priority"] > allow
+        assert rule["Statement"]["ManagedRuleGroupStatement"]["Name"] == group
+        assert rule["Statement"]["ManagedRuleGroupStatement"]["VendorName"] == "AWS"
+        assert rule["OverrideAction"] == {"None": {}} and "Action" not in rule
+    assert "RuleActionOverrides" not in rules["aws-ip-reputation"]["Statement"]["ManagedRuleGroupStatement"]
+
+
+def test_common_rule_set_blocks_oversized_bodies_too():
+    # 앱이 본문 상한을 먼저 거는 경로는 공개 신청 접수뿐이다. 인증 전 크기 제약은 WAF 몫(auth README §운영 주의점)
+    assert "RuleActionOverrides" not in _rules()["aws-common"]["Statement"]["ManagedRuleGroupStatement"]
+
+
+def test_count_override_left_on_an_existing_acl_is_removed():
+    # 11/19 실 계정 모양: SizeRestrictions_BODY 만 Count. 정의에서 빼도 부분 비교로는 「같음」이라 남는다
+    rules = platform.waf_rules(f"arn:{platform.WAF_IPSET}", f"arn:{platform.WAF_NAT_IPSET}")
+    old = [dict(rule) for rule in rules]
+    common = old[RULE_NAMES.index("aws-common")]
+    common["Statement"] = {"ManagedRuleGroupStatement": {
+        **common["Statement"]["ManagedRuleGroupStatement"],
+        "RuleActionOverrides": [{"Name": "SizeRestrictions_BODY", "ActionToUse": {"Count": {}}}]}}
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: NATS}, acl_rules=old)
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == ["update_web_acl"]
+    assert all("RuleActionOverrides" not in r["Statement"].get("ManagedRuleGroupStatement", {})
+               for r in waf.acl_rules)
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == []  # 다시 돌리면 변경 0
+
+
 # ⑦ 속도 제한 (#484) ------------------------------------------------------------
 def test_rate_limits_are_evaluated_before_the_allow_rule():
     # 허용이 먼저 맞으면 WAF가 거기서 끝낸다 — 속도 규칙은 우선순위가 더 앞이어야 평가된다.
     # 경로 규칙 둘이 전 경로 규칙보다 앞 — Block 이 되면 더 낮은 한도가 먼저 끊는다(#522 Q5 · D)
     rules = platform.waf_rules("arn:ipset", "arn:nat")
     assert [rule["Name"] for rule in rules] == RULE_NAMES
-    assert [rule["Priority"] for rule in rules] == [0, 1, 2, 3]
+    assert [rule["Priority"] for rule in rules] == PRIORITIES
 
 
 def test_rate_limit_counts_per_ip_but_never_the_nat_ip():
@@ -383,9 +422,9 @@ def test_login_rate_limit_skips_the_signed_in_session_calls(path):
     assert not _login_path_matches(path)
 
 
-def test_login_rate_limit_starts_in_count_mode():
-    # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#522 C · B 와 같은 방식)
-    assert _rules()["rate-login-per-ip"]["Action"] == {"Count": {}}
+def test_login_rate_limit_blocks():
+    # 전체 공개(ADR-0010 6차 개정) 뒤에는 대입을 WAF 에서 끊는다
+    assert _rules()["rate-login-per-ip"]["Action"] == {"Block": {}}
 
 
 # 공개 신청 접수 한도 (#522 D) ----------------------------------------------------
@@ -459,24 +498,25 @@ def test_signup_rate_limit_points_at_the_route_the_app_actually_serves():
         platform.SIGNUP_PATH.decode()]
 
 
-def test_signup_rate_limit_starts_in_count_mode():
-    # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#522 D · B 와 같은 방식)
-    assert _rules()["rate-signup-per-ip"]["Action"] == {"Count": {}}
+def test_signup_rate_limit_blocks():
+    # 전체 공개(ADR-0010 6차 개정) 뒤에는 신청 도배를 WAF 에서 끊는다
+    assert _rules()["rate-signup-per-ip"]["Action"] == {"Block": {}}
 
 
-def test_rate_limit_starts_in_count_mode():
-    # 정상 사용량을 재지 않았다 — 관측 전에는 막지 않는다(#484 ⓔ)
+def test_rate_limit_blocks():
+    # 전체 공개(ADR-0010 6차 개정) 뒤에는 이 규칙들이 유일한 WAF 장치다
     rate = _rules()["rate-per-ip"]
-    assert rate["Action"] == {"Count": {}}
+    assert rate["Action"] == {"Block": {}}
     assert platform.RATE_WINDOW_SECONDS in (60, 120, 300, 600)  # WAF가 받는 창 길이
 
 
 class FakeWaf:
     """IP 집합 · 웹 ACL 을 들고 있는 WAFv2 대역 — 생성 · 갱신 · 삭제가 상태를 바꾼다."""
 
-    def __init__(self, ipsets=None, acl_rules=None, create_acl_errors=()):
+    def __init__(self, ipsets=None, acl_rules=None, create_acl_errors=(), acl_default=None):
         self.ipsets = {name: list(addrs) for name, addrs in (ipsets or {}).items()}
         self.acl_rules = acl_rules  # None = 웹 ACL 없음
+        self.acl_default = acl_default or platform._ACL_DEFAULT_ACTION
         self.calls: list[str] = []
         # create_web_acl 이 차례로 던질 오류 코드 — 실제 WAF 의 IP 집합 전파 지연(#522)을 흉내 낸다
         self.create_acl_errors = list(create_acl_errors)
@@ -508,18 +548,18 @@ class FakeWaf:
     def get_web_acl(self, **_):
         # 실제 응답처럼 요청에 없던 기본 키를 덧붙인다 — 통째 비교면 매번 「다름」이 된다
         rules = [{**r, "RuleLabels": []} for r in self.acl_rules]
-        return {"WebACL": {"Rules": rules}, "LockToken": "t"}
+        return {"WebACL": {"Rules": rules, "DefaultAction": self.acl_default}, "LockToken": "t"}
 
-    def create_web_acl(self, Rules, **_):
+    def create_web_acl(self, Rules, DefaultAction, **_):
         self.calls.append("create_web_acl")
         if self.create_acl_errors:
             raise _client_error(self.create_acl_errors.pop(0), "CreateWebACL")
-        self.acl_rules = Rules
+        self.acl_rules, self.acl_default = Rules, DefaultAction
         return {"Summary": {"ARN": "arn:acl"}}
 
-    def update_web_acl(self, Rules, **_):
+    def update_web_acl(self, Rules, DefaultAction, **_):
         self.calls.append("update_web_acl")
-        self.acl_rules = Rules
+        self.acl_rules, self.acl_default = Rules, DefaultAction
 
     def delete_web_acl(self, **_):
         self.calls.append("delete_web_acl")
@@ -573,7 +613,7 @@ def test_existing_acl_without_the_login_rule_gets_it_in_front():
                   acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2, 3]))
+    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, PRIORITIES))
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == []
@@ -587,10 +627,29 @@ def test_existing_acl_without_the_signup_rule_gets_it_before_the_generic_limit()
                   acl_rules=[{**rule, "Priority": n} for n, rule in enumerate(old)])
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, [0, 1, 2, 3]))
+    assert [(r["Name"], r["Priority"]) for r in waf.acl_rules] == list(zip(RULE_NAMES, PRIORITIES))
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == []  # 다시 돌리면 변경 0
+
+
+def test_new_acl_allows_by_default():
+    waf = FakeWaf()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.acl_default == {"Allow": {}}
+
+
+def test_existing_blocking_acl_with_the_same_rules_is_opened():
+    # 6차 개정 전 플랫폼의 모양 — 규칙은 같고 기본 동작만 Block. 규칙만 비교하면 그대로 남는다
+    rules = platform.waf_rules(f"arn:{platform.WAF_IPSET}", f"arn:{platform.WAF_NAT_IPSET}")
+    waf = FakeWaf(ipsets={platform.WAF_IPSET: ALLOW, platform.WAF_NAT_IPSET: NATS},
+                  acl_rules=rules, acl_default={"Block": {}})
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == ["update_web_acl"]
+    assert waf.acl_default == {"Allow": {}}
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == []
 
 
 def test_second_run_changes_nothing():
@@ -601,29 +660,29 @@ def test_second_run_changes_nothing():
     assert waf.calls == []  # 응답에 기본 키가 덧붙어도 같은 규칙으로 본다
 
 
-def test_switching_to_block_is_applied_on_rerun(monkeypatch):
+def test_switching_the_generic_rule_action_is_applied_on_rerun(monkeypatch):
     waf = FakeWaf()
     platform._ensure_waf(waf, ALLOW, NATS)
-    monkeypatch.setattr(platform, "RATE_ACTION", "Block")
+    monkeypatch.setattr(platform, "RATE_ACTION", "Count")
     waf.calls.clear()
     platform._ensure_waf(waf, ALLOW, NATS)
     assert waf.calls == ["update_web_acl"]
-    actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
-    assert actions["rate-per-ip"] == {"Block": {}}
-    assert actions["rate-login-per-ip"] == {"Count": {}}  # 규칙마다 전환은 따로다
-    assert actions["rate-signup-per-ip"] == {"Count": {}}
-
-
-def test_switching_only_the_signup_rule_to_block_is_applied_on_rerun(monkeypatch):
-    waf = FakeWaf()
-    platform._ensure_waf(waf, ALLOW, NATS)
-    monkeypatch.setattr(platform, "SIGNUP_RATE_ACTION", "Block")
-    waf.calls.clear()
-    platform._ensure_waf(waf, ALLOW, NATS)
-    assert waf.calls == ["update_web_acl"]
-    actions = {rule["Name"]: rule["Action"] for rule in waf.acl_rules}
+    actions = {rule["Name"]: rule.get("Action") for rule in waf.acl_rules}
+    assert actions["rate-per-ip"] == {"Count": {}}
+    assert actions["rate-login-per-ip"] == {"Block": {}}  # 규칙마다 전환은 따로다
     assert actions["rate-signup-per-ip"] == {"Block": {}}
-    assert (actions["rate-login-per-ip"], actions["rate-per-ip"]) == ({"Count": {}}, {"Count": {}})
+
+
+def test_switching_only_the_signup_rule_action_is_applied_on_rerun(monkeypatch):
+    waf = FakeWaf()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    monkeypatch.setattr(platform, "SIGNUP_RATE_ACTION", "Count")
+    waf.calls.clear()
+    platform._ensure_waf(waf, ALLOW, NATS)
+    assert waf.calls == ["update_web_acl"]
+    actions = {rule["Name"]: rule.get("Action") for rule in waf.acl_rules}
+    assert actions["rate-signup-per-ip"] == {"Count": {}}
+    assert (actions["rate-login-per-ip"], actions["rate-per-ip"]) == ({"Block": {}}, {"Block": {}})
 
 
 def test_down_removes_the_acl_then_both_ip_sets():
@@ -642,7 +701,7 @@ def test_allow_cidr_accepts_narrow_ipv4_ranges():
 
 @pytest.mark.parametrize("raw, reason", [
     ("0.0.0.0/0", "넓은 범위"),
-    ("0.0.0.0/1", "넓은 범위"),     # WAF가 통과시키는 광역 — 출입문이 무력화된다
+    ("0.0.0.0/1", "넓은 범위"),     # WAF가 통과시키는 광역 — 허용 목록은 좁은 범위만 받는다
     ("10.0.0.0/23", "넓은 범위"),
     ("2001:db8::/128", "IPv4만"),
     ("203.0.113.7/24", "올바른 CIDR"),  # 호스트 비트 — 오타로 본다
@@ -703,6 +762,49 @@ def test_missing_service_is_a_failure():
     (problem,) = platform.deployment_problems(
         [_svc(platform.API_SERVICE, API_V2)], {platform.API_SERVICE: API_V2, platform.WEB_SERVICE: WEB_V2})
     assert platform.WEB_SERVICE in problem
+
+
+class RolloutEcs:
+    """describe_services 호출마다 다음 api 롤아웃 상태를 돌려준다. web은 늘 COMPLETED다."""
+
+    def __init__(self, api_states: list[tuple[str, str]]):
+        self.api_states = api_states
+        self.calls = 0
+
+    def describe_services(self, cluster, services):
+        task_def, rollout = self.api_states[min(self.calls, len(self.api_states) - 1)]
+        self.calls += 1
+        return {"services": [_svc(platform.API_SERVICE, task_def, rollout), _svc(platform.WEB_SERVICE, WEB_V2)]}
+
+
+EXPECTED = {platform.API_SERVICE: API_V2, platform.WEB_SERVICE: WEB_V2}
+
+
+def test_rollout_still_in_progress_after_stable_wait_is_waited_out():
+    """2026-11-20 deploy: services_stable 통과 직후 IN_PROGRESS였다가 곧 COMPLETED가 됐다 — 실패가 아니다."""
+    ecs, sleeps = RolloutEcs([(API_V2, "IN_PROGRESS"), (API_V2, "IN_PROGRESS"), (API_V2, "COMPLETED")]), []
+    assert platform.settled_deployment_problems(ecs, EXPECTED, sleep=sleeps.append) == []
+    assert (ecs.calls, len(sleeps)) == (3, 2)
+
+
+def test_rollout_that_never_finishes_fails_after_the_last_attempt():
+    ecs, sleeps = RolloutEcs([(API_V2, "IN_PROGRESS")]), []
+    (problem,) = platform.settled_deployment_problems(ecs, EXPECTED, attempts=4, sleep=sleeps.append)
+    assert "IN_PROGRESS" in problem and (ecs.calls, len(sleeps)) == (4, 3)
+
+
+@pytest.mark.parametrize("state", [(API_V1, "COMPLETED"), (API_V2, "FAILED")])
+def test_rollback_or_failed_rollout_is_reported_without_waiting(state):
+    ecs, sleeps = RolloutEcs([state]), []
+    (problem,) = platform.settled_deployment_problems(ecs, EXPECTED, sleep=sleeps.append)
+    assert platform.API_SERVICE in problem and sleeps == []
+
+
+def test_previous_version_in_progress_is_not_waited_on():
+    """IN_PROGRESS여도 PRIMARY가 요청한 버전이 아니면(롤백 진행 중) 기다리지 않는다."""
+    ecs, sleeps = RolloutEcs([(API_V1, "IN_PROGRESS")]), []
+    (problem,) = platform.settled_deployment_problems(ecs, EXPECTED, sleep=sleeps.append)
+    assert "롤백" in problem and sleeps == []
 
 
 class DrainingEcs:

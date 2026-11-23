@@ -372,7 +372,11 @@ def _error_locations(exc: ValidationError) -> list[dict[str, str]]:
 
 
 def _model_failure(step: str, exc: AIModelError) -> _Failure:
-    """경계 예외 → 사유. 메시지는 싣지 않고 클래스 이름과 phase만 남긴다."""
+    """경계 예외 → 사유. 메시지는 싣지 않고 클래스 이름과 phase만 남긴다.
+
+    요청 직렬화 실패의 두 원인(키 겹침·JSON 불가)은 같은 클래스·kind·phase라 로그에서만
+    고정 값 하나(serialization_failure)로 가른다. 저장되는 사유는 그대로다.
+    """
     if isinstance(exc, AIModelRejectedError):
         reason = AnalysisFailureReason.MODEL_REJECTED
     elif isinstance(exc, (AIModelContractError, AIModelAdapterError)):
@@ -381,7 +385,11 @@ def _model_failure(step: str, exc: AIModelError) -> _Failure:
         reason = AnalysisFailureReason.MODEL_CONTRACT_VIOLATION
     else:
         reason = AnalysisFailureReason.MODEL_UNAVAILABLE
-    return _Failure(step, reason, {"error_class": type(exc).__name__, "phase": exc.phase})
+    details: dict[str, Any] = {"error_class": type(exc).__name__, "phase": exc.phase}
+    serialization_failure = getattr(exc, "serialization_failure", None)
+    if serialization_failure is not None:
+        details["serialization_failure"] = serialization_failure.value
+    return _Failure(step, reason, details)
 
 
 def _convert_candidates(
@@ -662,7 +670,7 @@ def _proposal_payload(
 # 노드
 # ------------------------------------------------------------------------------
 # 실패 사유에 모델 응답이나 프롬프트를 담지 않는다(ADR-0005 미보존 대상).
-# 경계 예외는 클래스 이름과 phase까지만 남긴다(_model_failure).
+# 경계 예외는 클래스 이름·phase와, 있으면 요청 직렬화 원인 고정 값까지만 남긴다(_model_failure).
 
 
 def _summarize_evidence(state: _FinOpsState) -> dict[str, Any]:

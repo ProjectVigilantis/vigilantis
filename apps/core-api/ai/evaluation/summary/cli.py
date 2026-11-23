@@ -20,7 +20,8 @@
 #   기본 조합(luna low) : uv run python scripts/finops_eval.py --repeats 4
 #   추론량 바꾸기       : OPENAI_REASONING_EFFORT=high uv run python scripts/finops_eval.py --repeats 4
 #   다른 추론 모델      : OPENAI_MODEL=gpt-5.6-terra uv run python scripts/finops_eval.py --repeats 4
-#   temperature 계열    : OPENAI_MODEL=gpt-4o OPENAI_TEMPERATURE=0 OPENAI_REASONING_EFFORT=unset uv run python ...
+#   temperature 계열    : OPENAI_MODEL=gpt-4o OPENAI_TEMPERATURE=0 OPENAI_REASONING_EFFORT=unset OPENAI_PROMPT_CACHE=true uv run python ...
+#   (gpt-5.6 이전 모델은 캐시 끄는 인자를 받지 않는다 — OPENAI_PROMPT_CACHE=true로 인자를 뺀다)
 #   (PowerShell은 `$env:OPENAI_REASONING_EFFORT='high'; uv run python ...`)
 #
 # **실제 모델을 부르므로 과금이 발생한다**(케이스 1건 = 모델 호출 2회). CI 인자에 넣지

@@ -31,7 +31,7 @@
 | 이름 | 역할 | 담당 DOMAIN | 담당 영역 (주요 경로) |
 | :--- | :--- | :--- | :--- |
 | **김세혁 (팀장)** | PM · **Infra & DevSecOps · Frontend** | `BE` · `INFRA` · `FE` | Boto3 EC2/SG 제어·스펙 JSON 백업/자동 원복 엔진(`services/aws`), (모의) 위협 차단(`security`), Docker·CI/배포, Git 브랜치·코드리뷰, **Next.js 대시보드 전부**(`apps/web`) |
-| **안성일** | **AI/Guardrail · Architect** | `AI` · FastAPI 아키텍처 · DB | 전체 아키텍처·DB 스키마(`db`), FastAPI 메인·라우터(`main.py`,`routers`), `gpt-5.6-luna` + 4단계 가드레일 + LangGraph 2그래프(`ai`) |
+| **안성일** | **AI/Guardrail · Architect** | `AI` · FastAPI 아키텍처 · DB | 전체 아키텍처·DB 스키마(`db`), FastAPI 메인·라우터(`main.py`,`routers`), `gpt-6-luna` + 4단계 가드레일 + LangGraph 2그래프(`ai`) |
 | **김승철** | **Data & Rule Engine · QA/Scenario** | `DATA` · QA 시나리오 | CloudWatch 수집·정형화(`services/collector`), Idle EC2·미사용 SG 판별 및 Skip 사유 코드(`services/rule_engine`), **Golden Dataset·E2E 시연 시나리오·pytest**(`datasets`,`tests`) |
 | **박지현** | **Technical Writer** | `DOCS` | 프로젝트 기획서 전담, 저장소 문서화(`docs`) |
 
@@ -46,7 +46,7 @@
 
 * **Frontend**: Next.js 16 (App Router), React 19, TypeScript, Shadcn UI(radix-ui), Tailwind CSS v4, WebSocket, `node --test` 유닛 테스트, recharts(대시보드 추이·구성 차트)
 * **Backend**: FastAPI (Python 3.11+), Boto3, PostgreSQL 16, SQLAlchemy 2 · Alembic, APScheduler, pydantic-settings, uvicorn
-* **AI & Safety**: OpenAI `gpt-5.6-luna`(`reasoning_effort=low`), LangGraph (FinOps·SecOps 두 그래프), Pydantic v2 (Structured Output), Golden Dataset 기반 pytest 회귀 + 요약 품질 평가 하네스(`ai/evaluation`)
+* **AI & Safety**: OpenAI `gpt-6-luna`(분석 `reasoning_effort=low`, 신고 초안 서술 `high`), LangGraph (FinOps·SecOps 두 그래프), Pydantic v2 (Structured Output), Golden Dataset 기반 pytest 회귀 + 요약 품질 평가 하네스(`ai/evaluation`)
 * **Infra/Dev**: uv workspace 모노레포, Docker Compose (FastAPI + PostgreSQL + LocalStack + Alembic migrate), GitHub Actions CI **3잡** — `test` · `web` · `ai-signature`
 
 **Post-MVP (로드맵)**: OpenTelemetry(W3C Trace Context) · AWS Step Functions/ECS Fargate/Lambda/EventBridge/GuardDuty · Terraform(Drift·GitOps) · Redis(ElastiCache) · LangGraph **Multi-Agent 확장**(MVP는 도메인별 단일 그래프) · OIDC SSO·MFA·RBAC · 모바일 푸시(FCM) · GCP/Azure

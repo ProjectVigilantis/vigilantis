@@ -12,6 +12,7 @@
 import io
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,8 +39,11 @@ from ai.model_client import (
     AIModelAdapterError,
     AIModelContractError,
     AIModelRejectedError,
+    AIModelRequest,
     FailureKind,
     FakeAIModelClient,
+    RequestSerializationFailure,
+    build_outbound_payload,
 )
 from ai.model_retry import RetryPolicy
 from ai.openai_client import OpenAIModelClient
@@ -828,6 +832,61 @@ def test_failure_log_keeps_adapter_defect_apart_from_provider_outage(caplog):
 
     assert fields["reason_code"] == "MODEL_CONTRACT_VIOLATION"
     assert fields["error_class"] == "AIModelAdapterError"
+
+
+_TAG_KEY_A = "AKIAIOSFODNN7EXAMPLE"
+_TAG_KEY_B = "ASIAY34FZKBOKMUTVV7A"
+_TAG_VALUE_A = "synthetic-tag-value-a"
+_TAG_VALUE_B = "synthetic-tag-value-b"
+
+
+class _PythonModeClient:
+    """model_dump()를 python 모드로 넘긴 호출부 — 실제 build_outbound_payload가 JSON 불가를 낸다."""
+
+    def __init__(self):
+        self.provider_sends = 0
+
+    def complete(self, request, response_model):
+        build_outbound_payload(
+            AIModelRequest(
+                system_prompt=request.system_prompt,
+                user_payload={"collected_at": datetime(2026, 8, 31, tzinfo=timezone.utc)},
+            )
+        )
+        self.provider_sends += 1  # 위에서 막히므로 닿지 않는다
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        RequestSerializationFailure.MASKED_KEY_COLLISION,
+        RequestSerializationFailure.NOT_JSON_SERIALIZABLE,
+    ],
+)
+def test_failure_log_tells_the_two_request_serialization_causes_apart(cause, json_log_lines):
+    # 둘 다 AIModelContractError·REQUEST_SERIALIZATION·request라 클래스·phase로는 안 갈린다
+    if cause is RequestSerializationFailure.MASKED_KEY_COLLISION:
+        spec = {"instance_type": "t3.xlarge", "tags": {_TAG_KEY_A: _TAG_VALUE_A, _TAG_KEY_B: _TAG_VALUE_B}}
+        client = FakeAIModelClient([SUMMARY])
+        graph_input = make_input(asset_context={**ASSET_CONTEXT, "spec": spec})
+    else:
+        client = _PythonModeClient()
+        graph_input = make_input()
+
+    output = run_finops_graph(graph_input, client=client)
+
+    assert output.invocation_status == AgentInvocationStatus.FAILED
+    raw = json.dumps(json_log_lines(), ensure_ascii=False)
+    [line] = [entry for entry in json_log_lines() if entry["event"] == "agent_analysis_failed"]
+    assert line["reason_code"] == "MODEL_CONTRACT_VIOLATION"
+    assert line["failed_step"] == "summarize_evidence"
+    assert line["error_class"] == "AIModelContractError"
+    assert line["phase"] == "request"
+    assert line["serialization_failure"] == cause.value
+    for sensitive in (_TAG_KEY_A, _TAG_KEY_B, _TAG_VALUE_A, _TAG_VALUE_B, "datetime", "Traceback"):
+        assert sensitive not in raw
+    sends = client.sent if isinstance(client, FakeAIModelClient) else []
+    assert sends == [] and getattr(client, "provider_sends", 0) == 0
 
 
 @pytest.mark.parametrize(

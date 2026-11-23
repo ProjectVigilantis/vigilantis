@@ -59,14 +59,15 @@
 #      고객 계정은 건드리지 않는다. 고객이 만든 접근 역할은 고객이 스택을 지워 회수한다.
 #   ⑤ 이름이 같아도 플랫폼 태그(vigilantis:platform=true)가 없는 IAM 역할·오류 알람·알림 주제는 덮어쓰거나
 #      지우지 않는다.
-#   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다 — 로그인 없는 MVP에서 허용 IP가 출입문이다.
+#   ⑥ --allow-cidr는 IPv4 CIDR이고 /24보다 넓으면 거부한다. 2026-11-19부터 웹 ACL 기본 동작이 Allow라
+#      허용 IP는 더 이상 출입문이 아니다(전체 공개 · ADR-0010 6차 개정). 허용 규칙과 IP 집합은 남겨 둔다.
 #   ⑦ WAF 속도 제한(#484 · Post-MVP T-3) — IP당 RATE_LIMIT_PER_WINDOW 건 / RATE_WINDOW_SECONDS 초를
 #      허용 규칙(우선순위 3)보다 **앞**(우선순위 2)에서 센다. 허용이 먼저 맞으면 WAF가 거기서 평가를 끝내기 때문이다.
 #      NAT 공인 IP는 세지 않는다 — 웹의 서버 측 API 호출이 전부 NAT IP(AZ마다 하나)로 CloudFront를 지나므로
 #      세면 모든 사용자의 화면 요청이 그 IP에 쌓여 플랫폼이 스스로를 막는다(ADR-0010 §4).
-#      동작은 Count(세기만)로 시작한다 — 정상 사용량을 재지 않았고, 캐시가 꺼져 있어 정적 파일까지
-#      전부 센다. 관측(CloudWatch 지표 vigilantis-platform-rate) 뒤 RATE_ACTION을 Block으로 바꾼다.
-#      up을 다시 돌리면 기존 웹 ACL의 규칙도 이 정의로 맞춘다 — 규칙을 고친 뒤 재실행이 곧 적용이다.
+#      Count(세기만)로 시작했고, 전체 공개와 함께 세 규칙 모두 Block으로 바꿨다(2026-11-19). 공개 뒤에는
+#      이 규칙들이 대입·도배를 막는 유일한 WAF 장치다. 한도는 CloudWatch 지표 vigilantis-platform-rate로 다시 본다.
+#      up을 다시 돌리면 기존 웹 ACL의 규칙과 기본 동작도 이 정의로 맞춘다 — 고친 뒤 재실행이 곧 적용이다.
 #      로그인 단계(/api/v1/auth/login*)와 비밀번호 재설정(/api/v1/auth/password-reset*)에는 더 낮은
 #      한도(LOGIN_RATE_LIMIT_PER_WINDOW)를 맨 앞(우선순위 0)에 따로 건다(#522 C) — 비밀번호 대입에는 전 경로
 #      한도가 넉넉하다. 로그인한 화면이 부르는 /auth/me · /auth/activity · /auth/logout 은 세지 않는다 —
@@ -208,16 +209,16 @@ DEREGISTRATION_DELAY_SECONDS = 30  # TG 연결 비우기 대기 — target_group
 WAF_IPSET = f"{PREFIX}-allow"
 WAF_NAT_IPSET = f"{PREFIX}-nat"  # 속도 제한에서 빼는 NAT 공인 IP(안전 가드 ⑦)
 WAF_ACL = f"{PREFIX}-waf"
-# 속도 제한(안전 가드 ⑦) — 잠정값. Count 기간의 관측으로 다시 정한다(#484)
+# 속도 제한(안전 가드 ⑦) — 잠정값. Block 이후의 관측으로 다시 정한다(#484)
 RATE_LIMIT_PER_WINDOW = 1000
 RATE_WINDOW_SECONDS = 300
-RATE_ACTION = "Count"  # 관측 뒤 "Block"
+RATE_ACTION = "Block"  # 전체 공개와 함께 Count에서 전환(2026-11-19)
 # 로그인 경로 속도 제한(#522 C) — 잠정값. 사람이 5분에 로그인 단계를 100번 밟을 일은 없다. Count 관측으로 다시 정한다
 # 대입 대상인 경로만 — 로그인 6단계 · 비밀번호 재설정 2개(routers/auth.py). /me · /activity · /logout 은 뺀다
 # bytes — get_web_acl 이 SearchString 을 bytes 로 돌려준다(멱등 비교)
 LOGIN_PATH_PREFIXES = (b"/api/v1/auth/login", b"/api/v1/auth/password-reset")
 LOGIN_RATE_LIMIT_PER_WINDOW = 100
-LOGIN_RATE_ACTION = "Count"  # 관측 뒤 "Block"
+LOGIN_RATE_ACTION = "Block"  # 전체 공개와 함께 Count에서 전환(2026-11-19)
 # 공개 신청 접수 속도 제한(#522 D) — 잠정값. 사람이 5분에 신청서를 20번 낼 일은 없고, 한 회사(같은 공인 IP)에서
 # 여럿이 내도 닿지 않는다. WAF 가 받는 하한은 10이다. Count 관측으로 다시 정한다
 # 접수 하나만 — routers/signup_requests.py 의 create_signup_request. 같은 접두의 관리 라우트(GET · PUT · …/approve)는 뺀다
@@ -225,7 +226,7 @@ LOGIN_RATE_ACTION = "Count"  # 관측 뒤 "Block"
 SIGNUP_PATH = b"/api/v1/signup-requests"
 SIGNUP_METHOD = b"POST"
 SIGNUP_RATE_LIMIT_PER_WINDOW = 20
-SIGNUP_RATE_ACTION = "Count"  # 관측 뒤 "Block"
+SIGNUP_RATE_ACTION = "Block"  # 전체 공개와 함께 Count에서 전환(2026-11-19)
 CF_COMMENT = PREFIX  # CloudFront 배포는 태그로 찾기 어렵다 — comment로 식별한다
 CF_HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"  # CloudFront 별칭 레코드의 고정 호스팅 영역 ID(AWS 문서 · 전 계정 공통)
 # AWS 관리형 정책 ID(전 계정 공통)
@@ -358,9 +359,9 @@ def listener_rules(tg_api: str, tg_web: str, origin_value: str) -> list[dict]:
 
 
 def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
-    """로그인 경로 → 공개 신청 접수 → IP당 속도 제한(셋 다 NAT 제외) → 허용 IP만 통과 → 기본 차단(안전 가드 ⑦).
+    """로그인 경로 → 공개 신청 접수 → IP당 속도 제한(셋 다 NAT 제외) → 허용 IP → 기본 허용(안전 가드 ⑦).
 
-    로그인이 없는 MVP라 허용 IP가 출입문이다(#438 ④ 전까지). 속도 규칙은 허용 규칙보다 앞이어야
+    2026-11-19부터 기본 동작이 Allow라 허용 IP는 출입문이 아니다(ADR-0010 6차 개정). 속도 규칙은 허용 규칙보다 앞이어야
     평가된다 — 허용이 맞으면 WAF가 거기서 끝낸다. 경로 규칙 둘이 전 경로 규칙보다 앞인 것은 Block 으로
     바뀌었을 때 더 낮은 한도가 먼저 끊게 하려는 것이다(Count 는 평가를 끝내지 않아 순서와 무관하게 다 센다).
     로그인과 신청 접수는 경로가 겹치지 않아 둘 사이의 순서에는 뜻이 없다.
@@ -433,7 +434,33 @@ def waf_rules(ipset_arn: str, nat_ipset_arn: str) -> list[dict]:
         "Action": {"Allow": {}},
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                              "MetricName": f"{PREFIX}-allow"},
-    }]
+    }, *(_managed_rule(name, priority, group, overrides)
+         for priority, (name, group, overrides) in enumerate(MANAGED_RULE_GROUPS, start=4))]
+
+
+# AWS 관리형 규칙(ADR-0010 6차 개정) — 허용 IP(우선순위 3) 뒤라 허용 목록(NAT 포함)은 거치지 않는다.
+# 웹의 서버 측 API 호출이 NAT IP로 오므로, 본문 검사 규칙이 앱 자신의 요청을 막지 않게 하려는 배치다.
+# 셋째 칸은 Count로 낮출 그룹 안 규칙 이름이다. 지금은 비어 있어 본문 크기(8KB) 규칙 SizeRestrictions_BODY도 Block이다.
+# 앱이 본문 상한을 먼저 거는 경로는 공개 신청 접수 하나뿐이고, 그 밖의 경로는 미인증 요청도 본문을 끝까지 읽은 뒤
+# 거절한다. 인증 전 크기 제약은 배포 계층에 두는 전제이고(apps/core-api/auth/README.md §운영 주의점), 이 규칙이 그 자리다
+MANAGED_RULE_GROUPS = (
+    ("aws-ip-reputation", "AWSManagedRulesAmazonIpReputationList", ()),
+    ("aws-common", "AWSManagedRulesCommonRuleSet", ()),
+)
+
+
+def _managed_rule(name: str, priority: int, group: str, count_rules: tuple[str, ...]) -> dict:
+    statement: dict = {"VendorName": "AWS", "Name": group}
+    if count_rules:
+        statement["RuleActionOverrides"] = [{"Name": rule, "ActionToUse": {"Count": {}}} for rule in count_rules]
+    return {
+        "Name": name,
+        "Priority": priority,
+        "Statement": {"ManagedRuleGroupStatement": statement},
+        "OverrideAction": {"None": {}},  # 그룹 안 규칙의 동작(Block)을 그대로 쓴다
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": f"{PREFIX}-{name}"},
+    }
 
 
 # ---- 외부 알림 배포(#493 PR3) — 기본은 꺼짐. --notification-config로 명시해야 켜진다
@@ -918,7 +945,8 @@ def certificate_covers(cert: dict, domain: str) -> bool:
 def validate_allow_cidrs(cidrs: list[str]) -> list[str]:
     """WAF 허용 목록 검사 — IPv4 CIDR만, /MIN_ALLOW_PREFIX보다 넓으면 거부한다.
 
-    로그인이 없는 MVP라 허용 IP가 출입문이다(ADR-0010 §4). WAF는 /0만 거절하므로 0.0.0.0/1 같은
+    MVP에서는 허용 IP가 출입문이었다(ADR-0010 §4). 6차 개정으로 기본 허용이 된 뒤에도 검사는 남긴다.
+    WAF는 /0만 거절하므로 0.0.0.0/1 같은
     광역이 그대로 통과한다 — 여기서 막는다. 호스트 비트가 섞인 값(1.2.3.4/24)도 오타로 보고 거부한다.
     """
     out = []
@@ -931,7 +959,7 @@ def validate_allow_cidrs(cidrs: list[str]) -> list[str]:
             sys.exit(f"--allow-cidr {raw}: IPv4만 받는다(WAF IP 집합이 IPV4다)")
         if net.prefixlen < MIN_ALLOW_PREFIX:
             sys.exit(f"--allow-cidr {raw}: /{MIN_ALLOW_PREFIX}보다 넓은 범위는 받지 않는다 — "
-                     "로그인이 없는 MVP라 허용 IP가 출입문이다(ADR-0010 §4)")
+                     "허용 목록은 좁은 범위만 받는다(ADR-0010 §4)")
         out.append(str(net))
     return out
 
@@ -1772,12 +1800,20 @@ def _covers(current, desired) -> bool:
     return current == desired
 
 
+def _override_names(rule: dict) -> list[str]:
+    statement = rule.get("Statement", {}).get("ManagedRuleGroupStatement") or {}
+    return [o.get("Name") for o in statement.get("RuleActionOverrides") or []]
+
+
 def _same_rules(current: list[dict], desired: list[dict]) -> bool:
     by_priority = sorted(current, key=lambda r: r.get("Priority", 0))
-    return _covers(by_priority, desired)
+    # _covers는 desired에 없는 키를 보지 않는다. Count 덮어쓰기를 정의에서 빼도 기존 ACL에 남은 것은
+    # 「같음」이 되어 지워지지 않으므로, 관리형 규칙의 덮어쓰기 목록은 이름까지 따로 맞춘다
+    return (_covers(by_priority, desired)
+            and [_override_names(r) for r in by_priority] == [_override_names(r) for r in desired])
 
 
-_ACL_DEFAULT_ACTION = {"Block": {}}
+_ACL_DEFAULT_ACTION = {"Allow": {}}  # 전체 공개(2026-11-19 · ADR-0010 6차 개정). 그 전에는 Block + 허용 IP
 _ACL_VISIBILITY = {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True, "MetricName": WAF_ACL}
 
 
@@ -1785,7 +1821,8 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidrs: list[str]) -> str:
     """허용 IP 집합 · NAT IP 집합 · 웹 ACL을 맞춘다. 웹 ACL이 이미 있으면 규칙을 waf_rules()로 맞춘다.
 
     규칙을 생성 때만 넣으면 waf_rules()를 고쳐도 이미 배포된 플랫폼에는 들어가지 않는다(#484).
-    규칙이 이미 같으면 바꾸지 않는다 — 두 번째 실행은 변경 0이다.
+    기본 동작도 같이 본다 — 규칙만 비교하면 Block으로 세운 기존 ACL이 Allow로 바뀌지 않는다.
+    규칙과 기본 동작이 이미 같으면 바꾸지 않는다 — 두 번째 실행은 변경 0이다.
     """
     ipset_arn = _ensure_ipset(waf, WAF_IPSET, cidrs, "허용 IP")
     nat_ipset_arn = _ensure_ipset(waf, WAF_NAT_IPSET, nat_cidrs, "NAT IP(속도 제한 제외)")
@@ -1793,10 +1830,11 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidrs: list[str]) -> str:
     acl = _find_acl(waf)
     if acl:
         cur = waf.get_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"])
-        if not _same_rules(cur["WebACL"].get("Rules", []), rules):
+        if (cur["WebACL"].get("DefaultAction") != _ACL_DEFAULT_ACTION
+                or not _same_rules(cur["WebACL"].get("Rules", []), rules)):
             waf.update_web_acl(Name=WAF_ACL, Scope="CLOUDFRONT", Id=acl["Id"], DefaultAction=_ACL_DEFAULT_ACTION,
                                Rules=rules, VisibilityConfig=_ACL_VISIBILITY, LockToken=cur["LockToken"])
-            print(f"[platform] WAF 웹 ACL {WAF_ACL} 규칙 갱신 — 로그인 {LOGIN_RATE_LIMIT_PER_WINDOW}건"
+            print(f"[platform] WAF 웹 ACL {WAF_ACL} 갱신(기본 허용) — 로그인 {LOGIN_RATE_LIMIT_PER_WINDOW}건"
                   f"({LOGIN_RATE_ACTION}) · 신청 접수 {SIGNUP_RATE_LIMIT_PER_WINDOW}건({SIGNUP_RATE_ACTION}) · "
                   f"전 경로 {RATE_LIMIT_PER_WINDOW}건/{RATE_WINDOW_SECONDS}초({RATE_ACTION}) → 허용 IP")
         return acl["ARN"]
@@ -1808,7 +1846,7 @@ def _ensure_waf(waf, cidrs: list[str], nat_cidrs: list[str]) -> str:
             VisibilityConfig=_ACL_VISIBILITY, Tags=_kv_tags(WAF_ACL))["Summary"]["ARN"],
         f"WAF 웹 ACL {WAF_ACL} 생성(IP 집합 전파)", ("WAFUnavailableEntityException",), timeout=300,
     )
-    print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 차단 · 속도 제한 로그인 {LOGIN_RATE_ACTION} · "
+    print(f"[platform] WAF 웹 ACL {WAF_ACL} 생성(기본 허용 · 속도 제한 로그인 {LOGIN_RATE_ACTION} · "
           f"신청 접수 {SIGNUP_RATE_ACTION} · 전 경로 {RATE_ACTION})")
     return acl_arn
 
@@ -2102,6 +2140,28 @@ def deployment_problems(services: list[dict], expected: dict[str, str]) -> list[
     return problems
 
 
+def settled_deployment_problems(ecs, expected: dict[str, str], *, delay: float = 15, attempts: int = 20,
+                                sleep: Callable[[float], None] = time.sleep) -> list[str]:
+    """`services_stable` 통과 뒤 PRIMARY 배포가 끝날 때까지 기다렸다가 `deployment_problems`로 판정한다.
+
+    대기가 통과해도 rolloutState가 잠깐 IN_PROGRESS로 남을 수 있다(2026-11-20 deploy: 대기 통과 직후
+    IN_PROGRESS로 실패 처리됐고, 수십 초 뒤 같은 배포가 COMPLETED가 됐다). 요청한 버전이 PRIMARY이고
+    IN_PROGRESS인 동안만 더 기다린다. 롤백(다른 버전이 PRIMARY)과 FAILED는 기다리지 않고 바로 판정한다.
+    """
+    for attempt in range(attempts):
+        services = ecs.describe_services(cluster=CLUSTER, services=list(expected))["services"]
+        by_name = {svc.get("serviceName"): svc for svc in services}
+        pending = any(
+            d.get("status") == "PRIMARY" and d.get("taskDefinition") == task_def
+            and d.get("rolloutState") == "IN_PROGRESS"
+            for name, task_def in expected.items()
+            for d in by_name.get(name, {}).get("deployments", []))
+        if not pending or attempt == attempts - 1:
+            return deployment_problems(services, expected)
+        sleep(delay)
+    return deployment_problems([], expected)  # attempts < 1
+
+
 def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
            notification: Optional[dict] = None) -> None:
     ec2, ecs = c["ec2"], c["ecs"]
@@ -2143,10 +2203,7 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
     print("[platform] 서비스 안정화 대기")
     ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE],
                                            WaiterConfig={"Delay": 15, "MaxAttempts": 60})
-    problems = deployment_problems(
-        ecs.describe_services(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE])["services"],
-        {API_SERVICE: api_def, WEB_SERVICE: web_def},
-    )
+    problems = settled_deployment_problems(ecs, {API_SERVICE: api_def, WEB_SERVICE: web_def})
     if problems:
         sys.exit("배포 실패 — " + " · ".join(problems) + f" (로그: {LOG_GROUPS['api']})")
     print(f"[platform] 배포 완료 — {public_origins(dist)[0]} (AI 분석·조치 실행 디스패치 {'켬' if dispatch_enabled else '끔'})")

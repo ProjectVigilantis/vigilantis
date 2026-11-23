@@ -2189,6 +2189,27 @@ class SignupRequest(Base):
     )
 
 
+class SignupRequestDuplicate(Base):
+    """같은 이메일의 처리 중 · 승인 신청에 묶여 새 신청을 만들지 않은 접수.
+
+    키와 그때의 검증 결과 값을 남겨, 그 키의 재시도도 신청 행의 키와 같은 규칙(같은 값 202 · 다른 값 409)을 따르게 한다.
+    키는 신청 행의 키와 겹치지 않는다(접수가 키 잠금 안에서 두 표를 함께 확인한다). 보존 기준은 신청 행과 같다.
+    """
+
+    __tablename__ = "signup_request_duplicates"
+
+    idempotency_key: Mapped[str] = mapped_column(_ID, primary_key=True)
+    request_id: Mapped[str] = mapped_column(
+        _ID, ForeignKey("signup_requests.request_id", ondelete="RESTRICT"), index=True
+    )
+    company_name: Mapped[str] = mapped_column(String(100))
+    contact_name: Mapped[str] = mapped_column(String(100))
+    email: Mapped[str] = mapped_column(String(254))
+    phone: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class SignupRequestDecision(Base):
     """도입 신청의 최종 결정(승인·거절) 기록 — migration의 트리거가 일반 UPDATE·DELETE를 거절한다.
 
