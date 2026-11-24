@@ -642,7 +642,7 @@ def suspend_tenant(
     settings: TenantSettings,
     now: datetime,
 ) -> TenantDetail:
-    """원격 회수 ① 앱 겹. IAM 회수(②)는 진행 중 실행이 끝난 뒤의 운영 절차다(ADR-0012 §3).
+    """원격 회수 ① 앱 겹. 이 테넌트의 새 수집 · 분석 · 실행을 막는다(ADR-0012 §3).
 
     고객의 서비스 이용 중단(subscription_workflow.stop_service)과 같은 전이다 — 구독 계약을 해지하지 않는다.
     정지 중에도 모의 계약의 갱신 · 만료와 투영은 계속된다."""
