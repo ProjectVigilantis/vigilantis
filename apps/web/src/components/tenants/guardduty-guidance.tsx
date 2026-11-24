@@ -56,12 +56,12 @@ export function GuardDutyGuidance({ tenant }: { tenant: TenantDetail }) {
           className="h-11 px-3.5 text-sm sm:h-9"
         />
         <Link
-          href={GUARDDUTY_GUIDE_PATH}
+          href={`${GUARDDUTY_GUIDE_PATH}#how`}
           target="_blank"
           rel="noreferrer"
           className="text-link text-[13px] hover:underline"
         >
-          켜는 방법 안내 페이지
+          켜는 방법 안내 페이지 (새 탭)
         </Link>
       </div>
     </section>
