@@ -332,12 +332,10 @@ const SECTIONS: LegalSection[] = [
               ],
               [
                 E.FAILED.label,
-                '원래 실행이 실패했습니다. 실행에 쓴 제안은 이미 쓴 것으로 처리되어 같은 제안으로 다시 실행할 수 없습니다.',
+                '사양 조정이 실패해 인스턴스의 상태와 유형은 바뀌지 않았습니다. 같은 제안은 다시 실행할 수 없습니다.',
                 <>
-                  필요하면 실패 이유를 확인하고, 회사 AWS 계정에서 EC2를 조회할 권한이 있는 담당자에게 인스턴스의 지금 상태와
-                  유형을 확인받습니다. 인시던트가 {S.AWAITING_APPROVAL.label}로 돌아와 남은 제안이 있으면 그 제안을
-                  검토합니다(<Jump to="incidents-review">4-1</Jump>). 남은 제안이 없어 {S.FAILED.label}가 됐으면 확인을 마친 뒤
-                  인시던트 종료의 {NO_FURTHER}로 마무리합니다.
+                  남은 제안이 있으면 검토합니다(<Jump to="incidents-review">4-1</Jump>). 남은 제안이 없어 인시던트가{' '}
+                  {S.FAILED.label}가 됐으면 실패 사유를 확인한 뒤 {NO_FURTHER}를 누릅니다.
                 </>,
               ],
               [
