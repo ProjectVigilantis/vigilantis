@@ -92,7 +92,8 @@ const SECTIONS: LegalSection[] = [
                 ). 직원의 계정은 {ADMIN}으로 로그인한 담당자가 그 직원을 초대해 만듭니다(
                 <Jump to="users">6절</Jump>). 초대 메일에 임시 비밀번호가 들어 있습니다.
               </>,
-              '휴대전화에 설치한 인증 앱. 모든 계정이 로그인할 때 2단계 인증을 거칩니다.',
+              '휴대전화에 설치한 인증 앱. 모든 계정이 권한과 관계없이 로그인할 때마다 인증 앱으로 2단계 인증을 거칩니다.',
+              '초대 메일을 받은 메일함. 로그인 중에 이메일 확인 단계가 나오면 이 주소로 온 6자리 코드를 넣습니다.',
             ]}
           />
         </Task>
@@ -115,6 +116,10 @@ const SECTIONS: LegalSection[] = [
                 2단계 인증 등록 단계에서 인증 앱으로 QR 코드를 스캔하고, 앱에 나온 6자리 코드를 넣은 뒤{' '}
                 <Key>등록 완료</Key>를 누릅니다. 스캔이 안 되면 ‘QR을 스캔할 수 없나요?’를 펼칩니다.
               </>,
+              <>
+                이어서 이메일 확인 단계가 나옵니다. 내 이메일로 온 6자리 코드를 이메일 인증 코드 칸에 넣고{' '}
+                <Key>확인</Key>을 누릅니다. 이 단계까지 마쳐야 로그인이 끝납니다.
+              </>,
             ]}
           />
         </Task>
@@ -128,6 +133,7 @@ const SECTIONS: LegalSection[] = [
               <>
                 2단계 인증 단계에서 인증 앱의 6자리 코드를 인증 코드 칸에 넣고 <Key>확인</Key>을 누릅니다.
               </>,
+              '이메일 확인이 아직 기록되지 않은 계정이면 그다음에 이메일 확인 단계가 나옵니다. 처음 로그인할 때처럼 메일로 온 6자리 코드를 이메일 인증 코드 칸에 넣고 확인을 누릅니다. 이 단계가 나오지 않으면 2번에서 로그인이 끝납니다.',
             ]}
           />
           <GuideFigure
@@ -146,11 +152,17 @@ const SECTIONS: LegalSection[] = [
             rows={[
               [
                 `${ADMIN} (권한 ${ROLE_LABELS.ADMIN})`,
-                '모든 메뉴를 봅니다. 조치 실행 · 거절 · 인시던트 종료, 직원 초대와 권한 변경, 고객사 설정과 구독 변경을 합니다.',
+                '모든 메뉴를 봅니다. 조치 실행 · 거절 · 인시던트 종료, 근거 내려받기, 문의 보내기, 직원 초대와 권한 변경, 고객사 설정과 구독 변경을 합니다.',
               ],
               [
                 `${STAFF} · ${ROLE_LABELS.OPERATOR}`,
-                '조치 실행 · 거절 · 인시던트 종료를 합니다. 계정 메뉴는 없고, 고객사 설정과 구독은 볼 수만 있습니다.',
+                <>
+                  계정 메뉴를 뺀 화면을 보고, 고객사 설정과 구독은 볼 수만 있습니다. 조치 버튼은 눌리는 것처럼 보이지만, 실제로
+                  할 수 있는 일은 권한 {ROLE_LABELS.OPERATOR}와 별도로 계정마다 받은 기능 권한만큼입니다. 조치 실행 기능
+                  권한이 있어야 조치 실행 · 복원 · 근거 내려받기를, 인시던트 종료 기능 권한이 있어야 거절 · 종료를, 문의 등록
+                  기능 권한이 있어야 문의 보내기를 할 수 있습니다. 계정 관리 화면에서 초대한 직원은 이 기능 권한 없이
+                  시작합니다(<Jump to="users">6절</Jump>).
+                </>,
               ],
               [
                 `${STAFF} · ${ROLE_LABELS.VIEWER}`,
@@ -178,6 +190,7 @@ const SECTIONS: LegalSection[] = [
               갑니다.
             </>,
             '숫자 타일을 누르면 그 숫자의 목록으로 갑니다. 관제 중 자산은 자산 목록, 월 절감 가능액은 자산 쪽 인시던트, 처리 중인 보안 위협은 보안 쪽 인시던트, AI 추천 조치는 승인을 기다리는 AI 제안으로 이어집니다.',
+            'AI 추천 조치는 보안과 자산 양쪽에 승인 대기가 있으면 타일 자체가 눌리지 않습니다. 이때는 타일 아래 설명 줄의 보안 N건 또는 자산 N건 링크를 눌러 그쪽 목록으로 갑니다.',
             '아래쪽에서 유형별 자산 추이, 비용, 위협 이벤트를 봅니다.',
           ]}
         />
@@ -187,8 +200,8 @@ const SECTIONS: LegalSection[] = [
           caption="월 절감 가능액을 누르면 비용 최적화 제안을 볼 수 있습니다. 화면의 금액은 예시입니다."
         />
         <p>
-          다음 단계: 비용 절감 제안을 처리하려면 월 절감 가능액이나 AI 추천 조치 타일을 누르고{' '}
-          <Jump to="incidents">4절</Jump>을 따라 합니다. 자산을 먼저 살펴보려면 <Jump to="monitoring">3절</Jump>로 갑니다.
+          다음 단계: 비용 절감 제안을 처리하려면 월 절감 가능액 타일을 누르거나, AI 추천 조치 타일을 누릅니다. AI 추천
+          조치 타일이 눌리지 않으면 설명 줄의 자산 N건을 누릅니다. 그다음 <Jump to="incidents">4절</Jump>을 따라 합니다. 자산을 먼저 살펴보려면 <Jump to="monitoring">3절</Jump>로 갑니다.
         </p>
       </>
     ),
@@ -232,8 +245,12 @@ const SECTIONS: LegalSection[] = [
           EC2 인스턴스 유형을 줄여 비용을 아끼는 제안을 예로 듭니다.
         </p>
         <p>
-          준비: 조치 버튼은 {ADMIN}이나 권한이 {ROLE_LABELS.OPERATOR}인 {STAFF}으로 로그인했을 때만 누를 수 있습니다.
-          권한이 {ROLE_LABELS.VIEWER}인 계정으로는 내용만 확인하고, 조치는 그런 계정을 쓰는 동료에게 맡깁니다.
+          준비: 이 조치 실행 · {RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}은 조치 실행 기능 권한이, 제안 거절하고 종료 ·{' '}
+          {NO_FURTHER}는 인시던트 종료 기능 권한이 있는 계정이어야 서버가 받아들입니다. {ADMIN}은 둘 다 갖습니다. 권한이{' '}
+          {ROLE_LABELS.OPERATOR}인 {STAFF}은 이 기능 권한을 따로 받은 만큼만 할 수 있고, 계정 관리 화면에서 새로 초대한
+          직원은 받지 않은 상태입니다. 그런 계정에서는 버튼이 눌리는 것처럼 보여도 서버가 거절하므로, 조치와 종료는{' '}
+          {ADMIN}으로 로그인한 담당자에게 맡깁니다. 권한이 {ROLE_LABELS.VIEWER}인 계정은 버튼이 비활성이라 내용만
+          확인합니다.
         </p>
 
         <Task id="incidents-review" title="4-1. 제안 검토하기">
@@ -275,7 +292,7 @@ const SECTIONS: LegalSection[] = [
               <>
                 <Key>이 조치 실행</Key>을 누릅니다.
               </>,
-              '‘선택한 조치를 실행합니다’ 확인 창에서 대상, 자산, 지금 인스턴스 유형, 실행할 런북에서 고른 조치와 바꿀 값을 확인합니다.',
+              '‘선택한 조치를 실행합니다’ 확인 창에서 대상, 자산, 인스턴스 유형(지금 유형), 실행할 런북에서 고른 조치와 바꿀 값을 확인합니다.',
               <>
                 맞으면 <Key>실행</Key>을, 아니면 취소를 누릅니다. 조치는 실행 전 4단계 검증을 통과해야만 실행됩니다.
               </>,
@@ -287,10 +304,14 @@ const SECTIONS: LegalSection[] = [
           />
           <GuideFigure
             id="3-17"
-            alt="선택한 조치를 실행합니다 확인 창. 대상 자산, 지금 인스턴스 유형, 실행할 런북 EC2 스펙 조정과 바꿀 인스턴스 유형, 취소와 실행 버튼."
+            alt="선택한 조치를 실행합니다 확인 창. 대상 자산, 인스턴스 유형, 실행할 런북 EC2 스펙 조정과 바꿀 인스턴스 유형, 취소와 실행 버튼."
             caption="지금 유형과 바꿀 유형을 이 창에서 마지막으로 비교합니다. 실행을 누르기 전에는 아무것도 바뀌지 않습니다."
           />
-          <p>실행이 끝나면 실행 상태 표시에 따라 다음 단계가 갈립니다.</p>
+          <p>
+            실행이 끝나면 수행된 조치의 {RUNBOOK_LABELS.RUNBOOK_EC2_RIGHTSIZING} 원래 실행 줄에 나온 상태에 따라 다음 단계가
+            갈립니다. 아래 표는 그 원래 실행의 상태입니다. 나중에 직접 누른 {RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}이
+            실패하면 원래 실행은 {E.ROLLBACK_FAILED.label}로 바뀌므로 그 행을 봅니다.
+          </p>
           <LegalTable
             head={['실행 상태', '뜻', '다음 단계']}
             rows={[
@@ -311,12 +332,17 @@ const SECTIONS: LegalSection[] = [
               ],
               [
                 E.FAILED.label,
-                '실행하지 못했습니다. AWS에는 바뀐 것이 없습니다.',
-                '다시 실행하거나 다른 제안을 고릅니다.',
+                '원래 실행이 실패했습니다. 실행에 쓴 제안은 이미 쓴 것으로 처리되어 같은 제안으로 다시 실행할 수 없습니다.',
+                <>
+                  필요하면 실패 이유를 확인하고, 회사 AWS 계정에서 EC2를 조회할 권한이 있는 담당자에게 인스턴스의 지금 상태와
+                  유형을 확인받습니다. 인시던트가 {S.AWAITING_APPROVAL.label}로 돌아와 남은 제안이 있으면 그 제안을
+                  검토합니다(<Jump to="incidents-review">4-1</Jump>). 남은 제안이 없어 {S.FAILED.label}가 됐으면 확인을 마친 뒤
+                  인시던트 종료의 {NO_FURTHER}로 마무리합니다.
+                </>,
               ],
               [
                 E.ROLLBACK_FAILED.label,
-                '바뀐 상태를 되돌리지 못했습니다.',
+                '바뀐 상태를 되돌리지 못했습니다. 되돌리기가 중간에 멈춰 인스턴스가 정지된 채 남았을 수 있습니다.',
                 <>
                   곧바로 자원 상태를 확인하고 <Jump to="support">문의하기</Jump>로 알립니다.
                 </>,
@@ -362,7 +388,7 @@ const SECTIONS: LegalSection[] = [
               '실행 상태의 자산 보기 →나 관제에서 인스턴스가 새 유형으로 정상 동작하는지 확인합니다.',
               <>
                 이전 유형으로 되돌리고 싶을 때만: 수행된 조치의 완료된 실행 아래{' '}
-                <Key>{RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}</Key>를 누릅니다. 확인 창의 해제 대상이{' '}
+                <Key>{RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}</Key>을 누릅니다. 확인 창의 해제 대상이{' '}
                 {RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}인지 확인하고 해제 실행을 누릅니다.
               </>,
               <>
@@ -386,7 +412,7 @@ const SECTIONS: LegalSection[] = [
           <p>
             사양을 바꾼 뒤 인스턴스 상태 검사 같은 실행 뒤 확인에서 문제가 나오면, 시스템이 이전 인스턴스 유형으로 자동으로
             되돌립니다. 수행된 조치에서 원래 실행은 {E.ROLLED_BACK.label}이고, 그 아래 원복 줄에{' '}
-            {RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE} · {E.SUCCESS.label}과 요청 주체 ‘시스템 · 실패 후 자동 복구’가 보이면
+            {RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE} · {E.SUCCESS.label}와 요청 주체 ‘시스템 · 실패 후 자동 복구’가 보이면
             되돌리기까지 확인된 것입니다.
           </p>
           <GuideFigure
@@ -399,8 +425,8 @@ const SECTIONS: LegalSection[] = [
             items={[
               '관제에서 인스턴스가 이전 유형으로 정상 동작하는지 확인합니다.',
               <>
-                실패한 이유가 궁금하거나 다시 시도할지 판단이 어려우면 <Jump to="support">문의하기</Jump>로 이 인시던트를
-                알립니다.
+                실패한 이유가 궁금하면 <Jump to="support">문의하기</Jump>로 이 인시던트를 알립니다. 이미 쓴 제안은 다시
+                실행할 수 없습니다.
               </>,
               <>
                 확인이 끝나면 인시던트 종료의 <Key>{NO_FURTHER}</Key>로 마무리합니다(4-4의 3번과 같습니다).
@@ -449,12 +475,12 @@ const SECTIONS: LegalSection[] = [
             items={[
               <>
                 실행 중이고 유형이 제안에서 바꾸려던 새 유형: 사양이 바뀐 것이 확인된 것입니다. 그대로 두려면 4번 종료 조건으로
-                갑니다. 이전 유형으로 되돌리려면 실행 아래의 <Key>{RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}</Key>를
+                갑니다. 이전 유형으로 되돌리려면 실행 아래의 <Key>{RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}</Key>을
                 누릅니다(<Jump to="incidents-success">4-4</Jump>의 2번과 같습니다). 되돌리기 실행이 끝나면 2번부터 다시 해서
                 담당자에게 상태와 유형을 다시 확인받고, 그 결과를 이 목록과 4번 종료 조건에 다시 맞춥니다.
               </>,
               <>
-                실행 중이고 유형이 실행 전 유형: 사양이 바뀌지 않은 것입니다. {RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}는
+                실행 중이고 유형이 실행 전 유형: 사양이 바뀌지 않은 것입니다. {RUNBOOK_LABELS.RUNBOOK_EC2_REVERT_SIZE}은
                 누르지 않고 4번 종료 조건으로 갑니다.
               </>,
               <>
@@ -477,7 +503,7 @@ const SECTIONS: LegalSection[] = [
               '승인 버튼 이름이 조치에 따라 승인하고 차단 · 승인하고 해제 · 승인하고 삭제로 바뀝니다. 누르면 4-2와 같은 확인 창이 열립니다.',
               <>
                 위험도가 높은 일부 위협은 선차단 대응으로 먼저 격리된 뒤 {S.AWAITING_CLOSURE.label}로 옵니다. 격리를 풀려면{' '}
-                <Key>{RUNBOOK_LABELS.RUNBOOK_EC2_UNISOLATE}</Key>을 누릅니다.
+                <Key>{RUNBOOK_LABELS.RUNBOOK_EC2_UNISOLATE}</Key>를 누릅니다.
               </>,
               '상세에 ‘1분 안에 응답하지 않으면 서버가 자동으로 격리합니다.’가 보이면 그 안에 승인하거나 종료를 결정합니다.',
               `선차단 대응으로 ${RUNBOOK_LABELS.RUNBOOK_EC2_ISOLATE}가 끝나고 남은 제안이 없으면, 격리를 둔 채 끝낼 때 추가 조치 없이 종료를 누릅니다.`,
@@ -526,8 +552,13 @@ const SECTIONS: LegalSection[] = [
               </>,
               <>
                 초대할 직원의 이메일을 넣고 권한을 {ROLE_LABELS.ADMIN} · {ROLE_LABELS.OPERATOR} · {ROLE_LABELS.VIEWER}{' '}
-                중에서 고릅니다. 처음 값은 {ROLE_LABELS.VIEWER}입니다. {ROLE_LABELS.OPERATOR} · {ROLE_LABELS.VIEWER}를 고르면
-                {STAFF}이, {ROLE_LABELS.ADMIN} 권한을 고르면 {ADMIN}이 만들어집니다.
+                중에서 고릅니다. 처음 값은 {ROLE_LABELS.VIEWER}입니다. {ROLE_LABELS.OPERATOR} · {ROLE_LABELS.VIEWER}을
+                고르면 {STAFF}이, {ROLE_LABELS.ADMIN} 권한을 고르면 {ADMIN}이 만들어집니다.
+              </>,
+              <>
+                이 화면에서 고르는 것은 권한 하나뿐이고, 조치 실행 · 인시던트 종료 · 문의 등록 기능 권한은 함께 주어지지
+                않습니다. 그래서 권한을 {ROLE_LABELS.OPERATOR}로 초대한 직원은 조치 · 종료 · 문의를 아직 할 수 없습니다. 그
+                일은 {ADMIN}으로 로그인한 담당자나, 그 기능 권한을 이미 받은 계정을 쓰는 동료에게 맡깁니다.
               </>,
               <>
                 <Key>초대</Key>를 누릅니다. ‘직원을 초대했습니다.’가 나오면 그 직원에게 초대 메일이 나간 것입니다.
@@ -609,6 +640,12 @@ const SECTIONS: LegalSection[] = [
     body: (
       <>
         <Task title="운영팀에 문의하기">
+          <p>
+            준비: {ADMIN}이나, 문의 등록 기능 권한을 받은 {STAFF}(권한 {ROLE_LABELS.OPERATOR})으로 로그인해야 보낼 수
+            있습니다. 권한이 {ROLE_LABELS.VIEWER}인 계정이나 이 기능 권한을 받지 않은 계정(계정 관리 화면에서 새로 초대한
+            직원 포함)은 보내면 거절됩니다. 그때는 {ADMIN}으로 로그인한 담당자에게 문의를 맡기거나 아래 고객센터 연락처를
+            이용합니다.
+          </p>
           <LegalList
             numbered
             items={[
@@ -669,18 +706,33 @@ const SECTIONS: LegalSection[] = [
             [
               VIEWER_ACTION_BLOCKED,
               <>
-                내 계정의 권한이 {ROLE_LABELS.VIEWER}입니다. 조치가 필요하면 {ADMIN}을 쓰는 담당자에게 권한 변경을
-                요청합니다(
+                내 계정의 권한이 {ROLE_LABELS.VIEWER}입니다. 조치가 필요하면 {ADMIN}으로 로그인한 담당자에게 맡깁니다. 권한을{' '}
+                {ROLE_LABELS.OPERATOR}로 바꿔도 조치 실행 · 인시던트 종료 기능 권한은 따로 있어야 합니다(
                 <Jump to="users">6절</Jump>).
               </>,
             ],
             [
               ACTION_FORBIDDEN,
-              `버튼을 눌렀지만 서버가 거절했습니다. 내 계정의 권한이 바뀌었을 수 있으니 ${ADMIN}을 쓰는 담당자에게 지금 권한을 확인합니다.`,
+              <>
+                버튼을 눌렀지만 서버가 거절했습니다. 권한이 {ROLE_LABELS.OPERATOR}인 {STAFF}이면 그 일에 필요한 조치 실행
+                또는 인시던트 종료 기능 권한이 없는 것일 수 있습니다. 계정 관리 화면에서 새로 초대한 직원이 그렇습니다. 그
+                일은 {ADMIN}으로 로그인한 담당자에게 맡깁니다(<Jump to="incidents">4절</Jump> 준비). 전에는 되던 일이면 내
+                계정의 권한이 바뀌었을 수 있으니 {ADMIN}을 쓰는 담당자에게 지금 권한을 확인합니다.
+              </>,
+            ],
+            [
+              '문의 보내기에서 ‘이 작업을 할 권한이 없습니다.’',
+              <>
+                문의 등록 기능 권한이 없는 계정입니다. {ADMIN}으로 로그인한 담당자에게 문의를 맡기거나{' '}
+                <Link href={SUPPORT_CENTER_PATH} className={LINK}>
+                  고객센터
+                </Link>
+                의 연락처를 이용합니다(<Jump to="support">9절</Jump>).
+              </>,
             ],
             [
               EVIDENCE_EXPORT_BLOCKED,
-              '근거 내려받기는 조치 실행 권한이 있는 계정으로만 할 수 있습니다. 그런 계정을 쓰는 동료에게 요청합니다.',
+              `근거 내려받기는 조치 실행 기능 권한이 있는 계정으로만 할 수 있습니다. ${ADMIN}으로 로그인한 담당자에게 요청합니다.`,
             ],
             [
               '진행 중인 실행이 끝난 뒤 종료할 수 있습니다.',

@@ -31,6 +31,7 @@ export function LegalDocument({
 }) {
   const guide = layout === 'guide';
   const width = guide ? 'max-w-6xl' : 'max-w-3xl';
+  // 두 열일 때도 번호를 위에서 아래로 읽도록 grid 대신 columns로 채운다.
   const toc = (
     <ol className={`gap-x-6 text-sm sm:columns-2 ${guide ? 'xl:columns-1' : ''}`}>
       {sections.map((s) => (
