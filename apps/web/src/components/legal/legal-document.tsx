@@ -10,7 +10,7 @@ import { formatLegalDate, LEGAL_EFFECTIVE_DATE, OPERATOR_NAME, SERVICE_NAME } fr
 import { LANDING_PATH, LOGIN_PATH, PRIVACY_PATH, TERMS_PATH } from '@/lib/return-to';
 import { FOOTER_GUIDE_LINKS } from '@/lib/site-menu';
 
-export type LegalSection = { id: string; title: string; body: React.ReactNode };
+export type LegalSection = { id: string; title: string; tocTitle?: string; body: React.ReactNode };
 
 export function LegalDocument({
   title,
@@ -18,19 +18,35 @@ export function LegalDocument({
   sections,
   dated = true,
   effectiveDate = LEGAL_EFFECTIVE_DATE,
+  layout = 'policy',
 }: {
   title: string;
-  intro: React.ReactNode;
+  intro?: React.ReactNode;
   sections: LegalSection[];
   /** 시행일 줄을 보일지. 처리방침 · 약관은 보이고, 시행일이 없는 안내 문서는 끈다. */
   dated?: boolean;
   /** 시행일(YYYY-MM-DD). 약관은 처리방침과 날짜가 달라 따로 넘긴다. */
   effectiveDate?: string;
+  layout?: 'policy' | 'guide';
 }) {
+  const guide = layout === 'guide';
+  const width = guide ? 'max-w-6xl' : 'max-w-3xl';
+  // 두 열일 때도 번호를 위에서 아래로 읽도록 grid 대신 columns로 채운다.
+  const toc = (
+    <ol className={`gap-x-6 text-sm sm:columns-2 ${guide ? 'xl:columns-1' : ''}`}>
+      {sections.map((s) => (
+        <li key={s.id} className="mb-1.5 break-inside-avoid">
+          <a href={`#${s.id}`} className="text-foreground-secondary hover:text-foreground transition-colors">
+            {s.tocTitle ?? s.title}
+          </a>
+        </li>
+      ))}
+    </ol>
+  );
   return (
     <div className="bg-background flex flex-1 flex-col">
       <header className="dark bg-shell text-foreground">
-        <div className="mx-auto flex h-16 w-full max-w-3xl items-center justify-between px-4 sm:px-6">
+        <div className={`mx-auto flex h-16 w-full items-center justify-between gap-2 px-4 sm:px-6 ${width}`}>
           <Link href={LANDING_PATH} className="flex items-center gap-2.5">
             <VigilantisLogo className="size-[33px] text-white" />
             <span className="text-[23px] font-bold tracking-tight">{SERVICE_NAME}</span>
@@ -45,40 +61,41 @@ export function LegalDocument({
         </div>
       </header>
 
-      <article className="mx-auto flex w-full max-w-3xl flex-col gap-10 px-4 py-12 sm:px-6">
-        <div className="flex flex-col gap-3">
+      <article className={`mx-auto flex w-full flex-col gap-10 px-4 py-12 sm:px-6 ${width} ${guide ? 'xl:grid xl:grid-cols-[12rem_minmax(0,1fr)] xl:gap-x-6' : ''}`}>
+        <div className={`flex flex-col gap-3 ${guide ? 'xl:col-span-2' : ''}`}>
           <h1 className="text-3xl font-bold tracking-tight">{title}</h1>
           {dated ? (
             <p className="text-muted-foreground text-sm">시행일 {formatLegalDate(effectiveDate)}</p>
           ) : null}
-          <div className="text-foreground-secondary text-[15px] leading-7">{intro}</div>
+          {intro != null && <div className="text-foreground-secondary text-[15px] leading-7">{intro}</div>}
         </div>
 
-        <nav aria-label="목차">
-          <h2 className="mb-3 text-sm font-semibold">목차</h2>
-          {/* 2열은 위에서 아래로 채운다. 격자로 두면 1 · 2가 한 줄에 놓여 왼쪽 열만 읽을 때 번호가 건너뛴다. */}
-          <ol className="gap-x-6 text-sm sm:columns-2">
-            {sections.map((s) => (
-              <li key={s.id} className="mb-1.5 break-inside-avoid">
-                <a href={`#${s.id}`} className="text-foreground-secondary hover:text-foreground transition-colors">
-                  {s.title}
-                </a>
-              </li>
-            ))}
-          </ol>
+        <nav aria-label="목차" className={guide ? 'bg-muted/50 rounded-lg border px-3 xl:sticky xl:top-6 xl:max-h-[calc(100dvh-3rem)] xl:self-start xl:overflow-y-auto xl:py-3' : undefined}>
+          {guide && (
+            <details className="xl:hidden">
+              <summary className="focus-visible:outline-ring cursor-pointer py-3 text-sm font-semibold">목차 보기</summary>
+              {toc}
+            </details>
+          )}
+          <div className={guide ? 'hidden xl:block' : undefined}>
+            <h2 className="mb-3 text-sm font-semibold">목차</h2>
+            {toc}
+          </div>
         </nav>
 
-        {sections.map((s) => (
-          <section key={s.id} id={s.id} aria-labelledby={`${s.id}-title`} className="flex scroll-mt-6 flex-col gap-3">
-            <h2 id={`${s.id}-title`} className="text-lg font-bold">
-              {s.title}
-            </h2>
-            <div className="text-foreground-secondary flex flex-col gap-3 text-[15px] leading-7">{s.body}</div>
-          </section>
-        ))}
+        <div className="flex min-w-0 flex-col gap-10">
+          {sections.map((s) => (
+            <section key={s.id} id={s.id} aria-labelledby={`${s.id}-title`} className="flex scroll-mt-6 flex-col gap-3">
+              <h2 id={`${s.id}-title`} className="text-lg font-bold">
+                {s.title}
+              </h2>
+              <div className="text-foreground-secondary flex flex-col gap-3 text-[15px] leading-7">{s.body}</div>
+            </section>
+          ))}
+        </div>
       </article>
 
-      <LegalFooter />
+      <LegalFooter width={width} />
     </div>
   );
 }
@@ -111,10 +128,10 @@ export function FooterLinks() {
   );
 }
 
-function LegalFooter() {
+function LegalFooter({ width }: { width: string }) {
   return (
     <footer className="border-t">
-      <div className="text-muted-foreground mx-auto flex w-full max-w-3xl flex-wrap items-center justify-between gap-4 px-4 py-8 text-sm sm:px-6">
+      <div className={`text-muted-foreground mx-auto flex w-full flex-wrap items-center justify-between gap-4 px-4 py-8 text-sm sm:px-6 ${width}`}>
         <span>
           © {SERVICE_NAME} · {OPERATOR_NAME}
         </span>

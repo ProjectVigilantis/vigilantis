@@ -204,6 +204,20 @@ test('상세 화면: 요청 주체 · 대상은 감사 기록에서만, 없으�
     // 감사 기록이 없는 실행(legacy)의 대상을 추천 · 인시던트 ARN으로 채우지 않는다.
     assert.doesNotMatch(executions, /acl-recommended|i-subject/);
     assert.match(executions, /PRECHECK_AWS_ERROR/);
+    // 4-6절은 사양 조정 원 실행의 결과를 판정하지 못한 경우다. 원복 실패나 조회 재시도 중과는 조치가 다르다.
+    const sizing = execution('sizing', {
+      runbook_id: 'RUNBOOK_EC2_RIGHTSIZING', status: 'UNVERIFIED',
+      verification_hold: { reason_code: 'PRECHECK_AWS_ERROR', attempts: 3, first_failed_at: T0, last_failed_at: T0 },
+    });
+    for (const [row, expected] of [
+      [sizing, true],
+      [{ ...sizing, status: 'IN_PROGRESS' }, false],
+      [{ ...sizing, status: 'FAILED', runbook_id: 'RUNBOOK_EC2_REVERT_SIZE', parent_execution_id: 'origin' }, false],
+      [{ ...sizing, runbook_id: 'RUNBOOK_EC2_ISOLATE' }, false],
+    ] as const) {
+      const html = render(audit, { ...detail, executions: [row] });
+      assert.equal(html.includes('href="/guides/usage#incidents-unverified"'), expected, `${row.runbook_id}: ${row.status}`);
+    }
     assert.match(render(audit, closed), /종료 처리[\s\S]*closer@example\.com/);
     assert.match(ready, /관측된 출발지[\s\S]*203\.0\.113\.7/);
     // 분석 결과(서버 계산)가 AI 요약보다 앞 구역에 따로 선다.
