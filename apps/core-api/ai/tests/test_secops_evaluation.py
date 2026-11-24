@@ -6,13 +6,7 @@ from dataclasses import replace
 
 import pytest
 from ai import agent
-from ai.agent import (
-    CandidateProposalOutput,
-    EvidenceSummaryOutput,
-    ProposedCandidate,
-    SecOpsEvidenceDecisionOutput,
-    SecOpsGraphVariant,
-)
+from ai.agent import SecOpsEvidenceDecisionOutput
 from ai.evaluation.common.fingerprints import input_fingerprint
 from ai.capabilities import secops_action_targets
 from ai.evaluation.secops import cli, dataset, derived_sources, runner
@@ -88,21 +82,6 @@ def _client(case, *, proposal=None):
     ])
 
 
-def _fallback_client(case, *, proposal=True, **parameters):
-    data = case.graph_input
-    event = data.evidences[0].content.event
-    candidate = ProposedCandidate(
-        runbook_id="RUNBOOK_NACL_ADD_DENY", target_arn=data.asset_context.relationships[0].target_arn,
-        evidence_ids=[data.evidences[0].evidence_id],
-        **{"rule_number": 100, "cidr_block": f"{event.payload.source_ip}/32", "protocol": "tcp", **parameters},
-    )
-    return FakeAIModelClient([
-        CandidateProposalOutput(candidates=[candidate] if proposal else []),
-        EvidenceSummaryOutput(observation="SSH 실패가 관측됐다.", diagnosis="반복 인증 시도다.",
-                              rationale="출발지 차단을 제안한다."),
-    ])
-
-
 def _run(cases, repeats=1):
     settings = Settings(_env_file=None, DATABASE_URL="unused", **{
         name: Settings.model_fields[name].default for name in runner.SETTING_NAMES
@@ -160,12 +139,6 @@ def test_approved_snapshot_is_the_measured_evidence_first_version():
         assert approved["version"] == agent.SECOPS_PROMPT_VERSION
     assert approved["measured_prompt_sha256"] == approved["prompt_sha256"]
     assert (ROOT / approved["result"]).is_file()
-    # 대비책의 프롬프트 지문은 근거 선행 지문과 다르고 v1.1.0 지문을 그대로 재현한다.
-    fallback = snapshot["fallback"]
-    assert fallback["version"] == "v1.1.0" and fallback["graph_variant"] == "CANDIDATE_FIRST"
-    assert runner.prompt_fingerprint(SecOpsGraphVariant.CANDIDATE_FIRST) == fallback["prompt_sha256"]
-    assert fallback["prompt_sha256"] != approved["prompt_sha256"]
-    assert (ROOT / fallback["plan"]).is_file()
 
 
 def test_rubric_adds_decision_support_check_and_drops_reassessment_wording():
@@ -228,9 +201,6 @@ def test_secops_parameter_constraints_are_not_sent_to_the_model(monkeypatch):
     result = runner.report(run, cases, load_answers(cases))
     assert runner.prompt_fingerprint() == run["prompt_sha256"]
     assert result["request_sha256"] == run["request_sha256"]
-    # 대비책은 제약을 여전히 보내므로 지문이 달라진다.
-    assert runner.prompt_fingerprint(SecOpsGraphVariant.CANDIDATE_FIRST) != read_json(
-        ROOT / "prompt_snapshot.json")["fallback"]["prompt_sha256"]
 
 
 @pytest.mark.parametrize("change", ["prompt", "payload", "response_schema"])
@@ -511,26 +481,14 @@ def test_c10_accepts_only_absence_and_rejects_a_proposal_that_nacl_scope_cannot_
     assert score_structured(absence, answer).verdict == "PASS"
 
 
-@pytest.mark.parametrize("proposal", [True, False])
-def test_candidate_first_fallback_variant_is_measurable_with_two_calls(proposal):
-    case = load_cases()[0]
-    record = runner.run_one(case, 1, _fallback_client(case, proposal=proposal),
-                            SecOpsGraphVariant.CANDIDATE_FIRST)
-    assert record["model_calls"] == agent.SECOPS_FALLBACK_MODEL_CALLS == 2
-    assert record["output"]["invocation_status"] == ("SUCCEEDED" if proposal else "NO_PROPOSAL")
-
-
-def test_new_run_records_variant_and_sizes_calls_by_it():
+def test_new_run_sizes_model_calls_and_http_attempts_for_the_fixed_set():
     cases = load_cases()
     settings = Settings(_env_file=None, DATABASE_URL="unused", **{
         name: Settings.model_fields[name].default for name in runner.SETTING_NAMES
     })
     default = runner.new_run(cases, 3, settings, "default")
-    fallback = runner.new_run(cases, 3, settings, "fallback", SecOpsGraphVariant.CANDIDATE_FIRST)
     assert default["graph_variant"] == "EVIDENCE_FIRST" and default["model_calls_upper_bound"] == 30
     assert default["http_attempts_upper_bound"] == 30 * settings.OPENAI_MAX_ATTEMPTS
-    assert fallback["graph_variant"] == "CANDIDATE_FIRST" and fallback["model_calls_upper_bound"] == 60
-    assert fallback["prompt_sha256"] != default["prompt_sha256"]
 
 
 def test_dispatcher_rejection_is_preserved_after_a_valid_graph_dto(monkeypatch):
@@ -731,21 +689,26 @@ def test_fake_measurements_never_establish_a_real_baseline():
 
 
 @pytest.mark.parametrize("variant,eligible", [
-    (SecOpsGraphVariant.EVIDENCE_FIRST, True), (SecOpsGraphVariant.CANDIDATE_FIRST, False),
+    ("EVIDENCE_FIRST", True), ("CANDIDATE_FIRST", False),
 ])
 def test_only_evidence_first_runs_can_be_current_service_or_baseline_candidate(variant, eligible):
     cases = load_cases()
     settings = Settings(_env_file=None, DATABASE_URL="unused", **{
         name: Settings.model_fields[name].default for name in runner.SETTING_NAMES
     })
-    run = runner.new_run(cases, 3, settings, "fixture-run", variant)
+    run = runner.new_run(cases, 3, settings, "fixture-run")
+    run["graph_variant"] = variant
+    if not eligible:
+        historical = next(item for item in read_json(ROOT / "prompt_snapshot.json")["history"]
+                          if item.get("graph_variant") == variant)
+        run["prompt_sha256"] = historical["prompt_sha256"]
     run["records"] = [runner.run_one(case, n, _client(case)) for n in range(1, 4) for case in cases]
     for record in run["records"]:
         record["data_source"] = "real_model"
         record["model_snapshots"] = ["snapshot-1"]
     run["state"] = "COMPLETE"
     result = runner.report(run, cases, load_answers(cases), _review(run))
-    assert result["graph_variant"] == variant.value
+    assert result["graph_variant"] == variant
     assert result["counts"]["PASS"] == 30
     assert result["current_service"] is eligible
     assert result["baseline_candidate"] is eligible
@@ -756,9 +719,7 @@ def test_only_evidence_first_runs_can_be_current_service_or_baseline_candidate(v
 
 @pytest.mark.parametrize("argv,calls", [
     ([], None), (["--check-inputs"], None),
-    # 10건 × 1회 × 호출 수. 근거 선행은 1회, 대비책은 2회다.
-    (["--estimate"], 10), (["--estimate", "--variant", "EVIDENCE_FIRST"], 10),
-    (["--estimate", "--variant", "CANDIDATE_FIRST"], 20),
+    (["--estimate"], 10),
 ])
 def test_offline_cli_never_builds_a_paid_client(monkeypatch, capsys, cli_source_cases, argv, calls):
     def forbidden(*args, **kwargs):

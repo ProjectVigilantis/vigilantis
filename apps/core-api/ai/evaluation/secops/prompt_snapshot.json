@@ -15,14 +15,14 @@
     "result": "results/README.md",
     "note": "비율 기준 충족이며 전원 PASS가 아니다. FAIL 1건 — C04/6 risk_reason(입력의 현재 규칙 기준 위험 근거인 빈도 조건 미충족을 보존된 서버 초기 판정의 근거로 귀속, 작성자 판정) — 이 남아 보고서의 전원 PASS 지표 quality_pass·최상위 baseline_candidate는 false다. 측정한 소스는 112e8002에 커밋 전 수정을 더한 작업 트리이며 커밋된 트리의 측정이 아니다. 같은 10케이스 셋의 1라운드 v2.0.5 FAIL(89/100, C10 0/10)과 9케이스 승인판 v2.0.5는 history에 있다. 대비책(fallback)은 2026-11-16 이후 운영을 관찰한 뒤 제거 여부를 정한다는 작성자 결정에 따라 그대로 유지하며, 이 결정은 위 품질 지표를 바꾸지 않는다."
   },
-  "fallback": {
-    "version": "v1.1.0",
-    "graph_variant": "CANDIDATE_FIRST",
-    "prompt_sha256": "f1afcd2ff52214ed75d0f357d321bfa1915dde67a4dceb005848993d54c5ee92",
-    "plan": "plans/v1.1.0-reassess-removal.md",
-    "note": "CANDIDATE_FIRST 대비책 그래프의 프롬프트다. 의미 측정은 된 적 없고, 2026-11-09 1라운드 비교 측정에서 구조화 21/21 PASS·내부 식별자 19/21 FAIL(서버 사유 코드 인용 결함)이었다. 비교용이라 기준선 후보가 될 수 없다."
-  },
   "history": [
+    {
+      "version": "v1.1.0",
+      "graph_variant": "CANDIDATE_FIRST",
+      "prompt_sha256": "f1afcd2ff52214ed75d0f357d321bfa1915dde67a4dceb005848993d54c5ee92",
+      "plan": "plans/v1.1.0-reassess-removal.md",
+      "note": "CANDIDATE_FIRST 대비책 그래프의 프롬프트다. 의미 측정은 된 적 없고, 2026-11-09 1라운드 비교 측정에서 구조화 21/21 PASS·내부 식별자 19/21 FAIL(서버 사유 코드 인용 결함)이었다. 비교용이라 기준선 후보가 될 수 없다."
+    },
     {
       "version": "v2.0.5",
       "prompt_sha256": "b9d76896392a29c188c3f1130e464472128729be9294f7ae9762a315fbb4f118",

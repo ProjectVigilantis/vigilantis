@@ -198,12 +198,6 @@ class Settings(BaseSettings):
     # (ai/report_draft.py). 신고 초안은 HTTP 요청 안에서 기다리므로 단계별 상한의 합이 CloudFront
     # 응답 대기(60초)보다 작아야 해 50초까지만 받는다. R7–R9 high 성공 호출의 최댓값은 37.7초였다.
     REPORT_DRAFT_OPENAI_TIMEOUT_SECONDS: float = Field(default=45.0, gt=0, le=50)
-    # SecOps 그래프 선택(#583 2단계 대비책). EVIDENCE_FIRST는 근거 3줄+decision 1회 호출 뒤
-    # 코드가 실행 계획을 조립하고, CANDIDATE_FIRST는 1단계 그래프(후보·요약 2회 호출)다.
-    # 어느 쪽도 reviewed_risk_level을 싣지 않으므로 Workflow 검증(_contract_violation)은
-    # 같다. 값의 원천은 ai/agent.py SecOpsGraphVariant이며, 전환 기준은 미정이다
-    # (이슈 #583 "공통 — 대비책").
-    SECOPS_GRAPH_VARIANT: Literal["EVIDENCE_FIRST", "CANDIDATE_FIRST"] = "EVIDENCE_FIRST"
 
     @field_validator("CORS_ALLOW_ORIGINS", mode="after")
     @classmethod

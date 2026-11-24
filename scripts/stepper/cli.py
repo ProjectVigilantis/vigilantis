@@ -126,8 +126,7 @@ def estimate_calls(pending: list[dict]) -> int:
     """analyze 한 번의 예상 모델 호출 수(재시도 제외).
 
     FinOps EC2(다운사이징)는 근거 요약·추천·절감 단가 3회, 그 밖의 FinOps는 2회, SecOps는
-    근거 선행 1회다(ai/agent.py SECOPS_MODEL_CALLS — ADR-0005 1차 개정 #583 2단계. 대비책
-    CANDIDATE_FIRST 그래프는 2회이며 여기서는 기본 그래프 기준으로 센다).
+    근거 선행 1회다(ai/agent.py SECOPS_MODEL_CALLS — ADR-0005 1차 개정 #583).
     """
     total = 0
     for item in pending:

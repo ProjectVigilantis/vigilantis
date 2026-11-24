@@ -58,41 +58,23 @@ SERVICE_FILES = (
 )
 
 
-def prompt_fingerprint(variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> str:
-    if variant is agent.SecOpsGraphVariant.EVIDENCE_FIRST:
-        # 근거 선행 호출은 파라미터 제약을 모델에 보내지 않는다(조치 메뉴는 목적 문구뿐, 파라미터는 코드가 조립).
-        # 그래서 제약 변경은 SecOps 요청을 바꾸지 않아 지문에서 뺀다.
-        return digest({
-            "evidence": agent._SECOPS_EVIDENCE_PROMPT,
-            "schemas": [agent.SecOpsEvidenceDecisionOutput.model_json_schema()],
-        })
-    # CANDIDATE_FIRST(대비책)는 1단계 구성을 그대로 지문에 건다.
-    # 현재 서비스로 재조립·대조한 전체 동결 세트의 메뉴만 사용한다.
-    # 공유 맵의 FinOps 전용 제약 변경이 SecOps 승인 지문을 흔들지 않게 한다.
-    runbooks = {capability.runbook_id for case in load_cases()
-                for capability in case.graph_input.capabilities}
+def prompt_fingerprint() -> str:
+    # 근거 선행 호출은 파라미터 제약을 모델에 보내지 않는다(조치 메뉴는 목적 문구뿐, 파라미터는 코드가 조립).
+    # 그래서 제약 변경은 SecOps 요청을 바꾸지 않아 지문에서 뺀다.
     return digest({
-        "summary": agent._SECOPS_SUMMARY_PROMPT,
-        "proposal": agent._SECOPS_PROPOSAL_PROMPT,
-        "schemas": [model.model_json_schema() for model in (
-            agent.EvidenceSummaryOutput, agent.CandidateProposalOutput,
-        )],
-        "parameter_constraints": {
-            runbook: agent._PARAMETER_CONSTRAINTS.get(runbook, ()) for runbook in runbooks
-        },
+        "evidence": agent._SECOPS_EVIDENCE_PROMPT,
+        "schemas": [agent.SecOpsEvidenceDecisionOutput.model_json_schema()],
     })
 
 
-def fingerprints(cases: list[EvalCase],
-                 variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> dict[str, Any]:
+def fingerprints(cases: list[EvalCase]) -> dict[str, Any]:
     # 부분 측정도 전체 답지에서 선택한다. 품질 판정 분모와 대역 재구성을 혼동하지 않는다.
     answers = load_answers(load_cases())
     return {
         "inputs_sha256": input_fingerprint(cases),
         "answers_sha256": digest(read_json(ROOT / "answers.json")),
         "rubric_sha256": digest(read_json(ROOT / "rubric.json")),
-        "prompt_sha256": prompt_fingerprint(variant),
-        # 요청 지문은 기본(근거 선행) 서비스 기준이다. 대비책 측정은 비교용이라 current_service가 false로 남는다.
+        "prompt_sha256": prompt_fingerprint(),
         "request_sha256": digest(request_manifest(cases, answers)),
         # Windows autocrlf의 줄바꿈 차이를 코드 의미의 변경으로 세지 않는다.
         "service_sha256": digest({path: (REPO_ROOT / path).read_text(encoding="utf-8")
@@ -102,23 +84,17 @@ def fingerprints(cases: list[EvalCase],
     }
 
 
-def variant_model_calls(variant: agent.SecOpsGraphVariant) -> int:
-    return (agent.SECOPS_MODEL_CALLS if variant is agent.SecOpsGraphVariant.EVIDENCE_FIRST
-            else agent.SECOPS_FALLBACK_MODEL_CALLS)
-
-
-def new_run(cases: list[EvalCase], repeats: int, settings: Any, run_id: str,
-            variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> dict[str, Any]:
+def new_run(cases: list[EvalCase], repeats: int, settings: Any, run_id: str) -> dict[str, Any]:
     if repeats < 1:
         raise ValueError("repeats must be positive")
     git = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True,
                          text=True, check=True)
-    calls = len(cases) * repeats * variant_model_calls(variant)
+    calls = len(cases) * repeats * agent.SECOPS_MODEL_CALLS
     return {
         "run_id": run_id, "created_at": datetime.now(UTC).isoformat(),
         "scope": "MVP mock SSH scenarios; graph and dispatcher contract only",
-        "graph_variant": variant.value,
-        "git_head": git.stdout.strip(), **fingerprints(cases, variant),
+        "graph_variant": "EVIDENCE_FIRST",
+        "git_head": git.stdout.strip(), **fingerprints(cases),
         "settings": {name: getattr(settings, name) for name in SETTING_NAMES},
         "case_ids": [case.case_id for case in cases], "repeats": repeats,
         "model_calls_upper_bound": calls,
@@ -133,13 +109,12 @@ def _data_source(client: AIModelClient) -> str:
     return "real_model" if isinstance(client, OpenAIModelClient) else "test_double"
 
 
-def run_one(case: EvalCase, repeat: int, client: AIModelClient,
-            variant: agent.SecOpsGraphVariant = agent.SecOpsGraphVariant.EVIDENCE_FIRST) -> dict[str, Any]:
+def run_one(case: EvalCase, repeat: int, client: AIModelClient) -> dict[str, Any]:
     recording = UsageRecordingClient(client)
     started = time.monotonic()
     numbers = fixture_nacl_rule_numbers(case.graph_input)
     graph_output = agent.run_secops_graph(
-        case.graph_input, client=recording, nacl_rule_numbers=numbers, variant=variant,
+        case.graph_input, client=recording, nacl_rule_numbers=numbers,
     )
     output = verify_graph_output(
         case.graph_input, graph_output, case.graph_input.incident_id, nacl_rule_numbers=numbers,
@@ -286,10 +261,10 @@ def report(run: dict, cases: list[EvalCase], answers: dict[str, Answer],
 
     default_settings = {name: Settings.model_fields[name].default for name in SETTING_NAMES}
     # 변종이 없는 과거 결과는 기본(근거 선행)으로 보되, 기록된 프롬프트 지문이 현재 기본 지문과 같을 때만 인정한다.
-    graph_variant = run.get("graph_variant", agent.SecOpsGraphVariant.EVIDENCE_FIRST.value)
+    graph_variant = run.get("graph_variant", "EVIDENCE_FIRST")
     current_service = (
-        graph_variant == agent.SecOpsGraphVariant.EVIDENCE_FIRST.value
-        and run.get("prompt_sha256") == prompt_fingerprint(agent.SecOpsGraphVariant.EVIDENCE_FIRST)
+        graph_variant == "EVIDENCE_FIRST"
+        and run.get("prompt_sha256") == prompt_fingerprint()
         and run.get("request_sha256") == current["request_sha256"]
         and run["settings"] == default_settings
         # Bedrock 측정은 설정이 기본 OPENAI_*로 남아 있어도 현재 서비스(OpenAI)가 아니다.
