@@ -246,8 +246,10 @@ def test_guardrail_rejection_is_reserved_durably_but_never_dispatched(supported,
     assert record["outcome"] == "failed" and record["confirmed"] is False
 
 
-def test_none_preparation_never_reserves_or_dispatches(supported, monkeypatch):
+def test_ineligible_incident_without_preparation_never_reserves_or_dispatches(supported, monkeypatch):
     calls = _stub_flow(monkeypatch, final_status=ExecutionStatus.SUCCESS, prepared=None)
+    monkeypatch.setattr(executions_repo, "get_by_deduplication_key", lambda db, key: None)
+    monkeypatch.setattr(workflows, "protected_source_block", lambda db, incident: None)
     with begin_trace() as trace:
         result = soar.trigger_isolation(
             MagicMock(), "inc-1", trigger_source=TriggerSource.PRE_MITIGATION_0_5S,

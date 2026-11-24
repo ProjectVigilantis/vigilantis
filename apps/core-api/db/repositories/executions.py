@@ -178,6 +178,40 @@ def list_active_on_target(db: Session, target_arn: str) -> list[models.ActionExe
     )
 
 
+def has_unreleased_auto_source_block(
+    db: Session, *, tenant_id: str | None, target_arn: str, cidr_block: str,
+) -> bool:
+    """같은 출발지의 자동 TCP 차단은 자기 백업에 결속된 해제 성공 전까지 중복 접수하지 않는다.
+
+    만료 재시도 억제와 달리 해제 실패·보류는 해제 완료가 아니다. 원본의 결과가 불명이어도
+    규칙이 남아 있을 수 있으므로 관제자 확인 전 새 자동 차단을 추가하지 않는다.
+    """
+    block = models.ActionExecution
+    restore = aliased(models.ActionExecution)
+    released = (
+        select(restore.execution_id)
+        .where(
+            restore.runbook_id == RunbookId.RUNBOOK_NACL_RESTORE,
+            restore.status == ExecutionStatus.SUCCESS,
+            restore.backup_record_id == block.backup_record_id,
+            restore.target_arn == block.target_arn,
+            restore.tenant_id.is_not_distinct_from(block.tenant_id),
+        )
+        .correlate(block)
+        .exists()
+    )
+    return bool(db.scalar(select(exists().where(
+        block.tenant_id == tenant_id,
+        block.target_arn == target_arn,
+        block.runbook_id == RunbookId.RUNBOOK_NACL_ADD_DENY,
+        block.trigger_source == TriggerSource.PRE_MITIGATION_0_5S,
+        block.status.in_([ExecutionStatus.SUCCESS, ExecutionStatus.UNVERIFIED]),
+        block.validated_command["parameters"]["cidr_block"].astext == cidr_block,
+        block.validated_command["parameters"]["protocol"].astext == "tcp",
+        ~released,
+    ))))
+
+
 def _no_restore_execution_for_block():
     """차단 실행(바깥 ActionExecution)을 되돌린 NACL_RESTORE 실행이 없다 — **상태를 가리지 않고**
     (성공·실패·진행 중) 두 가지로 센다. (T-11 · #597)

@@ -13,7 +13,10 @@ from pathlib import Path
 
 import pytest
 from config import get_aws_settings, get_collector_settings
+from db.repositories import executions as exec_repo
 from mock_threat_source import parse_observation
+from schemas.api.actions import ExecutionStatus
+from schemas.runbooks import RunbookId
 from services import collector
 from threat_ingress import receive_threat
 
@@ -54,16 +57,16 @@ def test_golden_threat_contexts_join_collected_assets_before_analysis(
     db.commit()
 
     expected = {}
-    for name, target, public_field, input_field in (
-        ("evt_ssh_bruteforce_001", instance.arn, "source_ip", "source_ip"),
-        ("evt_open_ip_001", group.arn, "exposed_cidr", "source_cidr"),
+    for name, target, public_field, input_field, status in (
+        ("evt_ssh_bruteforce_001", instance.arn, "source_ip", "source_ip", "AWAITING_CLOSURE"),
+        ("evt_open_ip_001", group.arn, "exposed_cidr", "source_cidr", "ANALYZING"),
     ):
         raw = json.loads((GOLDEN / f"{name}.json").read_text(encoding="utf-8"))
         raw.update(event_id=str(uuid.uuid4()), target_arn=target, occurred_at=datetime.now(UTC).isoformat())
         result = receive_threat(db, parse_observation(raw))
         assert result.created
         expected[result.incident_id] = (
-            target, {"event_type": raw["event_type"], public_field: raw[input_field]},
+            target, {"event_type": raw["event_type"], public_field: raw[input_field]}, status,
         )
 
     assets = client_pg.get("/api/v1/assets")
@@ -75,11 +78,20 @@ def test_golden_threat_contexts_join_collected_assets_before_analysis(
     assert listing.status_code == 200
     assert len(listing.json()["items"]) == len(expected)
     for item in listing.json()["items"]:
-        target, context = expected[item["incident_id"]]
+        target, context, status = expected[item["incident_id"]]
         assert item["subject_arn"] == target
         assert item["threat_context"] == context
-        assert item["status"] == "ANALYZING"
+        assert item["status"] == status
+        executions = exec_repo.list_by_incident(db, item["incident_id"])
+        if status == "AWAITING_CLOSURE":
+            [execution] = executions
+            assert (execution.runbook_id, execution.status) == (
+                RunbookId.RUNBOOK_NACL_ADD_DENY, ExecutionStatus.SUCCESS,
+            )
+        else:
+            assert executions == []
         detail = client_pg.get(f"/api/v1/incidents/{item['incident_id']}")
         assert detail.status_code == 200
+        assert detail.json()["status"] == status
         assert detail.json()["threat_context"] == context
         assert detail.json()["recommendations"] == detail.json()["summary_lines"] == []
