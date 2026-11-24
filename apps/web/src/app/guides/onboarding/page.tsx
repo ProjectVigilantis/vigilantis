@@ -301,19 +301,34 @@ const SECTIONS: LegalSection[] = [
     id: 'disconnect',
     title: '6. 연결 끊기',
     body: (
-      <LegalList
-        items={[
-          '고객사는 연결 역할을 지우거나 고쳐 언제든지 접근을 끊을 수 있습니다.',
-          '연결 과정에서 켠 GuardDuty는 이용계약이 끝나도 자동으로 꺼지지 않습니다. 따로 끄지 않으면 AWS 사용 요금이 계속 생길 수 있습니다.',
-          <>
-            조치로 만든 스냅샷 · 이미지 같은 자원은 이용계약이 끝난 뒤 고객사가 관리합니다. 자세한 내용은{' '}
-            <Link href={`${TERMS_PATH}#resource-addition`} className={LINK}>
-              이용약관 제7조의2
-            </Link>
-            를 따릅니다.
-          </>,
-        ]}
-      />
+      <>
+        <p>고객사는 언제든지 연결을 끊을 수 있습니다. 끊을 때는 아래를 함께 확인합니다.</p>
+        <LegalList
+          items={[
+            `서비스 이용 중단만으로는 AWS에서 이미 발급된 세션이 끊기지 않고, 이미 시작된 작업도 취소되지 않습니다.`,
+            `새 역할 전환은 고객사 AWS 담당자가 역할의 신뢰 정책에서 ${SERVICE_NAME} 쪽 주체를 빼서 막습니다.`,
+            '역할이 남아 있는 동안 IAM 콘솔의 그 역할에서 Revoke active sessions를 하면, 기준 시각 전에 발급된 자격의 요청이 거부됩니다. 기준 시각 뒤의 새 세션은 막지 않으므로 새 역할 전환을 막는 일은 따로 필요합니다.',
+            `${ONBOARDING_STACK_NAME} 스택까지 지우려면 새 역할 전환을 막고 세션을 끊은 뒤에 지웁니다.`,
+            '이미 처리된 AWS 요청과 그 결과는 되돌리지 않습니다. 접근을 끊은 뒤에는 이어지는 AWS 호출과 자동 원복이 실패할 수 있습니다.',
+            '연결 과정에서 켠 GuardDuty는 이용계약이 끝나도 자동으로 꺼지지 않습니다. 따로 끄지 않으면 AWS 사용 요금이 계속 생길 수 있습니다.',
+            <>
+              조치로 만든 스냅샷 · 이미지 같은 자원은 이용계약이 끝난 뒤 고객사가 관리합니다. 자세한 내용은{' '}
+              <Link href={`${TERMS_PATH}#resource-addition`} className={LINK}>
+                이용약관 제7조의2
+              </Link>
+              를 따릅니다.
+            </>,
+          ]}
+        />
+        <GuideSources
+          links={[
+            {
+              label: 'IAM 역할의 임시 자격 증명 취소',
+              href: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html',
+            },
+          ]}
+        />
+      </>
     ),
   },
 ];
