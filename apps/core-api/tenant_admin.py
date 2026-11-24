@@ -15,6 +15,7 @@
 #     ID 는 404 TENANT_NOT_FOUND, 있지만 범위 밖이면 403 AUTH_FORBIDDEN 이다. 검색은 범위 없이 이름 · ID 와
 #     접근 가능 여부(can_access_tenant)만 싣는다.
 #   - 활동 로그(platform_events · #589 B): 생성 · 수정 · 자동 조치 켜고 끄기 · 정지 · 연결 확인 · 재개 · 삭제를 남긴다.
+#     고객의 이용 중단과 권리 만료 정지는 같은 TENANT_SUSPEND 로 subscription_workflow 가 남긴다(행위자로 갈린다).
 #     상태가 바뀐 쓰기는 **같은 트랜잭션**에(로그를 못 쓰면 쓰기도 되돌아간다), 연결 확인 · 재개의 상태 충돌(409)은
 #     요청 트랜잭션을 되돌린 뒤 **따로**(platform_event_log.record_detached) 남긴다. 404 · 403 은 여기서 남기지 않는다.
 #     그룹 지정(set_tenant_group)의 기록은 그룹 기능 쪽 몫이다.
@@ -468,13 +469,6 @@ def _verify_tenant(
         ):
             _load(db, stored_id, user)
             raise refused()
-        if resume and outcome.result is TenantVerificationResult.OK:
-            # 재개는 구독을 바꾸지 않는다 — 처리 주기가 늦어 남은 투영만 계약의 현재 권리로 맞춘다(갱신을 끈 기간이
-            # 끝났으면 Free). 자동 갱신 대기는 처리 주기가 다음 기간을 이을 때까지 그대로 둔다(T-16 · #528).
-            # subscription_workflow 가 이 모듈을 가져오므로 여기서 가져온다(순환 import 회피).
-            import subscription_workflow
-
-            subscription_workflow.reconcile_tenant_subscription(db, stored_id, now=observed_at)
         # 확인 결과(실패 포함)는 고객사 행에 남는 쓰기라 같은 트랜잭션이다. 성공은 결과가 OK 일 때뿐이다
         ok = outcome.result is TenantVerificationResult.OK
         _record(
@@ -486,6 +480,15 @@ def _verify_tenant(
             details={"result": outcome.result}
             | ({} if ok else {"reason_code": _event_reason(outcome.reason_code, outcome.result.value)}),
         )
+        if resume and ok:
+            # 재개는 구독을 바꾸지 않는다 — 처리 주기가 늦어 남은 투영만 계약의 현재 권리로 맞춘다(갱신을 끈 기간이
+            # 끝났으면 Free). 자동 갱신 대기는 처리 주기가 다음 기간을 이을 때까지 그대로 둔다(T-16 · #528).
+            # 재개 행을 쓴 **뒤에** 부른다 — 권리가 이미 끝나 있으면 여기서 만료 정지로 다시 멈추고 그 정지 행이
+            # 남는데, 일어난 순서(재개 → 정지)대로 쓰여야 최신순 목록의 맨 위가 「지금 멈춰 있다」가 된다(#589 B).
+            # subscription_workflow 가 이 모듈을 가져오므로 여기서 가져온다(순환 import 회피).
+            import subscription_workflow
+
+            subscription_workflow.reconcile_tenant_subscription(db, stored_id, now=observed_at)
         return _commit_after(
             db, lambda: _verification_response(_load(db, stored_id, user), settings)
         )

@@ -752,8 +752,17 @@ def test_resume_of_rights_that_ended_while_stopped_leaves_the_service_suspended_
     tenant = _with_mock_rights(db, make_auth_session, aws.start - timedelta(days=70), renew=False)
     stale, agreement = _projection(db, tenant.tenant_id), _agreement(db, tenant.tenant_id)
     assert stale[5] is SubscriptionSource.MOCK_MARKETPLACE and stale[6] < aws.start
+    written = []  # 두 행이 쓰인 순서 — 시계의 눈금과 무관하게 본다(아래)
 
-    resp = _post(client_pg, "resume", tenant.tenant_id)
+    def note(_mapper, _connection, row):
+        if row.action in ("TENANT_RESUME", "TENANT_SUSPEND"):
+            written.append(row.action)
+
+    event.listen(models.PlatformEvent, "before_insert", note)
+    try:
+        resp = _post(client_pg, "resume", tenant.tenant_id)
+    finally:
+        event.remove(models.PlatformEvent, "before_insert", note)
 
     assert resp.status_code == 200
     body = resp.json()["tenant"]
@@ -762,6 +771,32 @@ def test_resume_of_rights_that_ended_while_stopped_leaves_the_service_suspended_
     assert body["suspended_reason"] == subscription_workflow.EXPIRY_SUSPENSION_REASON
     assert resp.json()["verification"]["result"] == "OK"
     assert _agreement(db, tenant.tenant_id) == agreement  # 만료 전이 · 이벤트는 처리 주기(공급자)의 몫이다
+    # 활동 로그(#589 B): 운영자의 재개와, 그 직후 권리 만료가 다시 멈춘 정지가 각각 한 행이다. 정지는 SYSTEM 의 것이다
+    # — 재개를 누른 사람이 멈춘 것이 아니다
+    db.expire_all()
+    rows = list(db.scalars(
+        select(models.PlatformEvent)
+        .where(
+            models.PlatformEvent.target_id == tenant.tenant_id,
+            models.PlatformEvent.action.in_(("TENANT_RESUME", "TENANT_SUSPEND")),
+        )
+        .order_by(models.PlatformEvent.occurred_at)
+    ))
+    assert sorted(
+        (row.action, row.actor_kind.value, row.outcome.value, row.details.get("before"), row.details.get("after"))
+        for row in rows
+    ) == [
+        ("TENANT_RESUME", "USER", "SUCCEEDED", None, None),
+        ("TENANT_SUSPEND", "SYSTEM", "SUCCEEDED", "ACTIVE", "SUSPENDED"),
+    ]
+    # 일어난 순서는 재개 → 정지다. 조회는 최신순이라, 정지 행이 뒤에 쓰여야 목록의 맨 위가 「지금 멈춰 있다」가 된다.
+    # 쓰인 순서를 직접 보고, 시각은 그 순서를 거스르지 않는지 본다 — 시계의 눈금이 굵은 환경(Windows 의
+    # datetime.now 는 약 15.6ms)에서는 두 행의 시각이 같을 수 있어 시각 정렬만으로는 순서를 단언하지 못한다
+    assert written == ["TENANT_RESUME", "TENANT_SUSPEND"]
+    at = {row.action: row.occurred_at for row in rows}
+    assert at["TENANT_RESUME"] <= at["TENANT_SUSPEND"]
+    if at["TENANT_RESUME"] != at["TENANT_SUSPEND"]:
+        assert [row.action for row in rows] == ["TENANT_RESUME", "TENANT_SUSPEND"]
     assert client_pg.get(f"{BASE}/{tenant.tenant_id}").json() == body
 
 

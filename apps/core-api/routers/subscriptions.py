@@ -27,6 +27,7 @@ from config import (
     get_auth_settings,
     get_subscription_settings,
 )
+from db.repositories import platform_events as platform_events_repo
 from db.session import get_db
 from exceptions import ApiError
 from fastapi import APIRouter, Depends, Request
@@ -163,5 +164,11 @@ def stop_my_service(
     clock: Callable[[], datetime] = _CLOCK,
 ) -> CustomerSubscriptionResponse:
     return subscription_workflow.stop_service(
-        db, user.tenant_id, body, authorize=reauthorize, settings=settings, now=clock()
+        db,
+        user.tenant_id,
+        body,
+        event_actor=platform_events_repo.person(user),  # 활동 로그의 행위자(#589 B) — 잠금 뒤 reauthorize 가 다시 확인한다
+        authorize=reauthorize,
+        settings=settings,
+        now=clock(),
     )
