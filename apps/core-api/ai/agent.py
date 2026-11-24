@@ -895,7 +895,7 @@ _SECOPS_EVIDENCE_PROMPT = (
 
 # 아래 docstring·description도 JSON Schema로 모델에 나간다. 필드 선언 순서가 곧 스키마 속성
 # 순서이며, 근거 3줄이 decision보다 먼저 온다(ADR-0005 설계 원칙 5, #583 보장 ①). 순서는 보이는
-# 출력의 순서만 정하고 숨은 추론에 대해서는 아무것도 보장하지 않는다. FinOps EvidenceSummaryOutput에
+# 출력의 순서만 정하고 숨은 추론에 대해서는 아무것도 보장하지 않는다. FinOpsEvidenceDecisionOutput에
 # 필드를 더하지 않고 따로 두는 것은 FinOps 승인 지문(3단계 범위)을 움직이지 않기 위해서다.
 class SecOpsEvidenceDecisionOutput(BaseModel):
     """근거 3줄(observation → diagnosis → rationale)을 먼저 쓰고, 그 근거가 뒷받침하는 조치 제시를 decision으로 낸다."""

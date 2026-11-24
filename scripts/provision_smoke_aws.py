@@ -1719,8 +1719,7 @@ def _managed_policies(account: str) -> tuple[tuple[str, str], ...]:
 
 
 def _roles_holding_app_policy(iam, account: str) -> list[str]:
-    """앱 정책·비용 정책·GuardDuty 정책을 붙잡고 있는 IAM 역할. 플랫폼의 접근 역할(vigilantis-access,
-    ADR-0010 §3)이 셋 다 빌려 쓴다.
+    """앱 정책·비용 정책·GuardDuty 정책이 붙어 있는 IAM 역할.
 
     역할에 붙어 있으면 delete_policy가 DeleteConflict로 실패한다. 남의 역할에서 정책을 떼는 것은
     이 스크립트의 몫이 아니므로 떼지 않고 알린다.

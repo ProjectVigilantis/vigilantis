@@ -790,7 +790,7 @@ def test_resume_of_rights_that_ended_while_stopped_leaves_the_service_suspended_
         ("TENANT_SUSPEND", "SYSTEM", "SUCCEEDED", "ACTIVE", "SUSPENDED"),
     ]
     # 일어난 순서는 재개 → 정지다. 조회는 최신순이라, 정지 행이 뒤에 쓰여야 목록의 맨 위가 「지금 멈춰 있다」가 된다.
-    # 쓰인 순서를 직접 보고, 시각은 그 순서를 거스르지 않는지 본다 — 시계의 눈금이 굵은 환경(Windows 의
+    # 쓰인 순서를 직접 보고, 시각은 그 순서를 거스르지 않는지 본다 — 시계의 눈금이 굵은 환경(Python 3.12 이하 Windows의
     # datetime.now 는 약 15.6ms)에서는 두 행의 시각이 같을 수 있어 시각 정렬만으로는 순서를 단언하지 못한다
     assert written == ["TENANT_RESUME", "TENANT_SUSPEND"]
     at = {row.action: row.occurred_at for row in rows}
