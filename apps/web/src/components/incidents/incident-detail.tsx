@@ -56,6 +56,7 @@ import {
 } from '@/lib/incident-investigation';
 import { closureAction, closureBlockedReason, RESOLUTION_LABELS } from '@/lib/incident-closure';
 import { proposalButtons } from '@/lib/proposal-buttons';
+import { USAGE_GUIDE_PATH } from '@/lib/return-to';
 import { RUNBOOK_LABELS, incidentTitle } from '@/lib/enum-labels';
 import { formatUsd, savingsBreakdown, type SavingsBreakdown } from '@/lib/savings';
 import { cn, formatKst } from '@/lib/utils';
@@ -577,6 +578,11 @@ function ExecutionBody({
             <span className="text-muted-foreground ml-2 text-xs">
               조회 실패 {hold.attempts}회 · 마지막 {formatKst(hold.last_failed_at)}
             </span>
+            {execution.status === 'UNVERIFIED' && execution.runbook_id === 'RUNBOOK_EC2_RIGHTSIZING' ? (
+              <Link href={`${USAGE_GUIDE_PATH}#incidents-unverified`} target="_blank" rel="noopener noreferrer" className="text-link ml-2 text-xs underline">
+                결과 확인 불가 안내 (새 탭)
+              </Link>
+            ) : null}
           </Row>
         ) : null}
       </div>
@@ -875,6 +881,9 @@ export function IncidentDetail({
           <code className="font-mono">{incident.incident_id}</code>
           <span>생성 {formatKst(incident.created_at)}</span>
           <span>갱신 {formatKst(incident.updated_at)}</span>
+          <Link href={`${USAGE_GUIDE_PATH}#incidents`} target="_blank" rel="noopener noreferrer" className="text-link underline">
+            인시던트 처리 가이드 (새 탭)
+          </Link>
         </p>
       </header>
 
