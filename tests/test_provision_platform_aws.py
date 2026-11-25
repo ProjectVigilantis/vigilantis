@@ -2407,3 +2407,215 @@ def test_bootstrap_admin_needs_an_email(monkeypatch):
     _fake_main(monkeypatch, ["bootstrap-admin", "--account", ACCOUNT], {})
     with pytest.raises(SystemExit, match="--email"):
         platform.main()
+
+
+# ⑫ 서브 리전(도쿄) 파일럿 라이트 ---------------------------------------------------------
+# 평소에는 복제본만 돌고, failover가 도쿄를 세운다. 지키는 것: 복제본이 도쿄 키로 암호화된 비공개 단일 AZ ·
+# 남의 ECR 복제 규칙을 지우지 않음 · 실행 역할이 두 리전 비밀을 함께 읽음 · 도쿄 api는 도쿄 STS로 나가고
+# 사용자 풀만 서울 · failover는 무엇이든 바꾸기 전에 준비물을 보고, 서울에 닿지 못해도 이어 간다 ·
+# down은 도쿄 DB를 서울 DB보다 먼저 지운다
+STANDBY = platform.STANDBY_REGION
+SOURCE_ARN = f"arn:aws:rds:ap-northeast-2:{ACCOUNT}:db:{platform.DB_INSTANCE}"
+
+
+def test_replica_is_a_private_single_az_copy_encrypted_with_the_standby_region_key():
+    d = platform.replica_definition(SOURCE_ARN, "ap-northeast-2", "sg-db")
+    assert d["SourceDBInstanceIdentifier"] == SOURCE_ARN and d["SourceRegion"] == "ap-northeast-2"
+    assert d["KmsKeyId"] == "alias/aws/rds"  # 서울 키는 리전을 넘지 못한다
+    assert (d["PubliclyAccessible"], d["MultiAZ"]) == (False, False)
+    assert d["DBInstanceIdentifier"] == platform.DB_INSTANCE and d["VpcSecurityGroupIds"] == ["sg-db"]
+    assert {"Key": platform.TAG_KEY, "Value": platform.TAG_VALUE} in d["Tags"]
+
+
+def test_ecr_replication_copies_only_platform_repositories_to_the_standby_region():
+    rule = platform.ecr_replication_rule(ACCOUNT)
+    assert rule["destinations"] == [{"region": STANDBY, "registryId": ACCOUNT}]
+    assert rule["repositoryFilters"] == [{"filter": platform.PREFIX, "filterType": "PREFIX_MATCH"}]
+
+
+def test_ecr_replication_keeps_other_rules_and_is_idempotent():
+    mine = platform.ecr_replication_rule(ACCOUNT)
+    other = {"destinations": [{"region": "us-west-2", "registryId": ACCOUNT}]}
+    added = platform.with_replication_rule([other], mine, present=True)
+    assert added == [other, mine]
+    assert platform.with_replication_rule(added, mine, present=True) == added
+    assert platform.with_replication_rule(added, mine, present=False) == [other]
+
+
+def test_exec_role_reads_the_secrets_of_both_regions():
+    names = platform.EXEC_SECRETS
+    seoul = FakeSm([], {n: "v" for n in names})
+    tokyo = FakeSm([], {platform.SECRET_DATABASE_URL: "v", platform.SECRET_OPENAI: "v"})
+    arns = platform._exec_secret_arns({"sm": seoul, "standby": {"sm": tokyo}})
+    assert len(arns) == len(names) + 2
+    # 도쿄가 없으면 서울만이다 — up만 돌린 플랫폼
+    assert len(platform._exec_secret_arns({"sm": seoul})) == len(names)
+
+
+def test_standby_api_uses_the_standby_region_but_the_seoul_login_pool():
+    container = platform.api_container(
+        "repo/api:t", region=STANDBY, cors_origin="https://vigilantis.dev", dispatch_enabled=False,
+        secrets_arns={"DATABASE_URL": "arn:s1"}, cognito_region="ap-northeast-2", **_API_KW)
+    env = {e["name"]: e["value"] for e in container["environment"]}
+    # STS(고객 역할 전환)가 서울 엔드포인트에 기대지 않게 AWS_REGION은 도쿄다. 사용자 풀은 서울 하나뿐이다
+    assert (env["AWS_REGION"], env["COGNITO_REGION"]) == (STANDBY, "ap-northeast-2")
+    assert container["logConfiguration"]["options"]["awslogs-region"] == STANDBY
+
+
+def test_api_cognito_region_defaults_to_the_platform_region():
+    env = {e["name"]: e["value"] for e in _api()["environment"]}
+    assert env["COGNITO_REGION"] == env["AWS_REGION"] == "ap-northeast-2"
+
+
+def test_failover_adds_the_standby_nat_ips_without_dropping_existing_addresses():
+    waf = FakeWaf({platform.WAF_IPSET: ["203.0.113.7/32", "198.51.100.1/32"],
+                   platform.WAF_NAT_IPSET: ["198.51.100.1/32"]})
+    platform._add_waf_addresses(waf, ["192.0.2.9/32"])
+    assert waf.ipsets[platform.WAF_IPSET] == ["192.0.2.9/32", "198.51.100.1/32", "203.0.113.7/32"]
+    assert waf.ipsets[platform.WAF_NAT_IPSET] == ["192.0.2.9/32", "198.51.100.1/32"]
+
+
+class FakeStandbyEc2:
+    def __init__(self, nat_ips):
+        self.nat_ips = nat_ips
+
+    def describe_vpcs(self, Filters):
+        return {"Vpcs": [{"VpcId": "vpc-t"}]}
+
+    def describe_nat_gateways(self, Filters):
+        return {"NatGateways": [{"SubnetId": f"subnet-{i}", "NatGatewayAddresses": [{"PublicIp": ip}]}
+                                for i, ip in enumerate(self.nat_ips)]}
+
+
+def test_seoul_up_keeps_the_standby_nat_ips_after_a_failover():
+    c = {"standby": {"ec2": FakeStandbyEc2(["192.0.2.9", "192.0.2.10"])}}
+    assert platform._standby_nat_cidrs(c) == ["192.0.2.9/32", "192.0.2.10/32"]
+    assert platform._standby_nat_cidrs({}) == []
+
+
+class FakeStandbyEcr:
+    def __init__(self, repos=True, tags=()):
+        self.repos, self.tags = repos, set(tags)
+
+    def describe_repositories(self, repositoryNames):
+        if not self.repos:
+            raise _client_error("RepositoryNotFoundException", "DescribeRepositories")
+        return {"repositories": [{"repositoryUri": f"{ACCOUNT}.dkr.ecr.{STANDBY}.amazonaws.com/{repositoryNames[0]}"}]}
+
+    def describe_images(self, repositoryName, imageIds):
+        if imageIds[0]["imageTag"] not in self.tags:
+            raise _client_error("ImageNotFoundException", "DescribeImages")
+        return {"imageDetails": [{}]}
+
+
+class FakeSsm:
+    def __init__(self, value=None):
+        self.value = value
+
+    def get_parameter(self, Name):
+        if self.value is None:
+            raise _client_error("ParameterNotFound", "GetParameter")
+        return {"Parameter": {"Value": json.dumps(self.value)}}
+
+
+def _standby_ready(monkeypatch, ecr) -> dict:
+    """도쿄 준비물이 다 있는 상태. 실제로 바꾸는 단계는 부르면 기록만 남긴다."""
+    calls: list[str] = []
+    for name in ("_stop_primary", "_promote", "_ensure_network", "_ensure_alb", "_add_waf_addresses"):
+        monkeypatch.setattr(platform, name, lambda *a, _n=name, **k: calls.append(_n))
+    monkeypatch.setattr(platform, "_find_db", lambda rds: {"DBInstanceStatus": "available"})
+    monkeypatch.setattr(platform, "_find_vpc", lambda ec2: "vpc-t")
+    monkeypatch.setattr(platform, "_find_zone", lambda r53, d: "Z1")
+    monkeypatch.setattr(platform, "_find_certificate", lambda acm, d: "arn:cert")
+    config = platform.standby_config("pool", "client", "ap-northeast-2", ["https://vigilantis.dev"], "https://x")
+    c = {"standby": {"ssm": FakeSsm(config), "rds": None, "ec2": None, "acm_origin": None, "ecr": ecr},
+         "r53": None}
+    return {"c": c, "calls": calls}
+
+
+def test_failover_stops_before_changing_anything_when_the_tag_was_not_replicated(monkeypatch):
+    ready = _standby_ready(monkeypatch, FakeStandbyEcr(tags=()))
+    with pytest.raises(SystemExit, match="태그 v1"):
+        platform.failover(ready["c"], "v1", "vigilantis.dev", False)
+    assert ready["calls"] == []  # 서울을 내리지도, 복제본을 승격하지도 않았다
+
+
+def test_failover_stops_before_changing_anything_without_the_standby_setup(monkeypatch):
+    ready = _standby_ready(monkeypatch, FakeStandbyEcr(tags=("v1",)))
+    ready["c"]["standby"]["ssm"] = FakeSsm(None)
+    with pytest.raises(SystemExit, match="standby-up"):
+        platform.failover(ready["c"], "v1", "vigilantis.dev", False)
+    assert ready["calls"] == []
+
+
+class UnreachableEcs:
+    def describe_clusters(self, clusters):
+        from botocore.exceptions import EndpointConnectionError
+        raise EndpointConnectionError(endpoint_url="https://ecs.ap-northeast-2.amazonaws.com")
+
+
+def test_failover_goes_on_when_seoul_cannot_be_reached(capsys):
+    platform._stop_primary({"ecs": UnreachableEcs(), "sm": None, "standby": {"sm": None}})
+    assert "서울에 닿지 못했다" in capsys.readouterr().out
+
+
+class FakePromoteRds:
+    def __init__(self):
+        self.promoted = False
+
+    def promote_read_replica(self, **kwargs):
+        self.promoted = True
+
+
+def test_promote_skips_a_database_that_is_already_promoted():
+    rds = FakePromoteRds()
+    platform._promote(rds, {"DBInstanceStatus": "available"})
+    assert not rds.promoted
+
+
+def test_standby_up_stops_before_creating_anything_without_the_seoul_platform(monkeypatch):
+    created: list[str] = []
+    monkeypatch.setattr(platform, "_ensure_vpc", lambda ec2: created.append("vpc"))
+    for name in ("_find_db", "_find_distribution", "_find_user_pool", "_get_role"):
+        monkeypatch.setattr(platform, name, lambda *a, **k: None)
+    monkeypatch.setattr(platform, "_find_zone", lambda r53, d: "Z1")
+    c = {"standby": {}, "rds": None, "cf": None, "cidp": None, "r53": None, "iam": None}
+    with pytest.raises(SystemExit, match="up --domain"):
+        platform.standby_up(c, ACCOUNT, "ap-northeast-2", "vigilantis.dev")
+    assert created == []
+
+
+def test_down_deletes_the_standby_database_before_the_seoul_source(monkeypatch):
+    order: list[str] = []
+    seoul_rds, tokyo_rds = object(), object()
+    monkeypatch.setattr(platform, "_down_db", lambda rds: order.append("tokyo" if rds is tokyo_rds else "seoul"))
+    for name in ("_delete_alarms", "_down_ecs", "_delete_waf", "_down_alb", "_remove_ecr_replication",
+                 "_delete_roles", "_down_vpc", "_try"):
+        monkeypatch.setattr(platform, name, lambda *a, **k: None)
+    for name in ("_find_distribution", "_find_user_pool"):
+        monkeypatch.setattr(platform, name, lambda *a, **k: None)
+    monkeypatch.setattr(platform, "_bucket_exists", lambda s3, b: False)
+    region = {"ecs": None, "elbv2": None, "ecr": None, "sm": None, "logs": None, "ec2": None}
+    c = {**region, "rds": seoul_rds, "cw": None, "sns": None, "cf": None, "waf": None, "cidp": None, "s3": None,
+         "iam": None, "standby": {**region, "rds": tokyo_rds, "ssm": None}}
+    platform.down(c, ACCOUNT)
+    # 서울 원본을 먼저 지우면 도쿄 복제본이 독립 DB로 승격돼 남는다
+    assert order == ["tokyo", "seoul"]
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["standby-up", "--account", ACCOUNT, "--yes"], "--domain"),
+    (["failover", "--account", ACCOUNT, "--tag", "v1", "--yes"], "--domain"),
+    (["failover", "--account", ACCOUNT, "--domain", "vigilantis.dev", "--yes"], "--tag"),
+])
+def test_standby_commands_need_a_domain_and_failover_a_tag(monkeypatch, argv, message):
+    _fake_main(monkeypatch, argv, {})
+    with pytest.raises(SystemExit, match=message):
+        platform.main()
+
+
+def test_refuses_to_run_with_the_standby_region_as_the_primary(monkeypatch):
+    _fake_main(monkeypatch, ["status", "--account", ACCOUNT], {})
+    monkeypatch.setattr(platform, "default_region", lambda: STANDBY)
+    with pytest.raises(SystemExit, match="서브 리전"):
+        platform.main()

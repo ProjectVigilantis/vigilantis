@@ -32,7 +32,13 @@
 #   이미지     : ... build --account <계정 ID> --tag <태그>        (docker 필요 — ECR에 api·web 푸시)
 #   배포       : ... deploy --account <계정 ID> --tag <태그> [--enable-dispatch] --yes
 #   첫 관리자  : ... bootstrap-admin --account <계정 ID> --email <주소> --yes   (처음 한 번. 그 뒤 계정은 화면에서 초대)
-#   전부 정리  : ... down --account <계정 ID> --yes   (로그인 사용자 풀과 그 사용자도 지운다)
+#   도쿄 대기  : ... standby-up --account <계정 ID> --domain <도메인> --yes   (up 뒤 · build 전. 재실행이 곧 동기화)
+#                도쿄(ap-northeast-1)에 RDS 교차 리전 복제본 · ECR 복제 규칙 · 비밀 사본 · origin.<도메인> 인증서를 둔다.
+#                NAT·ALB·태스크는 두지 않는다(파일럿 라이트). 플랫폼 데이터의 사본이 일본에 놓인다(국외 이전 고지 대상)
+#   도쿄 전환  : ... failover --account <계정 ID> --domain <도메인> --tag <태그> [--enable-dispatch] --yes
+#                서울 api·web 0 → 복제본 승격(되돌릴 수 없다) → 도쿄 NAT·ALB·ECS → origin.<도메인>을 도쿄 ALB로.
+#                서울 리전이 죽어 있어도 돈다. 로그인 사용자 풀은 서울이라 그동안 새 로그인은 안 된다
+#   전부 정리  : ... down --account <계정 ID> --yes   (로그인 사용자 풀과 그 사용자도 지운다 · 도쿄도 함께)
 #   알림(#493) : 기본 배포는 NOTIFICATION_ENABLED=false다. 켜려면 비밀 아닌 입력 JSON을 명시한다:
 #                {"enabled": true, "public_base_url": "https://…", "routes": [{tenant_id, aws_account_id,
 #                 slack_webhook_env?, sns_topic_arn?}], "slack_secret_arns": {"<env>": "<기존 비밀 ARN>"},
@@ -111,7 +117,7 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages"), 
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from botocore.exceptions import ClientError  # noqa: E402
+from botocore.exceptions import BotoCoreError, ClientError  # noqa: E402
 
 import config as app_config  # noqa: E402
 import onboarding_template as onboarding  # noqa: E402
@@ -232,6 +238,16 @@ CF_HOSTED_ZONE_ID = "Z2FDTNDATAQYW2"  # CloudFront 별칭 레코드의 고정 �
 # AWS 관리형 정책 ID(전 계정 공통)
 CF_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
 CF_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+
+# 서브 리전(도쿄) 파일럿 라이트(ADR-0010 4차 개정). 평소에는 DB 교차 리전 복제본과 이미지 복제만 돈다.
+# NAT·ALB·ECS 태스크는 failover가 세운다. 자원 이름은 서울과 같다(이름은 리전마다 따로 잡힌다)
+STANDBY_REGION = "ap-northeast-1"
+# 값을 서울에서 도쿄로 복사해 두는 비밀. database-url은 복사하지 않는다(도쿄 값은 복제본 호스트를 가리킨다)
+STANDBY_COPIED_SECRETS = (SECRET_OPENAI, SECRET_ORIGIN, SECRET_COGNITO_CLIENT)
+# failover가 서울 없이 api를 띄우는 데 필요한 비밀 아닌 값(사용자 풀 · 공개 주소 · 온보딩 주소). 도쿄 SSM에 둔다
+STANDBY_CONFIG_PARAM = f"/{PREFIX}/standby-config"
+# 교차 리전 복제본은 그 리전의 KMS 키로 암호화한다. 서울 기본 키(aws/rds)는 리전을 넘지 못한다
+STANDBY_DB_KMS_KEY = "alias/aws/rds"
 
 API_SERVICE = f"{PREFIX}-api"
 WEB_SERVICE = f"{PREFIX}-web"
@@ -806,7 +822,10 @@ def revoke_notification_policies(iam, ecs) -> None:
 
 def api_container(image: str, *, region: str, cors_origin: str, dispatch_enabled: bool,
                   secrets_arns: dict[str, str], cognito: dict[str, str], onboarding_url: str,
-                  platform_principal_arn: str, notification: Optional[dict] = None) -> dict:
+                  platform_principal_arn: str, notification: Optional[dict] = None,
+                  cognito_region: Optional[str] = None) -> dict:
+    """cognito_region은 사용자 풀의 리전이다. 도쿄 failover는 region=도쿄 · cognito_region=서울로 부른다
+    (사용자 풀은 서울 하나뿐이다)."""
     env = {
         "AWS_REGION": region,
         "CORS_ALLOW_ORIGINS": cors_origin,
@@ -821,7 +840,7 @@ def api_container(image: str, *, region: str, cors_origin: str, dispatch_enabled
         # 고객 계정 호출은 테넌트 문맥(고객 역할) 안에서만 나간다. 문맥 없는 호출은 플랫폼 계정으로 새지 않고
         # 예외가 된다(services/aws/client.py · ADR-0012 §2). 관제 범위는 고객 계정 자체라 COLLECT_VPC_IDS를 두지 않는다
         "TENANT_CONTEXT_REQUIRED": "true",
-        "COGNITO_REGION": region,
+        "COGNITO_REGION": cognito_region or region,
         "COGNITO_USER_POOL_ID": cognito["pool_id"],
         "COGNITO_CLIENT_ID": cognito["client_id"],
         # 고객 연결 화면의 빠른 생성 링크(tenant_admin.onboarding_url)
@@ -1007,6 +1026,40 @@ def alarm_definitions(lb_arn: str, tg_api_arn: str, tg_web_arn: str, topic_arn: 
          "ComparisonOperator": "LessThanThreshold", "TreatMissingData": "missing"},
     ]
     return [{**a, "ActionsEnabled": True, "AlarmActions": [topic_arn], "OKActions": [topic_arn]} for a in alarms]
+
+
+def replica_definition(source_arn: str, source_region: str, sg_db: str) -> dict:
+    """도쿄 교차 리전 읽기 복제본(create_db_instance_read_replica 인자).
+
+    단일 AZ다. 평소에는 복제만 받고, failover가 승격한 뒤에야 쓰기를 받는다. 암호화는 도쿄의 기본 키로
+    한다. SourceRegion을 주면 boto3가 서울 쪽 서명 URL(PreSignedUrl)을 만든다.
+    """
+    return {
+        "DBInstanceIdentifier": DB_INSTANCE, "SourceDBInstanceIdentifier": source_arn, "SourceRegion": source_region,
+        "DBInstanceClass": DB_CLASS, "DBSubnetGroupName": DB_SUBNET_GROUP, "VpcSecurityGroupIds": [sg_db],
+        "PubliclyAccessible": False, "MultiAZ": False, "StorageType": "gp3", "KmsKeyId": STANDBY_DB_KMS_KEY,
+        "CopyTagsToSnapshot": True, "DeletionProtection": False,
+        "Tags": [{"Key": TAG_KEY, "Value": TAG_VALUE}, {"Key": "Name", "Value": DB_INSTANCE}],
+    }
+
+
+def ecr_replication_rule(account: str) -> dict:
+    """서울 레지스트리에서 플랫폼 저장소(이름 접두)만 도쿄로 복제하는 규칙. 복제는 규칙을 건 뒤 푸시한 이미지부터다."""
+    return {"destinations": [{"region": STANDBY_REGION, "registryId": account}],
+            "repositoryFilters": [{"filter": PREFIX, "filterType": "PREFIX_MATCH"}]}
+
+
+def with_replication_rule(rules: list[dict], rule: dict, present: bool) -> list[dict]:
+    """레지스트리 복제 설정은 계정 전체가 하나라 통째로 바뀐다. 남의 규칙은 그대로 두고 이 규칙만 넣거나 뺀다."""
+    others = [r for r in rules if r != rule]
+    return others + [rule] if present else others
+
+
+def standby_config(pool_id: str, client_id: str, cognito_region: str, cors_origins: list[str],
+                   onboarding_url: str) -> dict:
+    """failover가 서울 API를 부르지 않고 도쿄 api를 띄우는 데 필요한 값. 비밀은 들어 있지 않다."""
+    return {"pool_id": pool_id, "client_id": client_id, "cognito_region": cognito_region,
+            "cors_origins": cors_origins, "onboarding_url": onboarding_url}
 
 
 # ------------------------------------------------------------------ 공통
@@ -1315,6 +1368,9 @@ def status(c: dict) -> None:
             states = [t["TargetHealth"]["State"] for t in
                       c["elbv2"].describe_target_health(TargetGroupArn=arn)["TargetHealthDescriptions"]]
             print(f"  TG {name}: {', '.join(states) or '대상 없음'}")
+    if c.get("standby"):
+        print(f"[platform] 서브 리전({STANDBY_REGION}) 파일럿 라이트")
+        _print_rows(standby_inventory(c))
 
 
 # ------------------------------------------------------------------ 구성(up)
@@ -1382,8 +1438,8 @@ def _ensure_nat(ec2, subnets: dict[str, str], az: str) -> dict:
     return ec2.describe_nat_gateways(NatGatewayIds=[nat_id])["NatGateways"][0]
 
 
-def _ensure_network(ec2, vpc_id: str, subnets: dict[str, str]) -> list[str]:
-    """IGW·공개 경로·AZ별 NAT·AZ별 프라이빗 경로. NAT 공인 IP 전부를 돌려준다(WAF 허용 목록에 들어간다)."""
+def _ensure_public_route(ec2, vpc_id: str, subnets: dict[str, str]) -> None:
+    """IGW와 공개 서브넷 경로. 도쿄 대기 구성은 여기까지만 세운다(NAT는 failover가 세운다)."""
     igws = ec2.describe_internet_gateways(Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}])[
         "InternetGateways"]
     if igws:
@@ -1395,6 +1451,11 @@ def _ensure_network(ec2, vpc_id: str, subnets: dict[str, str]) -> list[str]:
         print(f"[platform] IGW {igw_id} 생성·연결")
     public_ids = [subnets[f"{PREFIX}-public-{az}"] for az in PUBLIC_SUBNETS]
     _ensure_route_table(ec2, vpc_id, f"{PREFIX}-public", public_ids, {"GatewayId": igw_id})
+
+
+def _ensure_network(ec2, vpc_id: str, subnets: dict[str, str]) -> list[str]:
+    """IGW·공개 경로·AZ별 NAT·AZ별 프라이빗 경로. NAT 공인 IP 전부를 돌려준다(WAF 허용 목록에 들어간다)."""
+    _ensure_public_route(ec2, vpc_id, subnets)
 
     nats = _find_nats(ec2, vpc_id)
     ips = []
@@ -1475,6 +1536,17 @@ def _secret_value(sm, name: str) -> str:
     return sm.get_secret_value(SecretId=name)["SecretString"]
 
 
+def _ensure_db_subnet_group(rds, subnets: dict[str, str]) -> None:
+    try:
+        rds.create_db_subnet_group(
+            DBSubnetGroupName=DB_SUBNET_GROUP, DBSubnetGroupDescription=f"{PREFIX} private",
+            SubnetIds=[subnets[f"{PREFIX}-private-{az}"] for az in PRIVATE_SUBNETS],
+            Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])
+    except ClientError as exc:
+        if _code(exc) != "DBSubnetGroupAlreadyExists":
+            raise
+
+
 def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
     """비밀번호는 **RDS 생성 요청 전에** 비밀로 저장한다 — 대기(수 분–30분) 중 중단돼도 잃지 않는다.
 
@@ -1493,14 +1565,7 @@ def _ensure_db(rds, sm, subnets: dict[str, str], sg_db: str) -> None:
                  "RDS 마스터 비밀번호를 재설정하고 비밀을 직접 만들 것.")
     url = urlsplit(_secret_value(sm, SECRET_DATABASE_URL))
     if not db:
-        try:
-            rds.create_db_subnet_group(
-                DBSubnetGroupName=DB_SUBNET_GROUP, DBSubnetGroupDescription=f"{PREFIX} private",
-                SubnetIds=[subnets[f"{PREFIX}-private-{az}"] for az in PRIVATE_SUBNETS],
-                Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])
-        except ClientError as exc:
-            if _code(exc) != "DBSubnetGroupAlreadyExists":
-                raise
+        _ensure_db_subnet_group(rds, subnets)
         rds.create_db_instance(
             DBInstanceIdentifier=DB_INSTANCE, DBInstanceClass=DB_CLASS, Engine="postgres",
             EngineVersion=DB_MAJOR, AllocatedStorage=DB_STORAGE_GB, StorageType="gp3",
@@ -1555,6 +1620,18 @@ def _ensure_role(iam, name: str, trust: dict, description: str) -> str:
                           MaxSessionDuration=3600, Tags=[{"Key": TAG_KEY, "Value": TAG_VALUE}])["Role"]["Arn"]
     print(f"[platform] IAM 역할 {name} 생성")
     return arn
+
+
+EXEC_SECRETS = (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_COGNITO_CLIENT)  # 실행 역할이 api에 주입하는 비밀
+
+
+def _exec_secret_arns(c: dict) -> list[str]:
+    """실행 역할이 읽을 비밀 ARN — 서울과, 도쿄 대기 구성이 있으면 도쿄 사본까지.
+
+    정책은 put_role_policy로 통째로 바뀐다. 한 리전 것만 넣으면 서울 up 재실행이 도쿄 failover의 비밀 주입을 끊는다.
+    """
+    managers = [c["sm"]] + ([c["standby"]["sm"]] if c.get("standby") else [])
+    return [arn for sm in managers for arn in (_find_secret(sm, n) for n in EXEC_SECRETS) if arn]
 
 
 def _ensure_roles(iam, secret_arns: list[str], user_pool_arn: str) -> dict[str, str]:
@@ -1972,6 +2049,8 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
     nat_cidrs = [f"{ip}/32" for ip in _ensure_network(ec2, vpc_id, subnets)]
+    # failover 뒤라면 도쿄 NAT IP도 남긴다. 빼면 도쿄 웹의 서버 측 API 호출이 WAF에 막힌다
+    nat_cidrs = sorted(set(nat_cidrs) | set(_standby_nat_cidrs(c)))
     if custom and not custom[2]:  # ALB 리스너를 세우기 전에 받아 둔다
         custom = (custom[0], custom[1], _ensure_origin_certificate(c["acm_origin"], c["r53"], custom[1], domain))
     sgs = _ensure_sgs(ec2, vpc_id, https=bool(custom))
@@ -1983,8 +2062,7 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     _ensure_db(c["rds"], c["sm"], subnets, sgs[SG_DB])
     _ensure_repos(c["ecr"])
     login = _ensure_login(c["cidp"], c["sm"])
-    secret_arns = [_find_secret(c["sm"], n) for n in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_COGNITO_CLIENT)]
-    _ensure_roles(c["iam"], [a for a in secret_arns if a], login["pool_arn"])
+    _ensure_roles(c["iam"], _exec_secret_arns(c), login["pool_arn"])
     _ensure_onboarding(c["s3"], account, region)
     _ensure_logs(c["logs"])
     _ensure_cluster(c["ecs"])
@@ -2212,6 +2290,269 @@ def deploy(c: dict, account: str, region: str, tag: str, dispatch_enabled: bool,
               "조치 실행을 실측하려면 deploy --enable-dispatch(OpenAI 과금도 함께 켜진다)")
 
 
+# ------------------------------------------------------------------ 서브 리전(도쿄) 파일럿 라이트
+# 평소: 도쿄에 VPC(공개 경로만) · 보안 그룹 · RDS 교차 리전 읽기 복제본 · ECR 복제 · 비밀 사본 · ECS 클러스터 ·
+#       origin.<도메인> 인증서 · failover 설정값(SSM)만 둔다. 시간 과금은 복제본 하나다.
+# failover: 서울 api·web을 0으로 → 복제본 승격 → 도쿄 NAT·ALB → WAF에 도쿄 NAT IP → 도쿄 ECS 기동 →
+#           origin.<도메인>을 도쿄 ALB로. CloudFront 배포와 사용자 도메인은 그대로라 화면 주소가 바뀌지 않는다.
+# 서울로 되돌리기(failback)는 이 스크립트가 하지 않는다 — 도쿄 DB가 원본이 되므로 서울을 새로 세워 옮겨야 한다.
+def _find_parameter(ssm, name: str) -> Optional[dict]:
+    try:
+        return json.loads(ssm.get_parameter(Name=name)["Parameter"]["Value"])
+    except ClientError as exc:
+        if _code(exc) == "ParameterNotFound":
+            return None
+        raise
+
+
+def _sync_secret(sm, name: str, value: str) -> str:
+    """도쿄 비밀을 주어진 값으로 맞춘다. 값은 출력하지 않는다."""
+    arn = _find_secret(sm, name)
+    if not arn:
+        return _put_secret(sm, name, value)
+    if _secret_value(sm, name) != value:
+        sm.put_secret_value(SecretId=name, SecretString=value)
+        print(f"[platform] 도쿄 Secret {name} 갱신")
+    return arn
+
+
+def _ensure_replica(rds_primary, rds_standby, primary_region: str, subnets: dict[str, str], sg_db: str) -> dict:
+    """도쿄 복제본을 세우고 available까지 기다린다. 이미 있으면(승격된 것이어도) 그대로 쓴다."""
+    db = _find_db(rds_standby)
+    if not db:
+        _ensure_db_subnet_group(rds_standby, subnets)
+        source = _find_db(rds_primary)
+        rds_standby.create_db_instance_read_replica(
+            **replica_definition(source["DBInstanceArn"], primary_region, sg_db))
+        print(f"[platform] 도쿄 RDS 복제본 {DB_INSTANCE} 생성 요청, available 대기(수십 분 걸릴 수 있다)")
+    rds_standby.get_waiter("db_instance_available").wait(DBInstanceIdentifier=DB_INSTANCE,
+                                                         WaiterConfig={"Delay": 30, "MaxAttempts": 120})
+    return _find_db(rds_standby)
+
+
+def _ensure_ecr_replication(ecr, account: str) -> None:
+    rules = ecr.describe_registry().get("replicationConfiguration", {}).get("rules", [])
+    rule = ecr_replication_rule(account)
+    if rule not in rules:
+        ecr.put_replication_configuration(
+            replicationConfiguration={"rules": with_replication_rule(rules, rule, present=True)})
+        print(f"[platform] ECR 복제 규칙 {PREFIX}* → {STANDBY_REGION}(이후 푸시한 이미지부터)")
+
+
+def _remove_ecr_replication(ecr, account: str) -> None:
+    rules = ecr.describe_registry().get("replicationConfiguration", {}).get("rules", [])
+    rule = ecr_replication_rule(account)
+    if rule in rules:
+        ecr.put_replication_configuration(
+            replicationConfiguration={"rules": with_replication_rule(rules, rule, present=False)})
+        print("[platform] ECR 도쿄 복제 규칙 삭제")
+
+
+def _standby_nat_cidrs(c: dict) -> list[str]:
+    """도쿄 NAT 공인 IP(failover 뒤에만 있다). 서울 up 재실행이 WAF에서 이 IP를 빼 도쿄 화면을 막지 않게 한다."""
+    s = c.get("standby")
+    vpc_id = _find_vpc(s["ec2"]) if s else None
+    if not vpc_id:
+        return []
+    return [f"{n['NatGatewayAddresses'][0]['PublicIp']}/32" for n in _find_nats(s["ec2"], vpc_id).values()
+            if n.get("NatGatewayAddresses")]
+
+
+def standby_inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
+    s = c["standby"]
+    vpc_id = _find_vpc(s["ec2"])
+    rows: list[tuple[str, str, Optional[str]]] = [("도쿄 VPC", VPC_NAME, vpc_id)]
+    sgs = _find_sgs(s["ec2"], vpc_id) if vpc_id else {}
+    rows.append(("도쿄 SG", f"{PREFIX}-* {len(SECURITY_GROUPS)}종",
+                 f"{len(sgs)}/{len(SECURITY_GROUPS)}" if sgs else None))
+    db = _find_db(s["rds"])
+    role = None
+    if db:
+        role = "복제본" if db.get("ReadReplicaSourceDBInstanceIdentifier") else "승격됨(독립 DB)"
+    rows.append(("도쿄 RDS", DB_INSTANCE, f"{role} ({db['DBInstanceStatus']})" if db else None))
+    rows += [("도쿄 Secret", n, _find_secret(s["sm"], n)) for n in (SECRET_DATABASE_URL, *STANDBY_COPIED_SECRETS)]
+    rows.append(("도쿄 설정(SSM)", STANDBY_CONFIG_PARAM, "있음" if _find_parameter(s["ssm"], STANDBY_CONFIG_PARAM) else None))
+    rules = c["ecr"].describe_registry().get("replicationConfiguration", {}).get("rules", [])
+    rows.append(("ECR 복제 규칙", f"{PREFIX}* → {STANDBY_REGION}",
+                 "있음" if ecr_replication_rule(c["account"]) in rules else None))
+    rows += [("도쿄 ECR", n, _find_repo(s["ecr"], n)) for n in ECR_REPOS.values()]
+    rows.append(("도쿄 EcsCluster", CLUSTER, _find_cluster(s["ecs"])))
+    rows.append(("도쿄 NAT(failover)", f"{PREFIX}-nat-*", ", ".join(_standby_nat_cidrs(c)) or None))
+    lb = _find_lb(s["elbv2"])
+    rows.append(("도쿄 ALB(failover)", ALB_NAME, lb["DNSName"] if lb else None))
+    for name in (API_SERVICE, WEB_SERVICE):
+        svc = _find_service(s["ecs"], name)
+        rows.append(("도쿄 EcsService", name, f"running {svc['runningCount']}/{svc['desiredCount']}" if svc else None))
+    return rows
+
+
+def standby_up(c: dict, account: str, region: str, domain: str) -> None:
+    """도쿄 대기 구성을 세운다. 서울 플랫폼(up --domain)이 먼저 서 있어야 한다. 재실행이 곧 동기화다
+    (비밀 사본 · 실행 역할 정책 · failover 설정값을 서울 값으로 다시 맞춘다)."""
+    s = c["standby"]
+    source = _find_db(c["rds"])
+    dist = _find_distribution(c["cf"])
+    pool = _find_user_pool(c["cidp"])
+    client_id = _find_app_client(c["cidp"], pool["id"]) if pool else None
+    zone_id = _find_zone(c["r53"], domain)
+    exec_role = _get_role(c["iam"], ROLE_EXEC)
+    if not (source and source["DBInstanceStatus"] == "available" and dist and client_id and zone_id and exec_role):
+        sys.exit("서울 플랫폼(RDS available · CloudFront · 사용자 풀 · 실행 역할)과 도메인 호스팅 영역이 먼저 있어야 한다 — "
+                 "up --domain을 먼저 돌릴 것")
+    if not is_platform_tagged(exec_role.get("Tags", [])):
+        sys.exit(f"IAM 역할 {ROLE_EXEC}에 플랫폼 태그가 없다 — 덮어쓰지 않는다")
+    ec2 = s["ec2"]
+    vpc_id = _ensure_vpc(ec2)
+    subnets = _ensure_subnets(ec2, vpc_id, STANDBY_REGION)
+    _ensure_public_route(ec2, vpc_id, subnets)
+    sgs = _ensure_sgs(ec2, vpc_id, https=True)
+    replica = _ensure_replica(c["rds"], s["rds"], region, subnets, sgs[SG_DB])
+    # 복제본은 서울의 마스터 비밀번호를 그대로 갖는다. 승격 뒤에도 엔드포인트는 바뀌지 않는다
+    password = urlsplit(_secret_value(c["sm"], SECRET_DATABASE_URL)).password
+    _sync_secret(s["sm"], SECRET_DATABASE_URL, database_url(password, replica["Endpoint"]["Address"]))
+    for name in STANDBY_COPIED_SECRETS:
+        _sync_secret(s["sm"], name, _secret_value(c["sm"], name))
+    c["iam"].put_role_policy(RoleName=ROLE_EXEC, PolicyName="read-platform-secrets",
+                             PolicyDocument=json.dumps(exec_secrets_policy(_exec_secret_arns(c))))
+    _ensure_ecr_replication(c["ecr"], account)
+    _ensure_logs(s["logs"])
+    _ensure_cluster(s["ecs"])
+    _ensure_origin_certificate(s["acm_origin"], c["r53"], zone_id, domain)
+    config = standby_config(pool["id"], client_id, region, public_origins(dist), onboarding_template_url(account, region))
+    s["ssm"].put_parameter(Name=STANDBY_CONFIG_PARAM, Value=json.dumps(config), Type="String", Overwrite=True)
+    print(f"[platform] 도쿄 대기 구성 완료 — 복제본 {replica['Endpoint']['Address']}")
+    print("  이미지는 복제 규칙을 건 뒤 푸시한 것부터 도쿄에 생긴다. 이 뒤에 build를 돌릴 것")
+    print("  서울에서 OpenAI 키 · 사용자 풀 · 도메인을 바꿨으면 standby-up을 다시 돌려 도쿄 사본을 맞출 것")
+
+
+def _image_exists(ecr, repo: str, tag: str) -> bool:
+    try:
+        ecr.describe_images(repositoryName=repo, imageIds=[{"imageTag": tag}])
+        return True
+    except ClientError as exc:
+        if _code(exc) in ("ImageNotFoundException", "RepositoryNotFoundException"):
+            return False
+        raise
+
+
+def _stop_primary(c: dict) -> None:
+    """서울 api·web을 0으로 내리고 태스크가 멈추기를 잠시 기다린다.
+
+    두 리전의 api가 함께 돌면 스케줄러와 디스패처가 같은 일을 두 번 한다(ADR-0010 Context 4). 서울 API가
+    응답하지 않으면(리전 장애) 경고만 하고 넘어간다. 그때는 서울 태스크가 DB에 쓰지도 못한다.
+    """
+    ecs = c["ecs"]
+    try:
+        names = [n for n in (API_SERVICE, WEB_SERVICE) if _find_service(ecs, n)]
+        for name in names:
+            ecs.update_service(cluster=CLUSTER, service=name, desiredCount=0)
+            print(f"[platform] 서울 서비스 {name} → 0")
+        if names:
+            ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=names,
+                                                   WaiterConfig={"Delay": 10, "MaxAttempts": 18})
+        # 도쿄 비밀 사본을 서울 값으로 마지막으로 맞춘다(서울에 닿을 때만)
+        for name in STANDBY_COPIED_SECRETS:
+            _sync_secret(c["standby"]["sm"], name, _secret_value(c["sm"], name))
+    except (ClientError, BotoCoreError) as exc:
+        print(f"[platform] 경고: 서울에 닿지 못했다({exc.__class__.__name__}). 서울 api가 아직 돌고 있으면 직접 0으로 "
+              "내릴 것. 도쿄 비밀은 마지막 standby-up 때의 사본으로 간다")
+
+
+def _promote(rds, db: dict) -> None:
+    if not db.get("ReadReplicaSourceDBInstanceIdentifier"):
+        print("[platform] 도쿄 RDS는 이미 승격돼 있다")
+        return
+    rds.promote_read_replica(DBInstanceIdentifier=DB_INSTANCE, BackupRetentionPeriod=DB_BACKUP_DAYS)
+    print("[platform] 도쿄 RDS 복제본 승격 요청 — 쓰기 가능 상태까지 대기")
+    deadline = time.time() + 1800
+    while True:
+        time.sleep(20)
+        cur = _find_db(rds)
+        if not cur.get("ReadReplicaSourceDBInstanceIdentifier") and cur["DBInstanceStatus"] == "available":
+            print("[platform] 도쿄 RDS 승격 완료")
+            return
+        if time.time() > deadline:
+            sys.exit(f"도쿄 RDS 승격이 30분 안에 끝나지 않았다 — 상태 {cur['DBInstanceStatus']}. 확인 뒤 failover를 다시 돌릴 것")
+
+
+def _add_waf_addresses(waf, cidrs: list[str]) -> None:
+    """허용 IP 집합과 NAT IP 집합에 주소를 더한다. 이미 있는 주소(서울 NAT · 사람 IP)는 빼지 않는다."""
+    for name, label in ((WAF_IPSET, "허용 IP"), (WAF_NAT_IPSET, "NAT IP(속도 제한 제외)")):
+        ipset = _find_ipset(waf, name)
+        if not ipset:
+            sys.exit(f"WAF IP 집합 {name}이 없다 — 서울 up이 세운 웹 ACL이 있어야 한다")
+        current = waf.get_ip_set(Name=name, Scope="CLOUDFRONT", Id=ipset["Id"])["IPSet"]["Addresses"]
+        _ensure_ipset(waf, name, sorted(set(current) | set(cidrs)), label)
+
+
+def failover(c: dict, tag: str, domain: str, dispatch_enabled: bool) -> None:
+    """도쿄로 넘긴다. 서울 API를 부르는 것은 _stop_primary 하나이고, 실패해도 이어 간다.
+
+    전역 서비스(IAM · Route53 · CloudFront · WAF)와 도쿄 리전만으로 끝난다. 로그인 사용자 풀은 서울에 있어
+    서울 리전 장애 중에는 새 로그인이 안 된다. 이미 로그인한 세션은 DB(복제됨)에 있어 이어진다.
+    """
+    s = c["standby"]
+    config = _find_parameter(s["ssm"], STANDBY_CONFIG_PARAM)
+    db = _find_db(s["rds"])
+    vpc_id = _find_vpc(s["ec2"])
+    zone_id = _find_zone(c["r53"], domain)
+    cert_arn = _find_certificate(s["acm_origin"], origin_host(domain))
+    repos = {k: _find_repo(s["ecr"], n) for k, n in ECR_REPOS.items()}
+    if not (config and db and vpc_id and zone_id and cert_arn and all(repos.values())):
+        sys.exit("도쿄 대기 구성(설정값 · RDS · VPC · ECR · origin 인증서)이나 호스팅 영역이 없다 — standby-up을 먼저 돌릴 것")
+    missing = [n for n in ECR_REPOS.values() if not _image_exists(s["ecr"], n, tag)]
+    if missing:
+        sys.exit(f"도쿄 ECR에 태그 {tag}가 없다({', '.join(missing)}) — 복제 규칙을 건 뒤 build한 태그를 줄 것")
+    roles = {k: _find_role(c["iam"], n) for k, n in (("exec", ROLE_EXEC), ("task", ROLE_TASK))}
+    if not all(roles.values()):
+        sys.exit("IAM 역할이 없다 — up을 먼저 돌릴 것")
+    secret_arns = {"DATABASE_URL": _find_secret(s["sm"], SECRET_DATABASE_URL),
+                   "OPENAI_API_KEY": _find_secret(s["sm"], SECRET_OPENAI),
+                   "COGNITO_CLIENT_SECRET": _find_secret(s["sm"], SECRET_COGNITO_CLIENT)}
+    if not all(secret_arns.values()):
+        sys.exit("도쿄 비밀 사본이 없다 — standby-up을 먼저 돌릴 것")
+
+    _stop_primary(c)
+    if dispatch_enabled and _secret_value(s["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER:
+        sys.exit(f"도쿄 {SECRET_OPENAI}가 자리표시값이다 — 디스패치를 켜려면 standby-up으로 키를 먼저 복사할 것")
+    _promote(s["rds"], db)
+    subnets = _find_subnets(s["ec2"], vpc_id)
+    sgs = _find_sgs(s["ec2"], vpc_id)
+    nat_cidrs = [f"{ip}/32" for ip in _ensure_network(s["ec2"], vpc_id, subnets)]
+    alb = _ensure_alb(s["elbv2"], vpc_id, subnets, sgs[SG_ALB], _secret_value(s["sm"], SECRET_ORIGIN),
+                      origin_cert_arn=cert_arn)
+    # 웹의 서버 측 API 호출이 도쿄 NAT IP로 CloudFront를 지난다(ADR-0010 §4)
+    _add_waf_addresses(c["waf"], nat_cidrs)
+
+    ecs = s["ecs"]
+    # AWS_REGION은 도쿄다 — 고객 역할 전환(STS)이 서울 엔드포인트에 기대지 않게 한다. 사용자 풀만 서울이다
+    container = api_container(
+        f"{repos['api']}:{tag}", region=STANDBY_REGION, cors_origin=",".join(config["cors_origins"]),
+        dispatch_enabled=dispatch_enabled, secrets_arns=secret_arns,
+        cognito={"pool_id": config["pool_id"], "client_id": config["client_id"]},
+        onboarding_url=config["onboarding_url"], platform_principal_arn=roles["task"],
+        cognito_region=config["cognito_region"])
+    api_def = _register(ecs, API_TASK_FAMILY, container, cpu="512", memory="1024", exec_arn=roles["exec"],
+                        task_arn=roles["task"])
+    web_def = _register(ecs, WEB_TASK_FAMILY, web_container(f"{repos['web']}:{tag}", region=STANDBY_REGION),
+                        cpu="256", memory="512", exec_arn=roles["exec"], task_arn=None)
+    _migrate(ecs, api_def, _network(subnets, sgs[SG_API]))
+    _upsert_service(ecs, API_SERVICE, api_def, _network(subnets, sgs[SG_API]), alb["tg_api"], "api", API_PORT)
+    _upsert_service(ecs, WEB_SERVICE, web_def, _network(subnets, sgs[SG_WEB]), alb["tg_web"], "web", WEB_PORT)
+    print("[platform] 도쿄 서비스 안정화 대기")
+    ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=[API_SERVICE, WEB_SERVICE],
+                                           WaiterConfig={"Delay": 15, "MaxAttempts": 60})
+    problems = settled_deployment_problems(ecs, {API_SERVICE: api_def, WEB_SERVICE: web_def})
+    if problems:
+        sys.exit("도쿄 배포 실패 — " + " · ".join(problems) + " (origin 레코드는 아직 서울을 가리킨다)")
+    # 서비스가 선 뒤에 오리진을 옮긴다 — 빈 ALB를 가리키는 시간이 없게
+    _ensure_origin_record(c["r53"], zone_id, domain, alb)
+    print(f"[platform] failover 완료 — {config['cors_origins'][0]}가 도쿄에서 돈다"
+          f"(디스패치 {'켬' if dispatch_enabled else '끔'})")
+    print("  알려진 한계: 로그인 사용자 풀은 서울이다. 오류 알람은 서울 ALB 기준이라 도쿄를 보지 않는다. "
+          "서울로 되돌리기는 수동이다")
+
+
 # ------------------------------------------------------------------ 정리(down)
 def _try(fn: Callable[[], Any], *ignore: str) -> None:
     try:
@@ -2288,10 +2629,7 @@ def _delete_alarms(cw, sns) -> None:
         print(f"[platform] {name}은 플랫폼 태그가 없어 건드리지 않았다 — 확인 뒤 직접 정리할 것")
 
 
-def down(c: dict, account: str) -> None:
-    ec2, ecs, elbv2 = c["ec2"], c["ecs"], c["elbv2"]
-    # 알람이 먼저다 — 서비스를 내리는 동안 down 알람이 울리지 않게 한다
-    _delete_alarms(c["cw"], c["sns"])
+def _down_ecs(ecs) -> None:
     if _find_cluster(ecs):
         deleted = []
         for name in (API_SERVICE, WEB_SERVICE):
@@ -2309,8 +2647,77 @@ def down(c: dict, account: str) -> None:
         for arn in ecs.list_task_definitions(familyPrefix=family, status="ACTIVE")["taskDefinitionArns"]:
             ecs.deregister_task_definition(taskDefinition=arn)
 
+
+def _down_alb(elbv2) -> None:
+    lb = _find_lb(elbv2)
+    if lb:
+        elbv2.delete_load_balancer(LoadBalancerArn=lb["LoadBalancerArn"])
+        elbv2.get_waiter("load_balancers_deleted").wait(LoadBalancerArns=[lb["LoadBalancerArn"]])
+        print("[platform] ALB 삭제")
+    for name in (TG_API, TG_WEB):
+        arn = _find_tg(elbv2, name)
+        if arn:
+            _retry(lambda arn=arn: elbv2.delete_target_group(TargetGroupArn=arn), f"TG {name} 삭제", ("ResourceInUse",))
+
+
+def _down_db(rds) -> None:
+    if _find_db(rds):
+        rds.delete_db_instance(DBInstanceIdentifier=DB_INSTANCE, SkipFinalSnapshot=True, DeleteAutomatedBackups=True)
+        print("[platform] RDS 삭제 — 완료 대기")
+        rds.get_waiter("db_instance_deleted").wait(DBInstanceIdentifier=DB_INSTANCE)
+    _try(lambda: rds.delete_db_subnet_group(DBSubnetGroupName=DB_SUBNET_GROUP), "DBSubnetGroupNotFoundFault")
+
+
+def _down_vpc(ec2) -> None:
+    vpc_id = _find_vpc(ec2)
+    if not vpc_id:
+        return
+    nat_ids = [n["NatGatewayId"] for n in _find_nats(ec2, vpc_id).values()]
+    for nat_id in nat_ids:
+        ec2.delete_nat_gateway(NatGatewayId=nat_id)
+    if nat_ids:  # 한꺼번에 지우고 함께 기다린다. 하나씩 기다리면 대기가 NAT 수만큼 길어진다
+        ec2.get_waiter("nat_gateway_deleted").wait(NatGatewayIds=nat_ids)
+        print(f"[platform] NAT {len(nat_ids)}개 삭제")
+    for name in nat_eip_names():
+        for addr in _named(ec2.describe_addresses, "Addresses", name):
+            ec2.release_address(AllocationId=addr["AllocationId"])
+    for igw in ec2.describe_internet_gateways(Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}])[
+            "InternetGateways"]:
+        ec2.detach_internet_gateway(InternetGatewayId=igw["InternetGatewayId"], VpcId=vpc_id)
+        ec2.delete_internet_gateway(InternetGatewayId=igw["InternetGatewayId"])
+    for rt in ec2.describe_route_tables(Filters=[_vpc_filter(vpc_id)])["RouteTables"]:
+        if any(a.get("Main") for a in rt["Associations"]):
+            continue
+        for a in rt["Associations"]:
+            ec2.disassociate_route_table(AssociationId=a["RouteTableAssociationId"])
+        ec2.delete_route_table(RouteTableId=rt["RouteTableId"])
+    groups = [g for g in ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])["SecurityGroups"]
+              if g["GroupName"] != "default"]
+    for g in groups:  # 서로 참조하는 규칙부터 걷어야 지워진다
+        if g["IpPermissions"]:
+            ec2.revoke_security_group_ingress(GroupId=g["GroupId"], IpPermissions=g["IpPermissions"])
+    for g in groups:
+        _retry(lambda g=g: ec2.delete_security_group(GroupId=g["GroupId"]), f"SG {g['GroupName']} 삭제",
+               ("DependencyViolation",))
+    for s in ec2.describe_subnets(Filters=[_vpc_filter(vpc_id)])["Subnets"]:
+        _retry(lambda s=s: ec2.delete_subnet(SubnetId=s["SubnetId"]), "Subnet 삭제", ("DependencyViolation",))
+    _retry(lambda: ec2.delete_vpc(VpcId=vpc_id), "VPC 삭제", ("DependencyViolation",))
+    print(f"[platform] VPC {vpc_id} 삭제")
+
+
+def down(c: dict, account: str) -> None:
+    """서울과 도쿄(대기 구성 · failover로 선 것)를 함께 지운다. 리전별 자원은 도쿄가 먼저다. 서울 원본 DB를
+    먼저 지우면 도쿄 복제본이 독립 DB로 승격돼 남는다."""
+    standby = c.get("standby")
+    regional = ([standby] if standby else []) + [c]
+    # 알람이 먼저다 — 서비스를 내리는 동안 down 알람이 울리지 않게 한다
+    _delete_alarms(c["cw"], c["sns"])
+    for r in regional:
+        _down_ecs(r["ecs"])
+
     dist = _find_distribution(c["cf"])
     if dist:
+        lbs = [lb for lb in (_find_lb(r["elbv2"]) for r in regional) if lb]
         # 배포를 지우면 별칭 레코드가 없는 곳을 가리킨다 — 이 배포를 가리키는 것만 먼저 지운다
         for alias in (dist.get("Aliases") or {}).get("Items") or []:
             zone_id = _find_zone(c["r53"], alias)
@@ -2322,11 +2729,10 @@ def down(c: dict, account: str) -> None:
                 c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [
                     {"Action": "DELETE", "ResourceRecordSet": r} for r in records]})
                 print(f"[platform] Route53 {alias} 별칭 레코드 {len(records)}건 삭제")
-            # ALB를 지우면 origin.<도메인>도 없는 곳을 가리킨다 — 이 ALB를 가리키는 것만 지운다
-            lb = _find_lb(elbv2)
+            # ALB를 지우면 origin.<도메인>도 없는 곳을 가리킨다. 플랫폼 ALB(서울, failover 뒤엔 도쿄)를 가리키는 것만 지운다
             host = origin_host(alias)
             found = c["r53"].list_resource_record_sets(HostedZoneId=zone_id, StartRecordName=host, MaxItems="10")
-            records = origin_records_for(found["ResourceRecordSets"], host, lb["DNSName"]) if lb else []
+            records = [r for lb in lbs for r in origin_records_for(found["ResourceRecordSets"], host, lb["DNSName"])]
             if records:
                 c["r53"].change_resource_record_sets(HostedZoneId=zone_id, ChangeBatch={"Changes": [
                     {"Action": "DELETE", "ResourceRecordSet": r} for r in records]})
@@ -2342,28 +2748,21 @@ def down(c: dict, account: str) -> None:
         print("[platform] CloudFront 삭제")
     _delete_waf(c["waf"])
 
-    lb = _find_lb(elbv2)
-    if lb:
-        elbv2.delete_load_balancer(LoadBalancerArn=lb["LoadBalancerArn"])
-        elbv2.get_waiter("load_balancers_deleted").wait(LoadBalancerArns=[lb["LoadBalancerArn"]])
-        print("[platform] ALB 삭제")
-    for name in (TG_API, TG_WEB):
-        arn = _find_tg(elbv2, name)
-        if arn:
-            _retry(lambda arn=arn: elbv2.delete_target_group(TargetGroupArn=arn), f"TG {name} 삭제", ("ResourceInUse",))
+    for r in regional:
+        _down_alb(r["elbv2"])
+    for r in regional:
+        _down_db(r["rds"])
 
-    if _find_db(c["rds"]):
-        c["rds"].delete_db_instance(DBInstanceIdentifier=DB_INSTANCE, SkipFinalSnapshot=True,
-                                    DeleteAutomatedBackups=True)
-        print("[platform] RDS 삭제 — 완료 대기")
-        c["rds"].get_waiter("db_instance_deleted").wait(DBInstanceIdentifier=DB_INSTANCE)
-    _try(lambda: c["rds"].delete_db_subnet_group(DBSubnetGroupName=DB_SUBNET_GROUP), "DBSubnetGroupNotFoundFault")
-
-    for name in ECR_REPOS.values():
-        _try(lambda name=name: c["ecr"].delete_repository(repositoryName=name, force=True), "RepositoryNotFoundException")
-    for name in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_COGNITO_CLIENT):
-        _try(lambda name=name: c["sm"].delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True),
-             "ResourceNotFoundException")
+    if standby:
+        _remove_ecr_replication(c["ecr"], account)
+        _try(lambda: standby["ssm"].delete_parameter(Name=STANDBY_CONFIG_PARAM), "ParameterNotFound")
+    for r in regional:
+        for name in ECR_REPOS.values():
+            _try(lambda name=name: r["ecr"].delete_repository(repositoryName=name, force=True),
+                 "RepositoryNotFoundException")
+        for name in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_COGNITO_CLIENT):
+            _try(lambda name=name: r["sm"].delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True),
+                 "ResourceNotFoundException")
     pool = _find_user_pool(c["cidp"])
     if pool:  # 사용자도 함께 사라진다. 다시 up하면 첫 중앙 관리자부터 만든다
         c["cidp"].delete_user_pool(UserPoolId=pool["id"])
@@ -2373,44 +2772,14 @@ def down(c: dict, account: str) -> None:
         _try(lambda: c["s3"].delete_object(Bucket=bucket, Key=onboarding.TEMPLATE_KEY), "NoSuchKey")
         c["s3"].delete_bucket(Bucket=bucket)
         print(f"[platform] S3 {bucket} 삭제(고객 계정에 이미 만든 접근 역할은 그대로다)")
-    for name in LOG_GROUPS.values():
-        _try(lambda name=name: c["logs"].delete_log_group(logGroupName=name), "ResourceNotFoundException")
+    for r in regional:
+        for name in LOG_GROUPS.values():
+            _try(lambda name=name: r["logs"].delete_log_group(logGroupName=name), "ResourceNotFoundException")
 
     _delete_roles(c["iam"])
 
-    vpc_id = _find_vpc(ec2)
-    if vpc_id:
-        nat_ids = [n["NatGatewayId"] for n in _find_nats(ec2, vpc_id).values()]
-        for nat_id in nat_ids:
-            ec2.delete_nat_gateway(NatGatewayId=nat_id)
-        if nat_ids:  # 한꺼번에 지우고 함께 기다린다. 하나씩 기다리면 대기가 NAT 수만큼 길어진다
-            ec2.get_waiter("nat_gateway_deleted").wait(NatGatewayIds=nat_ids)
-            print(f"[platform] NAT {len(nat_ids)}개 삭제")
-        for name in nat_eip_names():
-            for addr in _named(ec2.describe_addresses, "Addresses", name):
-                ec2.release_address(AllocationId=addr["AllocationId"])
-        for igw in ec2.describe_internet_gateways(Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}])[
-                "InternetGateways"]:
-            ec2.detach_internet_gateway(InternetGatewayId=igw["InternetGatewayId"], VpcId=vpc_id)
-            ec2.delete_internet_gateway(InternetGatewayId=igw["InternetGatewayId"])
-        for rt in ec2.describe_route_tables(Filters=[_vpc_filter(vpc_id)])["RouteTables"]:
-            if any(a.get("Main") for a in rt["Associations"]):
-                continue
-            for a in rt["Associations"]:
-                ec2.disassociate_route_table(AssociationId=a["RouteTableAssociationId"])
-            ec2.delete_route_table(RouteTableId=rt["RouteTableId"])
-        groups = [g for g in ec2.describe_security_groups(Filters=[_vpc_filter(vpc_id)])["SecurityGroups"]
-                  if g["GroupName"] != "default"]
-        for g in groups:  # 서로 참조하는 규칙부터 걷어야 지워진다
-            if g["IpPermissions"]:
-                ec2.revoke_security_group_ingress(GroupId=g["GroupId"], IpPermissions=g["IpPermissions"])
-        for g in groups:
-            _retry(lambda g=g: ec2.delete_security_group(GroupId=g["GroupId"]), f"SG {g['GroupName']} 삭제",
-                   ("DependencyViolation",))
-        for s in ec2.describe_subnets(Filters=[_vpc_filter(vpc_id)])["Subnets"]:
-            _retry(lambda s=s: ec2.delete_subnet(SubnetId=s["SubnetId"]), "Subnet 삭제", ("DependencyViolation",))
-        _retry(lambda: ec2.delete_vpc(VpcId=vpc_id), "VPC 삭제", ("DependencyViolation",))
-        print(f"[platform] VPC {vpc_id} 삭제")
+    for r in regional:
+        _down_vpc(r["ec2"])
 
 
 # ------------------------------------------------------------------ 진입점
@@ -2418,7 +2787,7 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Vigilantis 플랫폼 배포 환경 (ADR-0010)")
     parser.add_argument("command", choices=("status", "up", "build", "deploy", "bootstrap-admin", "down",
-                                            "notification-iam", "notification-revoke"))
+                                            "notification-iam", "notification-revoke", "standby-up", "failover"))
     parser.add_argument("--account", required=True, help="대상 AWS 계정 ID — 호출 주체(sts)와 같아야 한다")
     parser.add_argument("--allow-cidr", action="append", default=[],
                         help=f"up: WAF 허용 IPv4 CIDR(/{MIN_ALLOW_PREFIX} 이상 좁게 · 여러 번 줄 수 있다)")
@@ -2441,9 +2810,15 @@ def main() -> None:
         sys.exit("notification-iam에는 --notification-config가 필요하다")
     if args.command == "bootstrap-admin" and not args.email:
         sys.exit("bootstrap-admin에는 --email이 필요하다")
+    if args.command in ("standby-up", "failover") and not args.domain:
+        sys.exit(f"{args.command}에는 --domain이 필요하다 — 도쿄 ALB는 origin.<도메인> 인증서로만 CloudFront를 받는다")
+    if args.command == "failover" and not args.tag:
+        sys.exit("failover에는 --tag가 필요하다(복제 규칙을 건 뒤 build한 태그)")
 
     account = _require_real_aws(args.account)["Account"]
     region = default_region()
+    if region == STANDBY_REGION:
+        sys.exit(f"기본 리전이 서브 리전({STANDBY_REGION})이다 — 주 리전 프로필(서울)로 돌릴 것")
     c = {
         "ec2": aws_client("ec2", region), "elbv2": aws_client("elbv2", region), "rds": aws_client("rds", region),
         "ecs": aws_client("ecs", region), "ecr": aws_client("ecr", region), "iam": aws_client("iam", region),
@@ -2455,6 +2830,10 @@ def main() -> None:
         # ALB 인증서는 ALB와 같은 리전에 있어야 한다(CloudFront 인증서와 다르다)
         "acm_origin": aws_client("acm", region),
         "cidp": aws_client("cognito-idp", region), "s3": aws_client("s3", region), "account": account,
+        # 서브 리전(도쿄) 파일럿 라이트. 전역 서비스(IAM · Route53 · CloudFront · WAF)는 위 클라이언트를 같이 쓴다
+        "standby": {name: aws_client(service, STANDBY_REGION) for name, service in (
+            ("ec2", "ec2"), ("elbv2", "elbv2"), ("rds", "rds"), ("ecs", "ecs"), ("ecr", "ecr"), ("logs", "logs"),
+            ("sm", "secretsmanager"), ("acm_origin", "acm"), ("ssm", "ssm"))},
     }
     if args.command == "status":
         status(c)
@@ -2506,12 +2885,27 @@ def main() -> None:
                 verify_notification_policies(c["iam"], notification)
             print(f"[platform] 배포 예정 — 태그 {args.tag} · AI 분석·조치 실행 디스패치 "
                   f"{'켬' if args.enable_dispatch else '끔'} — 실제로 하려면 --yes")
+        elif args.command == "standby-up":
+            missing = [row for row in standby_inventory(c) if row[2] is None and "failover" not in row[0]
+                       and row[0] != "도쿄 EcsService"]
+            print(f"[platform] 도쿄 생성 예정 {len(missing)}건(+ origin.{args.domain} 인증서) — 실제로 만들려면 --yes")
+            _print_rows(missing)
+        elif args.command == "failover":
+            print(f"[platform] failover 예정 — 서울 api·web 0 → 도쿄 복제본 승격(되돌릴 수 없다) → 도쿄 NAT·ALB → "
+                  f"WAF에 도쿄 NAT IP → 도쿄 ECS(태그 {args.tag}) → origin.{args.domain}을 도쿄로. 실제로 하려면 --yes")
+            _print_rows(standby_inventory(c))
         else:
-            print("[platform] 삭제 대상(플랫폼 태그 자원 + 플랫폼 VPC 안 전부) — 실제로 지우려면 --yes")
-            _print_rows([row for row in inventory(c) if row[2]])
+            print("[platform] 삭제 대상(플랫폼 태그 자원 + 플랫폼 VPC 안 전부, 서울 · 도쿄) — 실제로 지우려면 --yes")
+            _print_rows([row for row in inventory(c) + standby_inventory(c) if row[2]])
         return
+    if args.command == "deploy" and _find_service(c["standby"]["ecs"], API_SERVICE):
+        sys.exit("도쿄 api가 돌고 있다(failover 뒤) — 서울에 배포하면 두 리전의 api가 함께 돈다. 서울로 되돌리기는 수동이다")
     if args.command == "up":
         up(c, account, region, allow_cidrs, args.domain, args.alarm_email)
+    elif args.command == "standby-up":
+        standby_up(c, account, region, args.domain)
+    elif args.command == "failover":
+        failover(c, args.tag, args.domain, args.enable_dispatch)
     elif args.command == "notification-iam":
         apply_notification_policies(c["iam"], c["ecs"], notification)
     elif args.command == "deploy":
