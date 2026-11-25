@@ -1744,9 +1744,8 @@ def down(clients: dict, account: str) -> None:
     holders = _roles_holding_app_policy(clients["iam"], account)
     if holders:
         sys.exit(
-            f"[smoke] {APP_POLICY}·{COST_POLICY}·{GUARDDUTY_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
-            "접근 역할이 빌려 쓰는 중이다. 정리 순서는 플랫폼 down → 스모크 down이다"
-            "(scripts/provision_platform_aws.py down, ADR-0010 §7)."
+            f"[smoke] {APP_POLICY}·{COST_POLICY}·{GUARDDUTY_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다. "
+            "이 스크립트는 다른 역할에서 정책을 떼지 않는다. 해당 역할에서 정책 연결을 먼저 해제한 뒤 스모크 down을 다시 실행할 것."
         )
     ec2, elbv2, asg = clients["ec2"], clients["elbv2"], clients["asg"]
     vpc_id = _find_vpc(ec2)

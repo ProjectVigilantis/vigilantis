@@ -1286,7 +1286,7 @@ def test_down_removes_the_app_user_and_its_managed_policy():
 
 
 class FakeIamWithRoles(FakeIam):
-    """플랫폼 접근 역할(ADR-0010 §3)이 앱 정책을 빌려 붙인 상태."""
+    """스모크 관리형 정책이 IAM 역할에 붙어 있는 상태."""
 
     def __init__(self, roles):
         super().__init__()
@@ -1306,13 +1306,16 @@ class FakeIamWithRoles(FakeIam):
 
 def test_down_stops_first_when_a_role_still_holds_the_app_policy():
     """정책 삭제는 down의 맨 끝이다 — 역할이 붙잡고 있으면 VPC까지 지운 뒤 DeleteConflict로 멈춘다.
-    무엇이든 지우기 전에 "플랫폼 down 먼저"로 멈춰야 한다."""
-    iam = FakeIamWithRoles(["vigilantis-access"])
+    무엇이든 지우기 전에 정책 연결 해제를 안내하고 멈춰야 한다."""
+    iam = FakeIamWithRoles(["smoke-policy-holder"])
     smoke._ensure_app_user(iam, ACCOUNT, REGION, VPC_ID, SUBNET_IDS)
     iam.writes.clear()
     # ec2·elbv2·asg 자리는 비워 둔다 — 건드리면 KeyError로 드러난다
-    with pytest.raises(SystemExit, match="플랫폼 down → 스모크 down"):
+    with pytest.raises(
+        SystemExit, match="정책 연결을 먼저 해제한 뒤 스모크 down을 다시 실행"
+    ) as exc:
         smoke.down({"iam": iam}, ACCOUNT)
+    assert "IAM 역할 smoke-policy-holder에 붙어 있다" in str(exc.value)
     assert iam.writes == []
 
 
