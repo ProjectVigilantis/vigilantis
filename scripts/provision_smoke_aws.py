@@ -1719,8 +1719,7 @@ def _managed_policies(account: str) -> tuple[tuple[str, str], ...]:
 
 
 def _roles_holding_app_policy(iam, account: str) -> list[str]:
-    """앱 정책·비용 정책·GuardDuty 정책을 붙잡고 있는 IAM 역할. 플랫폼의 접근 역할(vigilantis-access,
-    ADR-0010 §3)이 셋 다 빌려 쓴다.
+    """앱 정책·비용 정책·GuardDuty 정책이 붙어 있는 IAM 역할.
 
     역할에 붙어 있으면 delete_policy가 DeleteConflict로 실패한다. 남의 역할에서 정책을 떼는 것은
     이 스크립트의 몫이 아니므로 떼지 않고 알린다.
@@ -1745,9 +1744,8 @@ def down(clients: dict, account: str) -> None:
     holders = _roles_holding_app_policy(clients["iam"], account)
     if holders:
         sys.exit(
-            f"[smoke] {APP_POLICY}·{COST_POLICY}·{GUARDDUTY_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다 — 플랫폼 배포의 "
-            "접근 역할이 빌려 쓰는 중이다. 정리 순서는 플랫폼 down → 스모크 down이다"
-            "(scripts/provision_platform_aws.py down, ADR-0010 §7)."
+            f"[smoke] {APP_POLICY}·{COST_POLICY}·{GUARDDUTY_POLICY} 정책이 IAM 역할 {', '.join(holders)}에 붙어 있다. "
+            "이 스크립트는 다른 역할에서 정책을 떼지 않는다. 해당 역할에서 정책 연결을 먼저 해제한 뒤 스모크 down을 다시 실행할 것."
         )
     ec2, elbv2, asg = clients["ec2"], clients["elbv2"], clients["asg"]
     vpc_id = _find_vpc(ec2)
