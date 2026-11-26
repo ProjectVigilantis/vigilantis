@@ -1192,7 +1192,7 @@ def test_up_preview_also_checks_the_domain(monkeypatch):
 
 
 def _fake_main(monkeypatch, argv: list[str], fakes: dict) -> None:
-    monkeypatch.setattr(platform, "_require_real_aws", lambda account: {"Account": account})
+    monkeypatch.setattr(platform, "_require_real_aws", lambda account, sts_region=None: {"Account": account})
     monkeypatch.setattr(platform, "default_region", lambda: "ap-northeast-2")
     monkeypatch.setattr(platform, "aws_client", lambda name, region=None: fakes.get(name, object()))
     monkeypatch.setattr(sys, "argv", ["provision_platform_aws.py", *argv])
@@ -2554,9 +2554,119 @@ class UnreachableEcs:
         raise EndpointConnectionError(endpoint_url="https://ecs.ap-northeast-2.amazonaws.com")
 
 
-def test_failover_goes_on_when_seoul_cannot_be_reached(capsys):
-    platform._stop_primary({"ecs": UnreachableEcs(), "sm": None, "standby": {"sm": None}})
-    assert "서울에 닿지 못했다" in capsys.readouterr().out
+class DeniedEcs:
+    def describe_clusters(self, clusters):
+        raise _client_error("AccessDeniedException", "DescribeClusters")
+
+
+class UnsettledEcs:
+    """서비스는 0으로 내렸지만 태스크가 대기 시간 안에 멈추지 않는다."""
+
+    def __init__(self):
+        self.updated: list[str] = []
+
+    def describe_clusters(self, clusters):
+        return {"clusters": [{"clusterArn": "arn:cluster", "status": "ACTIVE"}]}
+
+    def describe_services(self, cluster, services):
+        return {"services": [{"serviceName": services[0], "status": "ACTIVE"}]}
+
+    def update_service(self, cluster, service, desiredCount):
+        self.updated.append(service)
+
+    def get_waiter(self, name):
+        from botocore.exceptions import WaiterError
+
+        class _Waiter:
+            def wait(self, **kwargs):
+                raise WaiterError(name="ServicesStable", reason="Max attempts exceeded", last_response={})
+        return _Waiter()
+
+
+def test_failover_stops_before_promoting_when_seoul_cannot_be_reached():
+    # 서울 api가 멈췄는지 모른다. 운영자의 판단(--primary-unreachable) 없이는 승격하지 않는다
+    with pytest.raises(SystemExit, match="--primary-unreachable"):
+        platform._stop_primary({"ecs": UnreachableEcs(), "sm": None, "standby": {"sm": None}})
+
+
+def test_failover_goes_on_when_seoul_cannot_be_reached_and_the_operator_says_so(capsys):
+    # sm이 None이다. 서울에 닿지 않으면 비밀 동기화도 부르지 않는다
+    platform._stop_primary({"ecs": UnreachableEcs(), "sm": None, "standby": {"sm": None}}, primary_unreachable=True)
+    out = capsys.readouterr().out
+    assert "--primary-unreachable로 넘어간다" in out and "바로 0으로 내릴 것" in out
+
+
+@pytest.mark.parametrize("ecs", [DeniedEcs(), UnsettledEcs()], ids=["access-denied", "waiter-timeout"])
+def test_failover_stops_when_seoul_answers_but_its_stop_is_not_confirmed(ecs):
+    # 서울이 응답은 하는데 정지를 확인하지 못했다. 서울 api가 돌고 있을 수 있으니 플래그가 있어도 멈춘다
+    with pytest.raises(SystemExit, match="멈춘 것을 확인하지 못했다"):
+        platform._stop_primary({"ecs": ecs, "sm": None, "standby": {"sm": None}}, primary_unreachable=True)
+
+
+def test_failover_checks_the_caller_with_the_standby_sts(monkeypatch):
+    seen: list[object] = []
+    _fake_main(monkeypatch, ["failover", "--account", ACCOUNT, "--domain", "vigilantis.dev", "--tag", "v1"], {})
+
+    def _record(account, sts_region=None):
+        seen.append(sts_region)
+        sys.exit("멈춤")
+    monkeypatch.setattr(platform, "_require_real_aws", _record)
+    with pytest.raises(SystemExit):
+        platform.main()
+    assert seen == [STANDBY]  # 서울 STS가 죽어 있어도 계정 확인에서 막히지 않는다
+
+
+def test_primary_unreachable_is_only_for_failover(monkeypatch):
+    _fake_main(monkeypatch, ["deploy", "--account", ACCOUNT, "--tag", "v1", "--primary-unreachable"], {})
+    with pytest.raises(SystemExit, match="failover에서만"):
+        platform.main()
+
+
+class BrokenStandbyEcs:
+    def describe_clusters(self, clusters):
+        raise _client_error("AccessDeniedException", "DescribeClusters")
+
+
+def test_seoul_commands_stop_before_changing_seoul_when_tokyo_cannot_be_read():
+    c = {"standby": {"ecs": BrokenStandbyEcs()}}
+    # failover 뒤인지 모른 채 서울에 배포하면 두 리전의 api가 함께 돌 수 있다
+    with pytest.raises(SystemExit, match="서울 deploy 전에 멈춘다"):
+        platform._standby_preflight(c, "deploy")
+
+
+def test_up_stops_before_creating_seoul_resources_when_tokyo_cannot_be_read(monkeypatch):
+    created: list[str] = []
+    monkeypatch.setattr(platform, "_require_own_alarm_resources", lambda cw, sns: None)
+    monkeypatch.setattr(platform, "_ensure_vpc", lambda ec2: created.append("vpc"))
+    c = {"ec2": None, "cw": None, "sns": None, "standby": {"ecs": BrokenStandbyEcs()}}
+    with pytest.raises(SystemExit, match="서울 up 전에 멈춘다"):
+        platform.up(c, ACCOUNT, "ap-northeast-2", ["203.0.113.7/32"])
+    assert created == []
+
+
+def test_up_after_a_failover_needs_the_domain(monkeypatch):
+    # --domain 없는 up은 CloudFront 오리진을 서울 ALB로 바꾼다. failover 뒤 서울 태스크는 0이다
+    monkeypatch.setattr(platform, "_find_service", lambda ecs, name: {"status": "ACTIVE"})
+    monkeypatch.setattr(platform, "_standby_nat_cidrs", lambda c: [])
+    monkeypatch.setattr(platform, "_standby_exec_secret_arns", lambda c: [])
+    c = {"standby": {"ecs": None}}
+    with pytest.raises(SystemExit, match="--domain을 함께 줄 것"):
+        platform._standby_preflight(c, "up")
+    assert platform._standby_preflight(c, "up", "vigilantis.dev").api_running
+
+
+class BrokenStandbyRds:
+    def describe_db_instances(self, DBInstanceIdentifier):
+        raise _client_error("AccessDenied", "DescribeDBInstances")
+
+
+def test_status_keeps_the_seoul_rows_when_tokyo_cannot_be_read(monkeypatch, capsys):
+    monkeypatch.setattr(platform, "inventory", lambda c: [("VPC", platform.VPC_NAME, "vpc-1")])
+    monkeypatch.setattr(platform, "_find_tg", lambda elbv2, name: None)
+    monkeypatch.setattr(platform, "_find_vpc", lambda ec2: None)
+    platform.status({"elbv2": None, "standby": {"ec2": None, "rds": BrokenStandbyRds()}})
+    out = capsys.readouterr().out
+    assert "vpc-1" in out and "도쿄 조회 실패(ClientError)" in out
 
 
 class FakePromoteRds:
@@ -2598,9 +2708,116 @@ def test_down_deletes_the_standby_database_before_the_seoul_source(monkeypatch):
     region = {"ecs": None, "elbv2": None, "ecr": None, "sm": None, "logs": None, "ec2": None}
     c = {**region, "rds": seoul_rds, "cw": None, "sns": None, "cf": None, "waf": None, "cidp": None, "s3": None,
          "iam": None, "standby": {**region, "rds": tokyo_rds, "ssm": None}}
+    monkeypatch.setattr(platform, "_foreign_standby_resources", lambda s: [])
     platform.down(c, ACCOUNT)
     # 서울 원본을 먼저 지우면 도쿄 복제본이 독립 DB로 승격돼 남는다
     assert order == ["tokyo", "seoul"]
+
+
+def test_down_deletes_nothing_when_tokyo_cannot_be_read(monkeypatch):
+    deleted: list[str] = []
+    for name in ("_delete_alarms", "_down_ecs"):
+        monkeypatch.setattr(platform, name, lambda *a, _n=name, **k: deleted.append(_n))
+    c = {"cw": None, "sns": None, "ecs": None, "standby": {"rds": BrokenStandbyRds(), "ecs": None}}
+    with pytest.raises(ClientError):
+        platform.down(c, ACCOUNT)
+    # 서울 알람만 지워지고 서울 서비스는 남는 상태가 생기지 않는다
+    assert deleted == []
+
+
+def test_down_tears_tokyo_ecs_down_before_the_seoul_alarms(monkeypatch):
+    order: list[str] = []
+    seoul_ecs, tokyo_ecs = object(), object()
+    monkeypatch.setattr(platform, "_foreign_standby_resources", lambda s: [])
+    monkeypatch.setattr(platform, "_delete_alarms", lambda cw, sns: order.append("alarms"))
+    monkeypatch.setattr(platform, "_down_ecs", lambda ecs: order.append("tokyo" if ecs is tokyo_ecs else "seoul"))
+    monkeypatch.setattr(platform, "_find_distribution", lambda cf: sys.exit("멈춤"))
+    c = {"cw": None, "sns": None, "ecs": seoul_ecs, "cf": None, "standby": {"ecs": tokyo_ecs}}
+    with pytest.raises(SystemExit):
+        platform.down(c, ACCOUNT)
+    assert order == ["tokyo", "alarms", "seoul"]
+
+
+class TaggedStandbySm:
+    def __init__(self, tags_by_name):
+        self.tags_by_name = tags_by_name
+        self.deleted: list[str] = []
+
+    def describe_secret(self, SecretId):
+        if SecretId not in self.tags_by_name:
+            raise _client_error("ResourceNotFoundException", "DescribeSecret")
+        return {"ARN": f"arn:secret:{SecretId}", "Tags": self.tags_by_name[SecretId]}
+
+
+OURS = [{"Key": platform.TAG_KEY, "Value": platform.TAG_VALUE}]
+
+
+def test_foreign_standby_resources_are_the_untagged_ones_with_our_names(monkeypatch):
+    monkeypatch.setattr(platform, "_find_db", lambda rds: {"TagList": [{"Key": "team", "Value": "other"}]})
+    sm = TaggedStandbySm({platform.SECRET_DATABASE_URL: OURS, platform.SECRET_OPENAI: []})
+    assert platform._foreign_standby_resources({"rds": None, "sm": sm}) == [
+        f"RDS {platform.DB_INSTANCE}", f"Secret {platform.SECRET_OPENAI}"]
+    monkeypatch.setattr(platform, "_find_db", lambda rds: {"TagList": OURS})
+    assert platform._foreign_standby_resources({"rds": None, "sm": TaggedStandbySm({})}) == []
+
+
+def test_standby_up_does_not_overwrite_foreign_tokyo_resources(monkeypatch):
+    created: list[str] = []
+    monkeypatch.setattr(platform, "_ensure_vpc", lambda ec2: created.append("vpc"))
+    monkeypatch.setattr(platform, "_find_db", lambda rds: {"DBInstanceStatus": "available", "TagList": []})
+    monkeypatch.setattr(platform, "_find_distribution", lambda cf: {"Id": "d"})
+    monkeypatch.setattr(platform, "_find_user_pool", lambda cidp: {"id": "pool"})
+    monkeypatch.setattr(platform, "_find_app_client", lambda cidp, pool_id: "client")
+    monkeypatch.setattr(platform, "_find_zone", lambda r53, d: "Z1")
+    monkeypatch.setattr(platform, "_get_role", lambda iam, name: {"Tags": OURS})
+    c = {"standby": {"rds": None, "sm": TaggedStandbySm({}), "ec2": None}, "rds": None, "cf": None,
+         "cidp": None, "r53": None, "iam": None}
+    with pytest.raises(SystemExit, match="덮어쓰지 않는다"):
+        platform.standby_up(c, ACCOUNT, "ap-northeast-2", "vigilantis.dev")
+    assert created == []
+
+
+def test_down_keeps_foreign_tokyo_resources(monkeypatch):
+    dbs: list[str] = []
+    secrets_deleted: list[str] = []
+    seoul_rds, tokyo_rds = object(), object()
+    foreign = [f"RDS {platform.DB_INSTANCE}", f"Secret {platform.SECRET_OPENAI}"]
+    monkeypatch.setattr(platform, "_foreign_standby_resources", lambda s: foreign)
+    monkeypatch.setattr(platform, "_down_db", lambda rds: dbs.append("tokyo" if rds is tokyo_rds else "seoul"))
+
+    class _Sm:
+        def __init__(self, region):
+            self.region = region
+
+        def delete_secret(self, SecretId, ForceDeleteWithoutRecovery):
+            secrets_deleted.append(f"{self.region}:{SecretId}")
+    for name in ("_delete_alarms", "_down_ecs", "_delete_waf", "_down_alb", "_remove_ecr_replication",
+                 "_delete_roles", "_down_vpc"):
+        monkeypatch.setattr(platform, name, lambda *a, **k: None)
+    for name in ("_find_distribution", "_find_user_pool"):
+        monkeypatch.setattr(platform, name, lambda *a, **k: None)
+    monkeypatch.setattr(platform, "_bucket_exists", lambda s3, b: False)
+
+    class _Ecr:
+        def delete_repository(self, **kwargs):
+            pass
+
+    class _Ssm:
+        def delete_parameter(self, Name):
+            pass
+
+    class _Logs:
+        def __getattr__(self, name):
+            return lambda **kwargs: {}
+    region = {"ecs": None, "elbv2": None, "ecr": _Ecr(), "logs": _Logs(), "ec2": None}
+    c = {**region, "rds": seoul_rds, "sm": _Sm("seoul"), "cw": None, "sns": None, "cf": None, "waf": None,
+         "cidp": None, "s3": None, "iam": None,
+         "standby": {**region, "rds": tokyo_rds, "sm": _Sm("tokyo"), "ssm": _Ssm()}}
+    platform.down(c, ACCOUNT)
+    assert dbs == ["seoul"]
+    assert f"tokyo:{platform.SECRET_OPENAI}" not in secrets_deleted
+    assert f"tokyo:{platform.SECRET_DATABASE_URL}" in secrets_deleted
+    assert f"seoul:{platform.SECRET_OPENAI}" in secrets_deleted
 
 
 @pytest.mark.parametrize("argv, message", [

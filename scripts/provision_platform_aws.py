@@ -35,9 +35,12 @@
 #   도쿄 대기  : ... standby-up --account <계정 ID> --domain <도메인> --yes   (up 뒤 · build 전. 재실행이 곧 동기화)
 #                도쿄(ap-northeast-1)에 RDS 교차 리전 복제본 · ECR 복제 규칙 · 비밀 사본 · origin.<도메인> 인증서를 둔다.
 #                NAT·ALB·태스크는 두지 않는다(파일럿 라이트). 플랫폼 데이터의 사본이 일본에 놓인다(국외 이전 고지 대상)
-#   도쿄 전환  : ... failover --account <계정 ID> --domain <도메인> --tag <태그> [--enable-dispatch] --yes
+#   도쿄 전환  : ... failover --account <계정 ID> --domain <도메인> --tag <태그> [--enable-dispatch]
+#                [--primary-unreachable] --yes
 #                서울 api·web 0 → 복제본 승격(되돌릴 수 없다) → 도쿄 NAT·ALB·ECS → origin.<도메인>을 도쿄 ALB로.
-#                서울 리전이 죽어 있어도 돈다. 로그인 사용자 풀은 서울이라 그동안 새 로그인은 안 된다
+#                서울 api가 멈춘 것을 확인하지 못하면 바꾸기 전에 멈춘다. 서울 ECS에 연결조차 안 될 때만
+#                --primary-unreachable로 넘어간다(운영자가 서울 api가 DB·고객 계정에 닿지 못한다고 판단한 경우).
+#                계정 확인(STS)은 도쿄로 한다. 로그인 사용자 풀은 서울이라 서울 장애 중에는 새 로그인이 안 된다
 #   전부 정리  : ... down --account <계정 ID> --yes   (로그인 사용자 풀과 그 사용자도 지운다 · 도쿄도 함께)
 #   알림(#493) : 기본 배포는 NOTIFICATION_ENABLED=false다. 켜려면 비밀 아닌 입력 JSON을 명시한다:
 #                {"enabled": true, "public_base_url": "https://…", "routes": [{tenant_id, aws_account_id,
@@ -117,7 +120,8 @@ for _p in (str(_REPO_ROOT / "apps" / "core-api"), str(_REPO_ROOT / "packages"), 
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from botocore.exceptions import BotoCoreError, ClientError  # noqa: E402
+from botocore.exceptions import BotoCoreError, ClientError, HTTPClientError  # noqa: E402
+from botocore.exceptions import ConnectionError as BotoConnectionError  # noqa: E402
 
 import config as app_config  # noqa: E402
 import onboarding_template as onboarding  # noqa: E402
@@ -244,6 +248,7 @@ CF_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 STANDBY_REGION = "ap-northeast-1"
 # 값을 서울에서 도쿄로 복사해 두는 비밀. database-url은 복사하지 않는다(도쿄 값은 복제본 호스트를 가리킨다)
 STANDBY_COPIED_SECRETS = (SECRET_OPENAI, SECRET_ORIGIN, SECRET_COGNITO_CLIENT)
+PLATFORM_SECRETS = (SECRET_DATABASE_URL, *STANDBY_COPIED_SECRETS)  # 리전마다 같은 이름으로 둔다(down이 지운다)
 # failover가 서울 없이 api를 띄우는 데 필요한 비밀 아닌 값(사용자 풀 · 공개 주소 · 온보딩 주소). 도쿄 SSM에 둔다
 STANDBY_CONFIG_PARAM = f"/{PREFIX}/standby-config"
 # 교차 리전 복제본은 그 리전의 KMS 키로 암호화한다. 서울 기본 키(aws/rds)는 리전을 넘지 못한다
@@ -1063,11 +1068,12 @@ def standby_config(pool_id: str, client_id: str, cognito_region: str, cors_origi
 
 
 # ------------------------------------------------------------------ 공통
-def _require_real_aws(expected_account: str) -> dict:
+def _require_real_aws(expected_account: str, sts_region: Optional[str] = None) -> dict:
+    """sts_region을 주면 그 리전의 STS로 묻는다. failover는 도쿄로 물어 서울 STS 장애에 막히지 않는다."""
     endpoint = endpoint_url()
     if endpoint:
         sys.exit(f"AWS_ENDPOINT_URL={endpoint} 설정됨 — 이 스크립트는 실 AWS 전용이다. 셸에서 지우고 다시 실행할 것.")
-    identity = aws_client("sts").get_caller_identity()
+    identity = aws_client("sts", sts_region).get_caller_identity()
     if identity["Account"] != expected_account:
         sys.exit(f"--account {expected_account} ≠ 호출 주체의 계정 {identity['Account']} — AWS 프로필을 확인할 것.")
     print(f"[platform] 계정 {identity['Account']} · 주체 {identity['Arn']} · 리전 {default_region()}")
@@ -1370,7 +1376,10 @@ def status(c: dict) -> None:
             print(f"  TG {name}: {', '.join(states) or '대상 없음'}")
     if c.get("standby"):
         print(f"[platform] 서브 리전({STANDBY_REGION}) 파일럿 라이트")
-        _print_rows(standby_inventory(c))
+        try:
+            _print_rows(standby_inventory(c))
+        except (ClientError, BotoCoreError) as exc:  # 도쿄 조회가 막혀도 서울 현황은 이미 보였다
+            print(f"  도쿄 조회 실패({exc.__class__.__name__}). 권한 · 연결을 확인할 것")
 
 
 # ------------------------------------------------------------------ 구성(up)
@@ -1625,13 +1634,19 @@ def _ensure_role(iam, name: str, trust: dict, description: str) -> str:
 EXEC_SECRETS = (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_COGNITO_CLIENT)  # 실행 역할이 api에 주입하는 비밀
 
 
-def _exec_secret_arns(c: dict) -> list[str]:
+def _exec_secret_arns(c: dict, standby_arns: Optional[list[str]] = None) -> list[str]:
     """실행 역할이 읽을 비밀 ARN — 서울과, 도쿄 대기 구성이 있으면 도쿄 사본까지.
 
     정책은 put_role_policy로 통째로 바뀐다. 한 리전 것만 넣으면 서울 up 재실행이 도쿄 failover의 비밀 주입을 끊는다.
+    standby_arns는 up이 서울을 바꾸기 전에 미리 본 도쿄 몫이다(_standby_preflight).
     """
-    managers = [c["sm"]] + ([c["standby"]["sm"]] if c.get("standby") else [])
-    return [arn for sm in managers for arn in (_find_secret(sm, n) for n in EXEC_SECRETS) if arn]
+    seoul = [arn for arn in (_find_secret(c["sm"], n) for n in EXEC_SECRETS) if arn]
+    return seoul + (_standby_exec_secret_arns(c) if standby_arns is None else standby_arns)
+
+
+def _standby_exec_secret_arns(c: dict) -> list[str]:
+    s = c.get("standby")
+    return [arn for arn in (_find_secret(s["sm"], n) for n in EXEC_SECRETS) if arn] if s else []
 
 
 def _ensure_roles(iam, secret_arns: list[str], user_pool_arn: str) -> dict[str, str]:
@@ -2046,11 +2061,12 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     ec2 = c["ec2"]
     custom = _require_custom_domain(c, domain) if domain else None  # 무엇이든 만들기 전에
     _require_own_alarm_resources(c["cw"], c["sns"])  # _ensure_alarms에서야 멈추면 그 앞의 VPC·RDS가 이미 선다
+    standby = _standby_preflight(c, "up", domain)  # 도쿄 조회가 막히면 서울에 손대기 전에 멈춘다
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, region)
     nat_cidrs = [f"{ip}/32" for ip in _ensure_network(ec2, vpc_id, subnets)]
     # failover 뒤라면 도쿄 NAT IP도 남긴다. 빼면 도쿄 웹의 서버 측 API 호출이 WAF에 막힌다
-    nat_cidrs = sorted(set(nat_cidrs) | set(_standby_nat_cidrs(c)))
+    nat_cidrs = sorted(set(nat_cidrs) | set(standby.nat_cidrs))
     if custom and not custom[2]:  # ALB 리스너를 세우기 전에 받아 둔다
         custom = (custom[0], custom[1], _ensure_origin_certificate(c["acm_origin"], c["r53"], custom[1], domain))
     sgs = _ensure_sgs(ec2, vpc_id, https=bool(custom))
@@ -2062,7 +2078,7 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
     _ensure_db(c["rds"], c["sm"], subnets, sgs[SG_DB])
     _ensure_repos(c["ecr"])
     login = _ensure_login(c["cidp"], c["sm"])
-    _ensure_roles(c["iam"], _exec_secret_arns(c), login["pool_arn"])
+    _ensure_roles(c["iam"], _exec_secret_arns(c, standby.secret_arns), login["pool_arn"])
     _ensure_onboarding(c["s3"], account, region)
     _ensure_logs(c["logs"])
     _ensure_cluster(c["ecs"])
@@ -2070,7 +2086,12 @@ def up(c: dict, account: str, region: str, allow_cidrs: list[str], domain: Optio
                       origin_cert_arn=custom[2] if custom else None)
     _ensure_alarms(c["cw"], c["sns"], alb, alarm_email)
     # CloudFront가 HTTPS로 부를 이름을 배포보다 먼저 세운다 — 배포가 없는 이름을 가리키는 시간이 없게
-    origin = _ensure_origin_record(c["r53"], custom[1], domain, alb) if custom else None
+    if custom and standby.api_running:
+        # failover 뒤다. 서울 ALB로 되돌리면 태스크 0인 서울을 가리킨다. 되돌리기(failback)는 수동이다
+        origin = origin_host(domain)
+        print(f"[platform] 도쿄 api가 돌고 있다(failover 뒤). {origin}은 도쿄 ALB에 그대로 둔다")
+    else:
+        origin = _ensure_origin_record(c["r53"], custom[1], domain, alb) if custom else None
     # 웹 컨테이너의 서버 측 API 호출도 CloudFront를 거친다 — NAT 공인 IP를 허용 목록에 넣는다
     # 속도 제한에서는 NAT IP를 뺀다(안전 가드 ⑦) — 같은 이유로 그 IP가 모든 사용자의 서버 측 호출을 싣는다
     # 태스크가 어느 AZ에 뜨느냐에 따라 나가는 NAT가 달라지므로 AZ별 NAT IP를 전부 넣는다
@@ -2358,6 +2379,43 @@ def _standby_nat_cidrs(c: dict) -> list[str]:
             if n.get("NatGatewayAddresses")]
 
 
+def _foreign_standby_resources(s: dict) -> list[str]:
+    """도쿄에서 이름만 같고 플랫폼 태그가 없는 DB · 비밀. standby-up은 덮어쓰지 않고, down은 지우지 않는다."""
+    foreign = []
+    db = _find_db(s["rds"])
+    if db and not is_platform_tagged(db.get("TagList", [])):
+        foreign.append(f"RDS {DB_INSTANCE}")
+    for name in PLATFORM_SECRETS:
+        try:
+            tags = s["sm"].describe_secret(SecretId=name).get("Tags", [])
+        except ClientError as exc:
+            if _code(exc) == "ResourceNotFoundException":
+                continue
+            raise
+        if not is_platform_tagged(tags):
+            foreign.append(f"Secret {name}")
+    return foreign
+
+
+def _standby_preflight(c: dict, command: str, domain: Optional[str] = None) -> SimpleNamespace:
+    """서울을 바꾸는 명령(up · deploy) 앞에서 도쿄를 한 번에 본다. 읽기만 한다.
+
+    조회가 막히면 failover 뒤인지 알 수 없다. 그대로 가면 두 리전의 api가 함께 돌거나(deploy), 서울 작업
+    도중에 멈춘다(up). 그래서 서울에 손대기 전에 멈춘다.
+    """
+    try:
+        s = c.get("standby")
+        state = SimpleNamespace(api_running=bool(s and _find_service(s["ecs"], API_SERVICE)),
+                                nat_cidrs=_standby_nat_cidrs(c), secret_arns=_standby_exec_secret_arns(c))
+    except (ClientError, BotoCoreError) as exc:
+        sys.exit(f"도쿄({STANDBY_REGION})를 조회하지 못했다({exc.__class__.__name__}). failover 뒤인지 확인할 수 없어 "
+                 f"서울 {command} 전에 멈춘다. 권한 · 연결을 확인하고 다시 돌릴 것")
+    if command == "up" and state.api_running and not domain:
+        sys.exit("도쿄 api가 돌고 있다(failover 뒤). --domain 없이 up하면 CloudFront 오리진이 태스크 0인 서울 ALB로 "
+                 "바뀐다. --domain을 함께 줄 것")
+    return state
+
+
 def standby_inventory(c: dict) -> list[tuple[str, str, Optional[str]]]:
     s = c["standby"]
     vpc_id = _find_vpc(s["ec2"])
@@ -2401,6 +2459,10 @@ def standby_up(c: dict, account: str, region: str, domain: str) -> None:
                  "up --domain을 먼저 돌릴 것")
     if not is_platform_tagged(exec_role.get("Tags", [])):
         sys.exit(f"IAM 역할 {ROLE_EXEC}에 플랫폼 태그가 없다 — 덮어쓰지 않는다")
+    foreign = _foreign_standby_resources(s)
+    if foreign:
+        sys.exit(f"도쿄에 이름만 같고 플랫폼 태그가 없는 자원이 있다({', '.join(foreign)}). 덮어쓰지 않는다. "
+                 "그 자원의 주인을 확인할 것")
     ec2 = s["ec2"]
     vpc_id = _ensure_vpc(ec2)
     subnets = _ensure_subnets(ec2, vpc_id, STANDBY_REGION)
@@ -2435,11 +2497,17 @@ def _image_exists(ecr, repo: str, tag: str) -> bool:
         raise
 
 
-def _stop_primary(c: dict) -> None:
-    """서울 api·web을 0으로 내리고 태스크가 멈추기를 잠시 기다린다.
+# 서울 ECS 엔드포인트에 연결조차 되지 않은 경우(리전 장애의 모양). 권한 거부 · 대기 시간 초과는 여기에 없다
+UNREACHABLE_ERRORS = (BotoConnectionError, HTTPClientError)
 
-    두 리전의 api가 함께 돌면 스케줄러와 디스패처가 같은 일을 두 번 한다(ADR-0010 Context 4). 서울 API가
-    응답하지 않으면(리전 장애) 경고만 하고 넘어간다. 그때는 서울 태스크가 DB에 쓰지도 못한다.
+
+def _stop_primary(c: dict, primary_unreachable: bool = False) -> None:
+    """서울 api·web을 0으로 내리고 태스크가 멈추기를 기다린다. 멈춘 것을 확인하지 못하면 failover를 멈춘다.
+
+    두 리전의 api가 함께 돌면 두 DB의 기록이 갈라지고, 두 디스패처가 고객 계정에 같은 조치를 보낸다(ADR-0010
+    Context 4). 그래서 권한 거부 · 대기 시간 초과는 승격 전에 멈춘다. 서울 ECS에 연결조차 안 되면(리전 장애)
+    운영자가 --primary-unreachable로 "서울 api가 DB · 고객 계정에 닿지 못한다"고 판단했을 때만 넘어간다.
+    이 스크립트는 그 판단을 확인하지 못한다.
     """
     ecs = c["ecs"]
     try:
@@ -2450,12 +2518,24 @@ def _stop_primary(c: dict) -> None:
         if names:
             ecs.get_waiter("services_stable").wait(cluster=CLUSTER, services=names,
                                                    WaiterConfig={"Delay": 10, "MaxAttempts": 18})
-        # 도쿄 비밀 사본을 서울 값으로 마지막으로 맞춘다(서울에 닿을 때만)
+    except UNREACHABLE_ERRORS as exc:
+        if not primary_unreachable:
+            sys.exit(f"서울 ECS에 닿지 못했다({exc.__class__.__name__}). 서울 api가 멈췄는지 확인하지 못해 승격 전에 "
+                     "멈춘다. 서울 리전 장애로 서울 api가 DB · 고객 계정에 닿지 못한다고 판단했으면 "
+                     "--primary-unreachable을 붙여 다시 돌릴 것")
+        print(f"[platform] 경고: 서울 ECS에 닿지 못했다({exc.__class__.__name__}). --primary-unreachable로 넘어간다. "
+              "서울이 돌아오면 서울 api·web을 바로 0으로 내릴 것. 도쿄 비밀은 마지막 standby-up 때의 사본으로 간다")
+        return
+    except (ClientError, BotoCoreError) as exc:  # 권한 거부 · 대기 시간 초과(WaiterError) 등
+        sys.exit(f"서울 api·web이 멈춘 것을 확인하지 못했다({exc.__class__.__name__}). 승격 전에 멈춘다. "
+                 "서울 서비스를 직접 0으로 내려 태스크가 멈춘 것을 본 뒤 다시 돌릴 것")
+    # 서울이 멈춘 것은 확인했다. 도쿄 비밀 사본을 서울 값으로 마지막으로 맞춘다. 못 맞춰도 전환은 이어 간다
+    try:
         for name in STANDBY_COPIED_SECRETS:
             _sync_secret(c["standby"]["sm"], name, _secret_value(c["sm"], name))
     except (ClientError, BotoCoreError) as exc:
-        print(f"[platform] 경고: 서울에 닿지 못했다({exc.__class__.__name__}). 서울 api가 아직 돌고 있으면 직접 0으로 "
-              "내릴 것. 도쿄 비밀은 마지막 standby-up 때의 사본으로 간다")
+        print(f"[platform] 경고: 도쿄 비밀을 서울 값으로 맞추지 못했다({exc.__class__.__name__}). "
+              "마지막 standby-up 때의 사본으로 간다")
 
 
 def _promote(rds, db: dict) -> None:
@@ -2485,8 +2565,9 @@ def _add_waf_addresses(waf, cidrs: list[str]) -> None:
         _ensure_ipset(waf, name, sorted(set(current) | set(cidrs)), label)
 
 
-def failover(c: dict, tag: str, domain: str, dispatch_enabled: bool) -> None:
-    """도쿄로 넘긴다. 서울 API를 부르는 것은 _stop_primary 하나이고, 실패해도 이어 간다.
+def failover(c: dict, tag: str, domain: str, dispatch_enabled: bool, primary_unreachable: bool = False) -> None:
+    """도쿄로 넘긴다. 서울 API를 부르는 것은 _stop_primary 하나다. 서울이 멈춘 것을 확인하지 못하면 승격 전에
+    멈추고, 서울에 연결조차 안 될 때만 primary_unreachable로 넘어간다.
 
     전역 서비스(IAM · Route53 · CloudFront · WAF)와 도쿄 리전만으로 끝난다. 로그인 사용자 풀은 서울에 있어
     서울 리전 장애 중에는 새 로그인이 안 된다. 이미 로그인한 세션은 DB(복제됨)에 있어 이어진다.
@@ -2512,7 +2593,7 @@ def failover(c: dict, tag: str, domain: str, dispatch_enabled: bool) -> None:
     if not all(secret_arns.values()):
         sys.exit("도쿄 비밀 사본이 없다 — standby-up을 먼저 돌릴 것")
 
-    _stop_primary(c)
+    _stop_primary(c, primary_unreachable)
     if dispatch_enabled and _secret_value(s["sm"], SECRET_OPENAI) == OPENAI_PLACEHOLDER:
         sys.exit(f"도쿄 {SECRET_OPENAI}가 자리표시값이다 — 디스패치를 켜려면 standby-up으로 키를 먼저 복사할 것")
     _promote(s["rds"], db)
@@ -2710,10 +2791,15 @@ def down(c: dict, account: str) -> None:
     먼저 지우면 도쿄 복제본이 독립 DB로 승격돼 남는다."""
     standby = c.get("standby")
     regional = ([standby] if standby else []) + [c]
-    # 알람이 먼저다 — 서비스를 내리는 동안 down 알람이 울리지 않게 한다
+    # 도쿄를 먼저 본다. 조회가 막히면 서울 알람만 지워진 채 멈추지 않게, 아무것도 지우기 전에 멈춘다
+    foreign = set(_foreign_standby_resources(standby)) if standby else set()
+    for name in sorted(foreign):
+        print(f"[platform] 경고: 도쿄 {name}에 플랫폼 태그가 없다. 이름만 같은 남의 자원으로 보고 지우지 않는다")
+    if standby:
+        _down_ecs(standby["ecs"])
+    # 서울 알람은 서울 서비스를 내리기 직전에 지운다. 내리는 동안 down 알람이 울리지 않게 한다
     _delete_alarms(c["cw"], c["sns"])
-    for r in regional:
-        _down_ecs(r["ecs"])
+    _down_ecs(c["ecs"])
 
     dist = _find_distribution(c["cf"])
     if dist:
@@ -2751,7 +2837,8 @@ def down(c: dict, account: str) -> None:
     for r in regional:
         _down_alb(r["elbv2"])
     for r in regional:
-        _down_db(r["rds"])
+        if not (r is standby and f"RDS {DB_INSTANCE}" in foreign):
+            _down_db(r["rds"])
 
     if standby:
         _remove_ecr_replication(c["ecr"], account)
@@ -2760,7 +2847,9 @@ def down(c: dict, account: str) -> None:
         for name in ECR_REPOS.values():
             _try(lambda name=name: r["ecr"].delete_repository(repositoryName=name, force=True),
                  "RepositoryNotFoundException")
-        for name in (SECRET_DATABASE_URL, SECRET_OPENAI, SECRET_ORIGIN, SECRET_COGNITO_CLIENT):
+        for name in PLATFORM_SECRETS:
+            if r is standby and f"Secret {name}" in foreign:
+                continue
             _try(lambda name=name: r["sm"].delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True),
                  "ResourceNotFoundException")
     pool = _find_user_pool(c["cidp"])
@@ -2802,6 +2891,9 @@ def main() -> None:
                              "실행되지 않는다. 켜면 OpenAI 과금 경로)")
     parser.add_argument("--notification-config", help="deploy·notification-iam: 비밀 아닌 알림 배포 입력 JSON "
                         "(enabled:true를 명시해야 켜진다 — 없으면 알림은 꺼진 채 배포된다)")
+    parser.add_argument("--primary-unreachable", action="store_true",
+                        help="failover: 서울 ECS에 연결조차 안 될 때 서울 api 정지를 확인하지 않고 넘어간다(서울 api가 "
+                             "DB · 고객 계정에 닿지 못한다고 운영자가 판단한 경우만)")
     parser.add_argument("--yes", action="store_true", help="up·deploy·down·notification-*: 실제로 바꾼다")
     args = parser.parse_args()
     if args.notification_config and args.command not in ("deploy", "notification-iam"):
@@ -2814,8 +2906,11 @@ def main() -> None:
         sys.exit(f"{args.command}에는 --domain이 필요하다 — 도쿄 ALB는 origin.<도메인> 인증서로만 CloudFront를 받는다")
     if args.command == "failover" and not args.tag:
         sys.exit("failover에는 --tag가 필요하다(복제 규칙을 건 뒤 build한 태그)")
+    if args.primary_unreachable and args.command != "failover":
+        sys.exit("--primary-unreachable은 failover에서만 쓴다")
 
-    account = _require_real_aws(args.account)["Account"]
+    # failover는 서울 리전 장애 중에도 돌아야 한다. 계정 확인을 도쿄 STS로 한다
+    account = _require_real_aws(args.account, STANDBY_REGION if args.command == "failover" else None)["Account"]
     region = default_region()
     if region == STANDBY_REGION:
         sys.exit(f"기본 리전이 서브 리전({STANDBY_REGION})이다 — 주 리전 프로필(서울)로 돌릴 것")
@@ -2867,6 +2962,7 @@ def main() -> None:
         if args.domain:
             _require_custom_domain(c, args.domain)
         _require_own_alarm_resources(c["cw"], c["sns"])
+        _standby_preflight(c, "up", args.domain)
     if not args.yes:
         if args.command == "up":
             missing = [row for row in inventory(c) if row[2] is None and row[0] != "EcsService"]
@@ -2892,20 +2988,22 @@ def main() -> None:
             _print_rows(missing)
         elif args.command == "failover":
             print(f"[platform] failover 예정 — 서울 api·web 0 → 도쿄 복제본 승격(되돌릴 수 없다) → 도쿄 NAT·ALB → "
-                  f"WAF에 도쿄 NAT IP → 도쿄 ECS(태그 {args.tag}) → origin.{args.domain}을 도쿄로. 실제로 하려면 --yes")
+                  f"WAF에 도쿄 NAT IP → 도쿄 ECS(태그 {args.tag}) → origin.{args.domain}을 도쿄로. 실제로 하려면 --yes"
+                  + (" (--primary-unreachable: 서울 ECS에 닿지 않으면 정지 확인 없이 넘어간다)"
+                     if args.primary_unreachable else ""))
             _print_rows(standby_inventory(c))
         else:
             print("[platform] 삭제 대상(플랫폼 태그 자원 + 플랫폼 VPC 안 전부, 서울 · 도쿄) — 실제로 지우려면 --yes")
             _print_rows([row for row in inventory(c) + standby_inventory(c) if row[2]])
         return
-    if args.command == "deploy" and _find_service(c["standby"]["ecs"], API_SERVICE):
+    if args.command == "deploy" and _standby_preflight(c, "deploy").api_running:
         sys.exit("도쿄 api가 돌고 있다(failover 뒤) — 서울에 배포하면 두 리전의 api가 함께 돈다. 서울로 되돌리기는 수동이다")
     if args.command == "up":
         up(c, account, region, allow_cidrs, args.domain, args.alarm_email)
     elif args.command == "standby-up":
         standby_up(c, account, region, args.domain)
     elif args.command == "failover":
-        failover(c, args.tag, args.domain, args.enable_dispatch)
+        failover(c, args.tag, args.domain, args.enable_dispatch, args.primary_unreachable)
     elif args.command == "notification-iam":
         apply_notification_policies(c["iam"], c["ecs"], notification)
     elif args.command == "deploy":
