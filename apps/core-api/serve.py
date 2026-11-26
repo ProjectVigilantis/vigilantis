@@ -26,6 +26,15 @@ import os
 import sys
 from pathlib import Path
 
+# import 경로 부트스트랩: main.py와 같은 방식이다. ③의 검증은 uvicorn이 main.py를 읽기 전에
+# notifications.routing → schemas를 import하므로 여기서도 packages를 경로에 넣어야 한다.
+# 빠지면 알림을 켠 ECS 기동이 ModuleNotFoundError: schemas로 멈춘다(2026-11-26 플랫폼 배포).
+_CORE_API = Path(__file__).resolve().parent
+_PACKAGES = _CORE_API.parents[1] / "packages"
+for _p in (str(_CORE_API), str(_PACKAGES)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 _PROFILE = "vigilantis-access"
 
 

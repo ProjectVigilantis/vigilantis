@@ -92,6 +92,23 @@ def test_routes_json_becomes_a_file_the_runtime_registry_reads(tmp_path):
     assert "NOTIFICATION_ROUTES_JSON" not in environ
 
 
+def test_routes_json_validates_in_a_fresh_interpreter(tmp_path):
+    # 운영 기동처럼 serve.py만 경로에 둔 새 인터프리터에서 검증까지 간다.
+    # pytest 프로세스는 다른 테스트가 packages를 sys.path에 넣어 두므로 이 회귀를 잡지 못한다.
+    import subprocess
+
+    code = (
+        "import json, sys; from pathlib import Path; import serve; "
+        "env = {'NOTIFICATION_ENABLED': 'true', 'NOTIFICATION_ROUTES_JSON': json.dumps({'routes': []})}; "
+        "print(serve.write_notification_routes(env, Path(sys.argv[1])))"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    done = subprocess.run([sys.executable, "-c", code, str(tmp_path)], cwd=CORE_API, env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "True"
+
+
 def test_disabled_or_absent_json_touches_nothing(tmp_path):
     for environ in ({"NOTIFICATION_ROUTES_JSON": ROUTES},
                     {"NOTIFICATION_ENABLED": "false", "NOTIFICATION_ROUTES_JSON": "{bad"}, _env()):
