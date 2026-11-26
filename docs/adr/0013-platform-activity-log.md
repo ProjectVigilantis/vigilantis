@@ -1,6 +1,6 @@
 # ADR-0013: 플랫폼 활동 로그 — 고칠 수 없는 한 테이블, 계약으로 정한 행동, 두 가지 쓰기 규칙
 
-- **Status**: Proposed (2026-11-24 — 리뷰에서 승인되면 Accepted 로 바꾼다)
+- **Status**: Accepted (2026-11-26 — 리뷰: 김세혁 · 안성일)
 - **Date**: 2026-11-24
 - **Deciders**: 김세혁(PM — 2026-11-06 회의에서 범위와 담당 결정) / 김승철(계약 · 테이블 · 기록 함수 · 조회 API) / 안성일(기록 호출 분담 동의, 2026-11-11)
 - **Refs**: #686(이 문서의 작성 이슈) · #589(닫힘, 수용 기준 7/7) · #479(11/2 설계안 코멘트) · PR #592(테이블 · 계약) · PR #620(조회 API) · PR #658(FE 타입 대조) · PR #667(알림 발송) · PR #681(신고 초안) · PR #678(구독 정지 두 자리) · [ADR-0012](0012-saas-transition-account-structure-and-tenant-model.md)(테넌트 모델) · [ADR-0010](0010-platform-deployment-saas-shape.md)(CloudFront → ALB 배치)

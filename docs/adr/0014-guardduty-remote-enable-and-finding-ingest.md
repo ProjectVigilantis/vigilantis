@@ -1,6 +1,6 @@
 # ADR-0014: GuardDuty — 고객 계정에서 원격으로 켜고, 탐지 결과를 주기 조회로 읽고, 자동 대응은 걸지 않는다
 
-- **Status**: Proposed (2026-11-24 — 리뷰에서 승인되면 Accepted 로 바꾼다)
+- **Status**: Accepted (2026-11-26 — 리뷰: 김세혁 · 안성일)
 - **Date**: 2026-11-24
 - **Deciders**: 팀 회의 2026-11-02(무조건 구현으로 올림) · 2026-11-06(원격으로 켠다 · 담당) / 김세혁(PM) / 안성일(`SEC` — 위험도 매핑과 자동 대응 제외 동의, 2026-11-09) / 김승철(권한 · 연결 확인 · 수집 · 계약)
 - **Refs**: #686(이 문서의 작성 이슈) · #588 · #479(11/2 조사 코멘트) · PR #593(켜기 · 권한) · PR #615(탐지 결과 읽기) · PR #624(켜지 못한 리전 안내 · 요금 고지) · PR #651(활동 사실 5칸 · 보호 자산 격리 후보) · SSOT §확정 결정 로그 2026-11-02 · 2026-11-06 행 · [ADR-0012](0012-saas-transition-account-structure-and-tenant-model.md)(고객 역할) · [ADR-0009](0009-real-aws-smoke-environment.md)(§4 서비스 연결 역할) · [ADR-0011](0011-pre-mitigation-latency-target.md)(자동 대응 범위) · [ADR-0013](0013-platform-activity-log.md)
