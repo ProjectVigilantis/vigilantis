@@ -116,6 +116,36 @@
 - 세션 900초는 ADR-0011의 선차단 3초 목표와 무관하지만, 테넌트별 세션이 늘면 STS 호출 한도 · 비용을 아직 재지 않았다(김승철 §7). 시연은 고객 1개라 지금은 문제가 아니다.
 - 플랫폼 운영자 표시(T-1) · 조회 범위를 요청에 싣는 방법 · 온보딩 템플릿 호스팅은 **이 ADR이 정하지 않는다.** 구현 카드가 정하고, 후속 상세 ADR이 그 결과를 적는다.
 
+## 구현 결과 (16주차 기록)
+
+> 이 절은 구현이 끝난 뒤에 쓴 기록이다(SSOT 2026-10-19 결정 — 상세는 구현 종료 뒤 실제 구현에 맞춰 쓴다). 기준은 `dev` `59f7759`이다. 위 Decision은 고치지 않았고, 결정이 코드의 어디에 어떻게 들어갔는지와 결정대로 되지 않은 자리만 적는다. 줄 번호 대신 심볼 이름으로 가리킨다.
+
+### 결정대로 들어간 것
+
+| 결정 | 구현 | 확인한 자리 |
+| --- | --- | --- |
+| §2 테넌트 문맥 | 문맥은 `contextvars`다. 고객 계정으로 나가는 호출은 `with tenant_scope(access):` 안에서 그 테넌트 자격을 쓰고, 호출부(`aws_client`)는 그대로다. 스레드 풀로 넘기는 잡은 문맥을 잡 안에서 다시 세운다. `tenant_scope(None)`은 「테넌트 없음」을 명시하며 바깥 테넌트 자격을 물려받지 않는다 | `apps/core-api/services/aws/client.py` — `tenant_scope` · `current_tenant` · `TenantContextRequired` |
+| §2 세션 900초 · 자격 캐시(Q3) | 테넌트별 갱신 자격을 프로세스에 하나 두고, 갱신 창을 만료 5분 전 권고 · 2분 전 필수로 줄였다(botocore 기본값이면 900초 세션은 받자마자 갱신 대상이라 호출마다 STS를 부른다) | 같은 파일 — `_TENANT_SESSION_SECONDS` · `_credentials_for` |
+| §2 플랫폼 자체 자원 호출 | `platform_sns_client`는 문맥 안에서도 고객 자격을 쓰지 않는다 | 같은 파일 머리말 |
+| §2 가드레일 ③ 계정 조건 | 대상 ARN의 계정 칸과 소유 테넌트 역할 ARN의 계정 칸을 비교한다. 소유 없는 기록(`None`)에는 조건을 걸지 않으며 계정으로 소유를 추론하지 않는다 | `apps/core-api/workflows.py` `in_owner_account` · 테스트 `test_rollback_guardrail_rejects_a_target_outside_the_owner_account` |
+| §3 ① 앱 정지 | 새 실행 접수는 인시던트 상태보다 먼저 정지를 보고 409 `TENANT_SUSPENDED`로 거절한다. 수집 회차는 `ACTIVE`가 아닌 테넌트를 건너뛴다 | `workflows.py` `_executable_candidate` · `services/collector.py`의 테넌트 회차 조회 |
+| §3 진행 중 실행의 마무리 | 정지 뒤에도 종료 판정과 자동 원복은 소유 테넌트 자격으로 돈다 | 테스트 `test_ongoing_judgement_after_suspension_keeps_the_owner_credentials` · `test_auto_rollback_child_runs_under_the_origin_owner_after_suspension` |
+| §3 정지를 푸는 길 | 연결 확인이 성공해도 올리는 상태는 `PENDING_CONNECTION` 하나다. 정지를 푸는 길은 `resume_tenant`뿐이고, 재개의 확인이 실패하면 `SUSPENDED` 그대로다. `ACTIVE`의 확인 실패로 자동 정지하지 않는다(정지는 사람의 판단이다) | `apps/core-api/tenant_admin.py` `verify_tenant` · `resume_tenant` · `db/repositories/tenants.py` |
+| §3 재개 전 캐시 | 연결 확인은 캐시를 거치지 않는 세션으로 묻고, 통과하면 그 테넌트의 자격 캐시를 버린다(역할을 다시 만든 고객이 옛 자격을 물려받지 않는다) | `client.py` `verification_session` · `forget_tenant` |
+| §4 WebSocket 범위 | 이벤트마다 저장된 `Incident.tenant_id`를 읽어 받는 연결의 범위 안일 때만 보낸다. 인시던트 없음 · `tenant_id` `NULL` · DB 오류는 보내지 않는다. 중앙 관리계정만 전체를 받는다 | `apps/core-api/routers/ws.py` · #535 · PR #679(세 이벤트 검증) |
+| §4 조회 범위(T-5) | 격리 회귀 테스트 함수 18개 — 인시던트 목록 · 상세 · 실행 · 종료, 자산, 메트릭, WebSocket, 정지 테넌트의 실행 · 종료(§3 조회 전용과 운영자 예외 포함) | `apps/core-api/tests/test_tenant_isolation.py` |
+| §4 수집 범위 | 테넌트 회차는 테넌트 칸(`regions` · `collect_vpc_ids`)에서 범위를 읽는다 | `services/collector.py`의 테넌트 회차 조회 |
+
+실 계정 확인은 2026-11-20에 한 번 했다 — 실 플랫폼에서 학원 계정 연결, 정지, 33분 55초 뒤 재개, 자산 재수집(#619 2026-11-20 코멘트). 확인한 회수 범위는 앱의 정지 · 재개다(4차 개정). 정지 구간에 새 수집 · 분석 · 실행이 실제로 없었는지의 서버 로그 대조는 이 기록 시점에 끝나지 않았다.
+
+### 결정과 다르게 남은 것
+
+| 결정 | 지금 코드 | 차이 |
+| --- | --- | --- |
+| §2 「문맥 없이 부르면 실패해야 한다」 | 이행 스위치 `TENANT_CONTEXT_REQUIRED`가 켜져 있을 때만 예외(`TenantContextRequired`)다. 기본값은 꺼짐이고, 플랫폼 배포(`scripts/provision_platform_aws.py`)는 `true`로 넣는다 | 배포 환경은 결정대로다. 로컬 · 테스트 · 단일 계정 도구(`scripts/stepper`)는 문맥 없는 호출이 프로세스 자격으로 나간다 |
+| §4 「학원 테넌트 연결 뒤 기존 행을 채우고 `NOT NULL`로 바꾼다」 | 뿌리 테이블 5개의 `tenant_id`는 여전히 `NULL`을 받는다(`db/models.py` `_tenant_fk`). 채우기 · `NOT NULL` 전환 마이그레이션은 없다 | 소속 없는 기록은 「테넌트 없음」으로 따로 다룬다 — 가드레일 ③은 조건을 걸지 않고, WebSocket은 중앙 관리계정에만 보낸다 |
+| §4 · §5 「전역 `COLLECT_VPC_IDS`는 테넌트 칸으로 옮긴 뒤 지운다」 | 전역 설정이 남아 있다(`config.py` `COLLECT_VPC_IDS` · `collector.py` `_runtime_config`). 테넌트 회차는 테넌트 칸을 쓴다 | 두 값이 같이 있다. 테넌트 회차(`_tenant_base_config`)는 테넌트 칸만 읽고, 전역 값은 단일 계정 회차(`collect` · `collect_and_store`)의 `_runtime_config`만 읽는다. `collect_and_store`를 부르는 곳은 로컬 도구 `scripts/stepper`다. 스위치가 켜진 배포에서 이 경로는 문맥이 없어 리전마다 실패하므로 전역 값이 테넌트 수집에 섞이지 않는다 |
+
 ## Related
 
 - 선행 결정: [ADR-0009](0009-real-aws-smoke-environment.md)(학원 계정 · 스모크 환경) · [ADR-0010](0010-platform-deployment-saas-shape.md)(플랫폼 배포 · 역할 전환) · [ADR-0004](0004-rollback-runbook-whitelist-registration.md)(실행 축 어휘 `trigger_source` · `approval_mode`) · [ADR-0007](0007-guardrail-dryrun-executor-precheck-contract.md)(가드레일 ③·④)
@@ -130,3 +160,4 @@
 - **2026-11-06 (2차 개정, 2026-11-06 팀 회의 · 김세혁 결정)**: SSOT §확정 결정 로그 2026-11-02 미납 행과 2026-11-06 행들에 맞췄다. ① 계약 만료 · 미납이면 Free로 바꾸지 않고 §3의 정지(`SUSPENDED`)로 멈춘다. 무료 요금제는 없다(§1 · §3). ② 실제 Marketplace 연동의 구조(등록 랜딩 · 권리 조회 · 계약 변경 알림 수신과 플랫폼 권한)를 만든다. 판매자 등록 · 상품 등록 · 실제 청구는 1차 개정 때의 요건(#438 §B)이 그대로라 하지 않으며, 상품 등록 전까지는 모의 계약이 권리의 원천이다(§1 · PR #590 리뷰). ③ 고객 역할에 GuardDuty 켜기와 탐지 결과 조회를 더하고 끄는 작업은 넣지 않는다(§2 · T-14). ④ AI 사용료는 Marketplace로 받지 않고, 고객 계정 Bedrock 호출로 고객 AWS 요금에 나가게 한다. 고객 역할에 모델 호출 권한을 더하고, 첫 호출 전 모델 활성화를 고객 온보딩에 넣는다(§1 · §2 · PR #587 리뷰의 안성일 질의에 대한 답 · PR #590 리뷰). 계정 구조, 역할 전환, 원격 회수의 겹과 예외, 테넌트 모델(§4)은 바꾸지 않았다.
 - **2026-11-20 (3차 개정, 김세혁 결정 · PR #683 리뷰)**: 2차 개정 ④(AI 사용료를 고객 계정 Bedrock 호출로 고객 AWS 요금에 나가게 하고, 고객 역할에 모델 호출 권한을, 고객 온보딩에 첫 호출 전 모델 활성화를 더한 것)는 설계로 두고, 이 프로젝트의 구현 범위를 따로 정했다. SecOps 분석 · FinOps 분석 · 절감 단가 조회 · 신고 초안 작성의 모델 호출은 플랫폼이 관리하는 자격으로 제공자 직접 API를 부르고(§1), 현재 고객 역할 정책과 고객 온보딩에는 모델 호출 권한과 모델 활성화 단계가 없다(§2). 이유는 학원 계정에서 쓰려던 Bedrock 모델의 접근이 막혀 있고(#649), 이 프로젝트가 학원 계정을 고객으로 삼는, 끝이 정해진 교육과정 팀 프로젝트로 상용 운영 계획이 없기 때문이다. 2차 개정의 처리 리전 확인 문구는 그대로 두고, 직접 API 경로의 국외 처리와 개인정보 처리방침 정합을 더했다(§1). 직접 API 경로의 모델 사용료가 청구되는 곳은 결과에 적었다. 2차 개정 ①–③(만료 · 미납 정지, 모의 계약과 Marketplace 실연동 구조, GuardDuty 권한), 고객 역할 전환(AssumeRole · `ExternalId`), 원격 회수, 테넌트 모델(§4)도 바꾸지 않았다.
 - **2026-11-24 (4차 개정, 김세혁 결정 · PR #688 리뷰)**: [플랫폼 역할 정책](../../scripts/provision_platform_aws.py)이 고객별 목록 대신 패턴 하나를 쓰므로([ADR-0010](0010-platform-deployment-saas-shape.md) 5차 개정), 원격 회수를 앱 정지 · 고객 쪽 회수 · 세션 상한으로 바로잡았다. 11/20 T-4 실측(#619 코멘트)이 확인한 회수 범위는 앱의 정지·재개다.
+- **2026-11-26 (구현 결과 기록 — 결정 변경 없음)**: 「구현 결과 (16주차 기록)」 절을 더했다. `dev` `59f7759` 기준으로 §2–§4의 결정이 들어간 자리와, 결정과 다르게 남은 세 자리(문맥 강제 스위치의 기본값 · 뿌리 테이블 `tenant_id`의 `NOT NULL` 미전환 · 전역 `COLLECT_VPC_IDS` 잔존)를 적었다. Decision 본문은 고치지 않았다.
